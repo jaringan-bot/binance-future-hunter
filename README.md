@@ -2,19 +2,27 @@
 
 MCP server yang menyediakan data publik Binance USDS-M Futures (funding rate,
 open interest, long/short ratio, taker volume, candlestick) sebagai tools
-yang bisa dipanggil Claude. Semua endpoint yang dipakai adalah endpoint
-**publik read-only** — tidak butuh API key, tidak bisa melakukan order atau
-mengakses data akun pribadi.
+yang bisa dipanggil Claude. Semua data yang disajikan bersifat **publik
+read-only** — tidak ada order/trading, tidak ada akses ke data akun pribadi.
+
+**Sumber data: Coinalyze, bukan Binance API langsung.** Semua domain Binance
+(`fapi.binance.com`, `www.binance.com`) memblokir traffic dari Cloudflare
+Workers di level WAF (403, company-wide — sudah dites langsung dari worker
+ini, bukan asumsi). [Coinalyze](https://coinalyze.net) meng-agregasi ulang
+data yang sama (sumber asli tetap Binance) dan API-nya sendiri di-hosting di
+Cloudflare, jadi tidak kena block yang sama. Konsekuensinya: worker ini
+**butuh `COINALYZE_API_KEY`** (gratis, signup di coinalyze.net) — lihat
+bagian Setup di bawah.
 
 ## Yang disediakan
 
 | Tool | Fungsi |
 |---|---|
-| `binance_get_funding_rate` | Funding rate + mark price terkini |
+| `binance_get_funding_rate` | Funding rate terkini |
 | `binance_get_funding_rate_history` | Tren funding rate dari waktu ke waktu |
 | `binance_get_open_interest` | OI snapshot terkini |
 | `binance_get_open_interest_history` | Tren OI naik/turun |
-| `binance_get_long_short_ratio` | Perbandingan retail (global account) vs whale (top trader position) — inti strategi kontrarian |
+| `binance_get_long_short_ratio` | Rasio long vs short agregat (blended, semua trader) + tren |
 | `binance_get_taker_volume_ratio` | Tekanan beli/jual agresif (taker volume) |
 | `binance_get_klines` | Candlestick OHLCV per timeframe |
 | `binance_get_multi_timeframe_bias` | Bias Bullish/Bearish/Sideways di 5 timeframe sekaligus (1m/5m/15m/1h/1d) |
@@ -22,19 +30,32 @@ mengakses data akun pribadi.
 
 ## Keterbatasan yang jujur perlu diketahui
 
-- **Long/short ratio dan funding rate adalah data agregat**, bukan lokasi stop-loss
-  individual. Tool `binance_get_long_short_ratio` memberi *proxy* divergence
-  retail-vs-whale, bukan kepastian.
-- **Belum di-test terhadap response API Binance yang sesungguhnya di production.**
-  Struktur data di `src/binanceClient.ts` ditulis berdasarkan dokumentasi resmi
-  Binance, bukan hasil pemanggilan langsung (lingkungan development awal tidak
-  punya akses jaringan ke domain Binance). Setelah deploy pertama, tes tiap tool
-  sekali secara manual — kalau ada yang error, cek pesan errornya dan bandingkan
-  dengan dokumentasi resmi di
-  https://developers.binance.com/docs/derivatives/usds-margined-futures
-- Data histori OI dan funding rate dibatasi Binance ke ~30 hari terakhir.
-- Tidak ada data tick-level order book atau data wallet on-chain — ini di
-  luar cakupan API publik Binance Futures.
+- **Long/short ratio adalah rasio agregat BLENDED**, bukan breakdown terpisah
+  "global account (retail)" vs "top trader (whale)" seperti API resmi Binance.
+  Coinalyze (sumber data worker ini) cuma punya satu ratio gabungan. Provider
+  yang punya breakdown itu (CoinGlass, CoinAnk) semua berbayar — sudah dicek,
+  tidak ada versi gratisnya per Agustus 2026.
+- **24hr ticker dan taker buy/sell ratio adalah hasil derivasi**, bukan angka
+  resmi dari endpoint ticker Binance — dihitung dari data candlestick (OHLCV)
+  Coinalyze. Cukup akurat untuk overview, tapi bukan 1:1 sama persis dengan
+  yang ditampilkan di Binance.
+- Data histori OI dan funding rate dibatasi ketersediaannya oleh Coinalyze
+  (umumnya beberapa bulan terakhir, tergantung symbol).
+- Tidak ada data tick-level order book atau data wallet on-chain.
+- Coinalyze free tier: rate limit 40 request/menit per API key.
+
+## Setup Coinalyze API Key (wajib, sekali saja)
+
+1. Daftar gratis di https://coinalyze.net
+2. Ambil API key dari halaman akun
+3. Set sebagai secret worker (bukan di `wrangler.toml`, bukan hardcode):
+   ```bash
+   npx wrangler secret put COINALYZE_API_KEY
+   ```
+   (paste API key saat diminta)
+
+Tanpa secret ini, semua tool call akan gagal dengan pesan error yang jelas
+("COINALYZE_API_KEY belum diset").
 
 ## Setup Deploy Otomatis (GitHub Actions → Cloudflare Workers)
 
