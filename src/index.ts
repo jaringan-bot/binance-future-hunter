@@ -1,5 +1,10 @@
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { createServer } from "./server.js";
+import * as binance from "./binanceClient.js";
+
+interface Env {
+  BINANCE_API_KEY?: string;
+}
 
 // Server ini STATELESS (sessionIdGenerator: undefined): setiap request
 // membuat instance server + transport baru. Ini pola resmi yang
@@ -23,7 +28,8 @@ function withCors(response: Response): Response {
 }
 
 export default {
-  async fetch(request: Request): Promise<Response> {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    binance.setApiKey(env.BINANCE_API_KEY);
     const url = new URL(request.url);
 
     if (request.method === "OPTIONS") {

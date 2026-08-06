@@ -6,6 +6,15 @@
 
 const BASE_URL = "https://fapi.binance.com";
 
+// Opsional: kalau diset, dikirim sebagai header X-MBX-APIKEY. Endpoint di
+// file ini semua publik (tidak butuh signing), tapi beberapa deployment
+// Binance memperlakukan request ber-API-key lebih longgar di WAF-nya.
+let apiKey: string | undefined;
+
+export function setApiKey(key: string | undefined) {
+  apiKey = key;
+}
+
 export class BinanceApiError extends Error {
   constructor(
     message: string,
@@ -31,7 +40,10 @@ async function callBinance<T>(
   let response: Response;
   try {
     response = await fetch(url.toString(), {
-      headers: { Accept: "application/json" },
+      headers: {
+        Accept: "application/json",
+        ...(apiKey ? { "X-MBX-APIKEY": apiKey } : {}),
+      },
     });
   } catch (err) {
     throw new BinanceApiError(
