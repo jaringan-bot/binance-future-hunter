@@ -1,0 +1,13 @@
+name: Test Binance connectivity (temporary)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Curl fapi.binance.com from GitHub-hosted runner
+        run: |
+          curl -s -o /dev/null -w "HTTP %{http_code}\n" https://fapi.binance.com/fapi/v1/ping
+          curl -s https://fapi.binance.com/fapi/v1/ping
