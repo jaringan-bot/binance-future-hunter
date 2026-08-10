@@ -152,6 +152,12 @@ export interface LongShortBar {
   s: number;
 }
 
+export interface LiquidationBar {
+  t: number;
+  l: number;
+  s: number;
+}
+
 interface HistorySeries<T> {
   symbol: string;
   history: T[];
@@ -226,6 +232,24 @@ export async function getLongShortRatioHistory(
     interval,
     from,
     to,
+  });
+  return data[0]?.history ?? [];
+}
+
+export async function getLiquidationHistory(
+  symbol: string,
+  intervalKey: string,
+  limit: number,
+): Promise<LiquidationBar[]> {
+  const sym = toCoinalyzeSymbol(symbol);
+  const interval = INTERVAL_MAP[intervalKey] ?? "1hour";
+  const { from, to } = rangeFor(intervalKey, limit);
+  const data = await callCoinalyze<HistorySeries<LiquidationBar>[]>("/liquidation-history", {
+    symbols: sym,
+    interval,
+    from,
+    to,
+    convert_to_usd: "false",
   });
   return data[0]?.history ?? [];
 }
