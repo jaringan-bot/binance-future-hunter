@@ -37,6 +37,7 @@ dan `PROXY_URL`/`PROXY_SECRET` (proxy Vercel) — lihat bagian Setup di bawah.
 | `binance_get_long_short_ratio` | Rasio long vs short agregat (blended, semua trader) + tren | Coinalyze |
 | `binance_get_top_trader_ratio` | Rasio long/short KHUSUS top trader (breakdown murni, akun atau size posisi) | Binance native |
 | `binance_get_order_book_depth` | Snapshot order book (bid/ask), spread, wall terbesar | Binance native |
+| `binance_get_order_book_imbalance` | Imbalance volume bid vs ask di depth 5/10/20, dengan label bias (BULLISH/BEARISH/SEIMBANG) | Binance native |
 | `binance_get_agg_trades` | Trade individual granular (buy/sell aggressor) untuk deteksi absorption | Binance native |
 | `binance_get_liquidation_history` | Histori liquidation | Coinalyze |
 | `binance_get_taker_volume_ratio` | Tekanan beli/jual agresif (taker volume), derivasi dari OHLCV | Coinalyze |
