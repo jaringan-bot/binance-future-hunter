@@ -1,48 +1,72 @@
 # Binance Futures MCP Server (whale)
 
 MCP server yang menyediakan data publik Binance USDS-M Futures (funding rate,
-open interest, long/short ratio, taker volume, candlestick) sebagai tools
-yang bisa dipanggil Claude. Semua data yang disajikan bersifat **publik
-read-only** — tidak ada order/trading, tidak ada akses ke data akun pribadi.
+open interest, long/short ratio, taker volume, candlestick, order book,
+volatility) sebagai tools yang bisa dipanggil Claude. Semua data yang
+disajikan bersifat **publik read-only** — tidak ada order/trading, tidak ada
+akses ke data akun pribadi.
 
-**Sumber data: Coinalyze, bukan Binance API langsung.** Semua domain Binance
-(`fapi.binance.com`, `www.binance.com`) memblokir traffic dari Cloudflare
-Workers di level WAF (403, company-wide — sudah dites langsung dari worker
-ini, bukan asumsi). [Coinalyze](https://coinalyze.net) meng-agregasi ulang
-data yang sama (sumber asli tetap Binance) dan API-nya sendiri di-hosting di
-Cloudflare, jadi tidak kena block yang sama. Konsekuensinya: worker ini
-**butuh `COINALYZE_API_KEY`** (gratis, signup di coinalyze.net) — lihat
-bagian Setup di bawah.
+**Sumber data: dua jalur, tergantung tool.**
+
+- **Binance native, lewat proxy relay Vercel.** Domain Binance
+  (`fapi.binance.com`) memblokir traffic dari Cloudflare Workers di level WAF
+  (403, company-wide — sudah dites langsung dari worker ini, bukan asumsi).
+  Vercel pakai IP pool berbeda, jadi tidak kena block yang sama. Worker
+  Cloudflare relay lewat proxy kecil di `proxy/` (project Vercel terpisah,
+  lihat `proxy/README.md`). Ini jalur untuk funding rate (current & histori),
+  klines/OHLCV, bias multi-timeframe, realized volatility, statistik 24 jam,
+  top-trader long/short ratio, order book depth, dan aggregate trades.
+- **[Coinalyze](https://coinalyze.net)**, untuk data yang belum (atau sengaja
+  belum) dipindah ke jalur native: open interest, long/short ratio blended
+  (semua trader), histori liquidation, dan taker buy/sell volume ratio.
+  Coinalyze meng-agregasi ulang data yang sama (sumber asli tetap Binance)
+  dan API-nya sendiri di-hosting di Cloudflare, jadi tidak kena block yang
+  sama.
+
+Konsekuensinya, worker ini butuh **dua set kredensial**: `COINALYZE_API_KEY`
+dan `PROXY_URL`/`PROXY_SECRET` (proxy Vercel) — lihat bagian Setup di bawah.
 
 ## Yang disediakan
 
-| Tool | Fungsi |
-|---|---|
-| `binance_get_funding_rate` | Funding rate terkini |
-| `binance_get_funding_rate_history` | Tren funding rate dari waktu ke waktu |
-| `binance_get_open_interest` | OI snapshot terkini |
-| `binance_get_open_interest_history` | Tren OI naik/turun |
-| `binance_get_long_short_ratio` | Rasio long vs short agregat (blended, semua trader) + tren |
-| `binance_get_taker_volume_ratio` | Tekanan beli/jual agresif (taker volume) |
-| `binance_get_klines` | Candlestick OHLCV per timeframe |
-| `binance_get_multi_timeframe_bias` | Bias Bullish/Bearish/Sideways di 5 timeframe sekaligus (1m/5m/15m/1h/1d) |
-| `binance_get_realized_volatility` | Realized volatility historis (15m/1h) dari log-return, untuk kalibrasi lebar grid |
-| `binance_get_24hr_ticker` | Ringkasan statistik 24 jam |
+| Tool | Fungsi | Sumber |
+|---|---|---|
+| `binance_get_funding_rate` | Funding rate terkini + basis (deviasi mark vs index price) | Binance native |
+| `binance_get_funding_rate_history` | Tren funding rate dari waktu ke waktu | Binance native |
+| `binance_get_open_interest` | OI snapshot terkini | Coinalyze |
+| `binance_get_open_interest_history` | Tren OI naik/turun | Coinalyze |
+| `binance_get_long_short_ratio` | Rasio long vs short agregat (blended, semua trader) + tren | Coinalyze |
+| `binance_get_top_trader_ratio` | Rasio long/short KHUSUS top trader (breakdown murni, akun atau size posisi) | Binance native |
+| `binance_get_order_book_depth` | Snapshot order book (bid/ask), spread, wall terbesar | Binance native |
+| `binance_get_agg_trades` | Trade individual granular (buy/sell aggressor) untuk deteksi absorption | Binance native |
+| `binance_get_liquidation_history` | Histori liquidation | Coinalyze |
+| `binance_get_taker_volume_ratio` | Tekanan beli/jual agresif (taker volume), derivasi dari OHLCV | Coinalyze |
+| `binance_get_klines` | Candlestick OHLCV per timeframe | Binance native |
+| `binance_get_multi_timeframe_bias` | Bias Bullish/Bearish/Sideways di 5 timeframe sekaligus (1m/5m/15m/1h/1d) | Binance native |
+| `binance_get_realized_volatility` | Realized volatility historis (15m/1h) dari log-return, untuk kalibrasi lebar grid | Binance native |
+| `binance_get_24hr_ticker` | Ringkasan statistik 24 jam (rolling window resmi) | Binance native |
 
 ## Keterbatasan yang jujur perlu diketahui
 
-- **Long/short ratio adalah rasio agregat BLENDED**, bukan breakdown terpisah
-  "global account (retail)" vs "top trader (whale)" seperti API resmi Binance.
-  Coinalyze (sumber data worker ini) cuma punya satu ratio gabungan. Provider
-  yang punya breakdown itu (CoinGlass, CoinAnk) semua berbayar — sudah dicek,
-  tidak ada versi gratisnya per Agustus 2026.
-- **24hr ticker dan taker buy/sell ratio adalah hasil derivasi**, bukan angka
-  resmi dari endpoint ticker Binance — dihitung dari data candlestick (OHLCV)
+- **Long/short ratio (`binance_get_long_short_ratio`) adalah rasio agregat
+  BLENDED**, bukan breakdown terpisah "global account (retail)" vs "top
+  trader (whale)". Untuk breakdown murni top-trader, pakai
+  `binance_get_top_trader_ratio` (sudah native Binance, terpisah dari tool
+  ini).
+- **Taker buy/sell ratio adalah hasil derivasi**, bukan angka resmi dari
+  endpoint taker ratio Binance — dihitung dari data candlestick (OHLCV)
   Coinalyze. Cukup akurat untuk overview, tapi bukan 1:1 sama persis dengan
   yang ditampilkan di Binance.
-- Data histori OI dan funding rate dibatasi ketersediaannya oleh Coinalyze
-  (umumnya beberapa bulan terakhir, tergantung symbol).
-- Tidak ada data tick-level order book atau data wallet on-chain.
+- **Basis funding rate bisa noisy untuk pair kecil/baru listing** — index
+  price Binance adalah rata-rata tertimbang dari beberapa exchange spot,
+  salah satunya bisa illikuid untuk pair semacam itu.
+- **Order book depth adalah snapshot sesaat** — wall besar bisa hilang dalam
+  hitungan detik (potensi spoofing), jangan overinterpretasi satu snapshot.
+- **Threshold "top trader" tidak dipublikasikan Binance secara pasti**, dan
+  datanya snapshot periodik, bukan real-time tick-by-tick.
+- Data histori OI (`binance_get_open_interest_history`) dibatasi
+  ketersediaannya oleh Coinalyze (umumnya beberapa bulan terakhir, tergantung
+  symbol).
+- Tidak ada data wallet on-chain.
 - Coinalyze free tier: rate limit 40 request/menit per API key.
 
 ## Setup Coinalyze API Key (wajib, sekali saja)
@@ -55,8 +79,34 @@ bagian Setup di bawah.
    ```
    (paste API key saat diminta)
 
-Tanpa secret ini, semua tool call akan gagal dengan pesan error yang jelas
-("COINALYZE_API_KEY belum diset").
+Tanpa secret ini, tool yang bersumber Coinalyze (lihat tabel di atas) akan
+gagal dengan pesan error yang jelas ("COINALYZE_API_KEY belum diset").
+
+## Setup Proxy Vercel (wajib, sekali saja)
+
+Tool berlabel "Binance native" di tabel atas butuh proxy relay di Vercel,
+karena worker Cloudflare diblokir langsung oleh WAF Binance. Detail deploy
+proxy ada di `proxy/README.md` — ringkasnya:
+
+1. Deploy folder `proxy/` sebagai project Vercel terpisah (Root Directory =
+   `proxy`), set env var `PROXY_SECRET` di Vercel (string acak, generate
+   sendiri, misal `openssl rand -hex 32`).
+2. Set dua secret ini di worker Cloudflare:
+   ```bash
+   npx wrangler secret put PROXY_URL
+   npx wrangler secret put PROXY_SECRET
+   ```
+   `PROXY_URL` = URL project Vercel (contoh `https://whale-pearl.vercel.app`),
+   `PROXY_SECRET` = string yang sama persis dengan yang di-set di Vercel.
+
+Tanpa dua secret ini, tool berlabel "Binance native" akan gagal dengan pesan
+error yang jelas ("PROXY_URL atau PROXY_SECRET belum diset di worker").
+
+**Penting**: jangan pernah buat secret Cloudflare dengan VALUE sebagai NAME
+(misal `wrangler secret put` lalu tidak sengaja paste value di prompt nama).
+`wrangler secret list` hanya boleh membocorkan nama secret, tidak pernah
+value — kesalahan ini membuat value asli bocor lewat command yang seharusnya
+aman.
 
 ## Setup Deploy Otomatis (GitHub Actions → Cloudflare Workers)
 
@@ -125,12 +175,16 @@ Setelah custom domain aktif, worker bisa diakses di
 
 ## Uji coba manual sebelum daftar ke Claude (disarankan)
 
+Tidak ada test suite otomatis di repo ini — `npm run typecheck` adalah satu-
+satunya automated check. Verifikasi tool baru/berubah dilakukan manual lewat
+`wrangler dev` + curl JSON-RPC.
+
 ```bash
 npm install
 npx wrangler dev
 ```
 
-Di terminal lain:
+Di terminal lain, contoh untuk tool Binance native:
 ```bash
 curl -X POST http://localhost:8787/mcp \
   -H "Content-Type: application/json" \
@@ -146,11 +200,18 @@ curl -X POST http://localhost:8787/mcp \
   }'
 ```
 
-Kalau ini mengembalikan data funding rate BTCUSDT yang valid, server bekerja
-dan siap dipakai.
+Kalau ini mengembalikan data funding rate + basis BTCUSDT yang valid, jalur
+proxy Vercel bekerja. Untuk tool Coinalyze, ganti `name` ke misalnya
+`binance_get_open_interest` — kalau itu juga valid, jalur Coinalyze bekerja.
 
 ## Biaya
 
-Cloudflare Workers punya free tier 100.000 request/hari — untuk pemakaian
-personal trading analysis ini jauh dari cukup, kemungkinan besar kamu tidak
-akan pernah kena biaya.
+- Cloudflare Workers: free tier 100.000 request/hari — untuk pemakaian
+  personal trading analysis ini jauh dari cukup.
+- Vercel (proxy relay): free tier Hobby plan mencakup jutaan invocation/bulan
+  untuk serverless function — tidak akan kena biaya untuk pemakaian personal.
+  Perhatikan: `PROXY_SECRET` wajib dijaga kerahasiaannya, karena siapapun
+  yang tahu URL + secret bisa memakai quota proxy ini atas nama kamu.
+
+Kemungkinan besar kamu tidak akan pernah kena biaya di kedua platform untuk
+pemakaian personal.

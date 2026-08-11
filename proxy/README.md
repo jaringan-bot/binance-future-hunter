@@ -5,6 +5,12 @@ langsung, dipakai sebagai jalur alternatif karena worker Cloudflare
 (`whale.jaringan.dev` di root repo ini) diblokir total oleh WAF Binance
 (HTTP 403 di semua endpoint termasuk `/fapi/v1/ping`).
 
+Awalnya cuma dipakai untuk beberapa endpoint (depth, aggTrades, top-trader
+ratio). Sejak dipindahnya funding rate & klines dari Coinalyze ke Binance
+native (fix bug presisi harga & skala funding untuk pair kecil), proxy ini
+jadi jalur utama untuk sebagian besar tool di worker — lihat README root
+repo untuk daftar lengkap tool per sumber data.
+
 ## Kenapa terpisah dari worker utama
 
 Ini FOLDER TERPISAH (`proxy/`) di dalam repo yang sama, tapi di-deploy sebagai
@@ -44,9 +50,15 @@ di `api/binance.ts`):
 - `/fapi/v1/ping` — baseline konektivitas
 - `/fapi/v1/depth` — order book depth
 - `/fapi/v1/aggTrades` — aggregate trades (untuk CVD granular)
+- `/fapi/v1/fundingRate` — histori funding rate (settled)
+- `/fapi/v1/premiumIndex` — funding rate terkini + mark/index price (basis)
+- `/fapi/v1/klines` — candlestick OHLCV (dipakai juga oleh multi-timeframe
+  bias & realized volatility)
+- `/fapi/v1/ticker/24hr` — statistik 24 jam resmi
 - `/futures/data/topLongShortAccountRatio` — top-trader ratio (akun)
 - `/futures/data/topLongShortPositionRatio` — top-trader ratio (posisi)
-- `/futures/data/globalLongShortAccountRatio` — ratio global (semua akun)
+- `/futures/data/globalLongShortAccountRatio` — ratio global (semua akun,
+  sudah di-whitelist tapi belum dipakai tool manapun di worker per saat ini)
 
 Untuk menambah path baru, edit whitelist `ALLOWED_PATHS` di `api/binance.ts`
 — JANGAN buka proxy generic tanpa whitelist, supaya proxy ini tidak jadi
