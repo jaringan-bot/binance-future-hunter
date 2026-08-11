@@ -19,12 +19,19 @@
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 
-const BINANCE_BASE = "https://fapi.binance.com";
+// Dua base URL: Futures (fapi, default) dan Spot (api) — dipilih lewat query
+// param 'market' ('futures' default, atau 'spot'). Spot ditambahkan supaya
+// worker bisa hitung basis futures-vs-spot riil (bukan cuma vs index price
+// blended), berguna untuk pair likuid yang punya listing spot di Binance.
+const BASE_BY_MARKET: Record<string, string> = {
+  futures: "https://fapi.binance.com",
+  spot: "https://api.binance.com",
+};
 
-// Whitelist path yang boleh diteruskan — JANGAN buka proxy generic tanpa
-// whitelist, supaya proxy ini tidak bisa disalahgunakan untuk hit endpoint
-// Binance sembarangan (termasuk endpoint yang butuh API key/trading, yang
-// TIDAK boleh lewat proxy publik seperti ini).
+// Whitelist path per market — JANGAN buka proxy generic tanpa whitelist,
+// supaya proxy ini tidak bisa disalahgunakan untuk hit endpoint Binance
+// sembarangan (termasuk endpoint yang butuh API key/trading, yang TIDAK
+// boleh lewat proxy publik seperti ini).
 //
 // fundingRate/premiumIndex/klines/ticker-24hr ditambahkan supaya worker bisa
 // pakai Binance sebagai source of truth untuk funding rate & harga OHLC,
@@ -35,21 +42,27 @@ const BINANCE_BASE = "https://fapi.binance.com";
 // open interest dan taker buy/sell ratio juga bisa pindah dari Coinalyze
 // ke Binance native (endpoint publik resmi, tidak perlu agregator pihak
 // ketiga untuk data ini).
-const ALLOWED_PATHS = new Set([
-  "/fapi/v1/ping",
-  "/fapi/v1/depth",
-  "/fapi/v1/aggTrades",
-  "/fapi/v1/fundingRate",
-  "/fapi/v1/premiumIndex",
-  "/fapi/v1/klines",
-  "/fapi/v1/ticker/24hr",
-  "/fapi/v1/openInterest",
-  "/futures/data/topLongShortAccountRatio",
-  "/futures/data/topLongShortPositionRatio",
-  "/futures/data/globalLongShortAccountRatio",
-  "/futures/data/openInterestHist",
-  "/futures/data/takerlongshortRatio",
-]);
+const ALLOWED_PATHS_BY_MARKET: Record<string, Set<string>> = {
+  futures: new Set([
+    "/fapi/v1/ping",
+    "/fapi/v1/depth",
+    "/fapi/v1/aggTrades",
+    "/fapi/v1/fundingRate",
+    "/fapi/v1/premiumIndex",
+    "/fapi/v1/klines",
+    "/fapi/v1/ticker/24hr",
+    "/fapi/v1/openInterest",
+    "/futures/data/topLongShortAccountRatio",
+    "/futures/data/topLongShortPositionRatio",
+    "/futures/data/globalLongShortAccountRatio",
+    "/futures/data/openInterestHist",
+    "/futures/data/takerlongshortRatio",
+  ]),
+  // Spot cuma expose ticker/price (harga spot mentah) — sengaja minimal,
+  // tambah path lain di sini kalau ada kebutuhan baru (klines spot, depth
+  // spot, dst).
+  spot: new Set(["/api/v3/ticker/price"]),
+};
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   // CORS minimal — proxy ini dipanggil server-to-server dari worker Cloudflare,
@@ -79,23 +92,35 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return;
   }
 
-  const path = req.query.path;
-  if (typeof path !== "string" || !ALLOWED_PATHS.has(path)) {
+  const marketParam = req.query.market;
+  const market = typeof marketParam === "string" && marketParam ? marketParam : "futures";
+  const binanceBase = BASE_BY_MARKET[market];
+  const allowedPaths = ALLOWED_PATHS_BY_MARKET[market];
+  if (!binanceBase || !allowedPaths) {
     res.status(400).json({
-      error: "Parameter 'path' wajib diisi dan harus salah satu dari whitelist.",
-      allowedPaths: Array.from(ALLOWED_PATHS),
+      error: "Parameter 'market' tidak dikenali, harus salah satu dari: futures, spot.",
     });
     return;
   }
 
-  // Teruskan semua query param LAIN (selain 'path') apa adanya ke Binance.
+  const path = req.query.path;
+  if (typeof path !== "string" || !allowedPaths.has(path)) {
+    res.status(400).json({
+      error: "Parameter 'path' wajib diisi dan harus salah satu dari whitelist market ini.",
+      market,
+      allowedPaths: Array.from(allowedPaths),
+    });
+    return;
+  }
+
+  // Teruskan semua query param LAIN (selain 'path' dan 'market') apa adanya ke Binance.
   const forwardParams = new URLSearchParams();
   for (const [key, value] of Object.entries(req.query)) {
-    if (key === "path") continue;
+    if (key === "path" || key === "market") continue;
     if (typeof value === "string") forwardParams.set(key, value);
   }
 
-  const targetUrl = `${BINANCE_BASE}${path}${forwardParams.toString() ? `?${forwardParams.toString()}` : ""}`;
+  const targetUrl = `${binanceBase}${path}${forwardParams.toString() ? `?${forwardParams.toString()}` : ""}`;
 
   try {
     const binanceRes = await fetch(targetUrl, {

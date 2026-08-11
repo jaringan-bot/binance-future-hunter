@@ -39,6 +39,9 @@ const PROXY_ALLOWED_PATHS = new Set([
   "/futures/data/globalLongShortAccountRatio",
   "/futures/data/openInterestHist",
   "/futures/data/takerlongshortRatio",
+  // Spot (lihat proxy/api/binance.ts market='spot') — dipakai untuk basis
+  // futures-vs-spot riil, bukan cuma vs index price blended.
+  "/api/v3/ticker/price",
 ]);
 
 let proxyUrl: string | undefined;
@@ -63,6 +66,7 @@ export class BinanceProxyError extends Error {
 async function callProxy<T>(
   path: string,
   params: Record<string, string | number | undefined> = {},
+  market: "futures" | "spot" = "futures",
 ): Promise<T> {
   if (!path.startsWith("/") || !PROXY_ALLOWED_PATHS.has(path)) {
     throw new BinanceProxyError(
@@ -81,6 +85,7 @@ async function callProxy<T>(
 
   const url = new URL(`${proxyUrl}/api/binance`);
   url.searchParams.set("path", path);
+  if (market !== "futures") url.searchParams.set("market", market);
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined) {
       url.searchParams.set(key, String(value));
@@ -370,4 +375,19 @@ export interface Ticker24hr {
 
 export async function getTicker24hrNative(symbol: string): Promise<Ticker24hr> {
   return callProxy<Ticker24hr>("/fapi/v1/ticker/24hr", { symbol: symbol.toUpperCase() });
+}
+
+// ─────────────────────────────────────────────────────────────
+// SPOT PRICE — harga spot Binance (bukan Futures), dipakai untuk hitung
+// basis futures-vs-spot riil. Kalau symbol tidak listed di Binance Spot
+// (banyak pair futures-only kayak koin baru), Binance balas error yang
+// diteruskan lewat BinanceProxyError.
+// ─────────────────────────────────────────────────────────────
+export interface SpotPrice {
+  symbol: string;
+  price: string;
+}
+
+export async function getSpotPrice(symbol: string): Promise<SpotPrice> {
+  return callProxy<SpotPrice>("/api/v3/ticker/price", { symbol: symbol.toUpperCase() }, "spot");
 }

@@ -32,21 +32,29 @@ platform lain.
 ## Endpoint
 
 ```
-GET /api/binance?path=<binance-path>&<param-lain>
+GET /api/binance?path=<binance-path>&market=<futures|spot>&<param-lain>
 Header: x-proxy-secret: <PROXY_SECRET>
 ```
+
+`market` opsional, default `futures`. Isi `spot` untuk relay ke Binance Spot
+API (`api.binance.com`) alih-alih Futures (`fapi.binance.com`) — dipakai
+untuk basis futures-vs-spot riil (lihat `binance_get_spot_price` di worker).
 
 Contoh:
 ```bash
 curl -s "https://whale-binance-proxy.vercel.app/api/binance?path=/fapi/v1/ping" \
   -H "x-proxy-secret: <secret-kamu>"
+
+curl -s "https://whale-binance-proxy.vercel.app/api/binance?path=/api/v3/ticker/price&market=spot&symbol=BTCUSDT" \
+  -H "x-proxy-secret: <secret-kamu>"
 ```
 
 ## Path yang diizinkan (whitelist)
 
-Hanya path read-only berikut yang bisa diteruskan (lihat `ALLOWED_PATHS`
-di `api/binance.ts`):
+Whitelist di-split per market (lihat `ALLOWED_PATHS_BY_MARKET` di
+`api/binance.ts`), supaya path futures dan spot gak ketuker.
 
+**`market=futures`** (default):
 - `/fapi/v1/ping` — baseline konektivitas
 - `/fapi/v1/depth` — order book depth
 - `/fapi/v1/aggTrades` — aggregate trades (untuk CVD granular)
@@ -55,13 +63,18 @@ di `api/binance.ts`):
 - `/fapi/v1/klines` — candlestick OHLCV (dipakai juga oleh multi-timeframe
   bias & realized volatility)
 - `/fapi/v1/ticker/24hr` — statistik 24 jam resmi
+- `/fapi/v1/openInterest` — open interest snapshot
 - `/futures/data/topLongShortAccountRatio` — top-trader ratio (akun)
 - `/futures/data/topLongShortPositionRatio` — top-trader ratio (posisi)
-- `/futures/data/globalLongShortAccountRatio` — ratio global (semua akun,
-  sudah di-whitelist tapi belum dipakai tool manapun di worker per saat ini)
+- `/futures/data/globalLongShortAccountRatio` — ratio global (semua akun)
+- `/futures/data/openInterestHist` — tren open interest
+- `/futures/data/takerlongshortRatio` — taker buy/sell volume ratio
 
-Untuk menambah path baru, edit whitelist `ALLOWED_PATHS` di `api/binance.ts`
-— JANGAN buka proxy generic tanpa whitelist, supaya proxy ini tidak jadi
-pintu belakang buat fetch endpoint Binance apapun (termasuk endpoint
-trading/private yang butuh API key, yang TIDAK boleh lewat proxy publik
-seperti ini).
+**`market=spot`**:
+- `/api/v3/ticker/price` — harga spot terkini (dipakai `binance_get_spot_price`)
+
+Untuk menambah path baru, edit whitelist market yang relevan di
+`ALLOWED_PATHS_BY_MARKET` (`api/binance.ts`) — JANGAN buka proxy generic
+tanpa whitelist, supaya proxy ini tidak jadi pintu belakang buat fetch
+endpoint Binance apapun (termasuk endpoint trading/private yang butuh API
+key, yang TIDAK boleh lewat proxy publik seperti ini).

@@ -242,6 +242,74 @@ export function createServer(): McpServer {
   );
 
   // ─────────────────────────────────────────────────────────────
+  // SPOT PRICE — harga spot Binance + basis riil vs futures mark price.
+  // Basis futures_get_funding_rate dihitung vs INDEX price (rata-rata
+  // beberapa exchange, bisa noisy). Basis di sini vs SPOT PRICE Binance
+  // langsung — lebih akurat untuk baca apakah pump/dump didorong leverage
+  // (futures) atau demand riil (spot), TAPI cuma jalan untuk pair yang
+  // listed di Binance Spot (banyak pair futures-only, seperti koin baru,
+  // TIDAK punya spot listing — tool ini akan error jelas untuk kasus itu).
+  // ─────────────────────────────────────────────────────────────
+  server.registerTool(
+    "binance_get_spot_price",
+    {
+      title: "Harga Spot Binance + Basis vs Futures",
+      description:
+        "Mengambil harga SPOT Binance (bukan Futures) untuk sebuah pair, plus basis riil terhadap mark price Futures. " +
+        "Basis di sini dihitung vs harga SPOT BINANCE LANGSUNG (bukan index price rata-rata beberapa exchange seperti di " +
+        "binance_get_funding_rate) — lebih akurat untuk membedakan apakah sebuah pergerakan harga didorong leverage " +
+        "(futures premium/discount melebar vs spot) atau demand/supply riil (spot dan futures bergerak selaras). " +
+        "Basis melebar tiba-tiba menandakan futures mulai memimpin/leverage-driven — early warning sebelum funding rate " +
+        "sempat menyusul naik/turun. " +
+        "PENTING: banyak pair di Binance Futures adalah FUTURES-ONLY (terutama koin baru/kecil) dan TIDAK punya listing " +
+        "di Binance Spot — tool ini akan gagal dengan error jelas untuk pair semacam itu (bukan bug, memang tidak ada " +
+        "harga spot Binance untuk dibandingkan).",
+      inputSchema: { symbol: symbolSchema },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ symbol }) => {
+      try {
+        const [spot, futures] = await Promise.all([
+          binanceProxy.getSpotPrice(symbol),
+          binanceProxy.getCurrentFundingRateNative(symbol),
+        ]);
+        const spotPrice = parseFloat(spot.price);
+        const markPrice = parseFloat(futures.markPrice);
+        const basis = (markPrice - spotPrice) / spotPrice;
+
+        const BASIS_THRESHOLD = 0.0005; // 0.05% — sama dengan threshold basis di binance_get_funding_rate
+        const basisInterpretation =
+          basis >= BASIS_THRESHOLD
+            ? "PREMIUM (futures di atas spot — leverage/demand futures lebih agresif dari demand spot, waspada kalau melebar cepat)"
+            : basis <= -BASIS_THRESHOLD
+              ? "DISKON (futures di bawah spot — tekanan short/leverage di futures lebih agresif dari sell pressure spot)"
+              : "NETRAL (futures dan spot selaras dekat — pergerakan harga kemungkinan didorong demand/supply riil, bukan leverage semata)";
+
+        const text = [
+          `# Harga Spot — ${symbol}`,
+          ``,
+          `- Harga Spot Binance: ${fmtPrice(spotPrice)}`,
+          `- Mark Price Futures: ${fmtPrice(markPrice)}`,
+          `- Basis (Futures vs Spot): ${fmtPct(basis, 4)}`,
+          ``,
+          `**Interpretasi Basis**: ${basisInterpretation}`,
+          ``,
+          `_Basis di sini vs harga SPOT BINANCE LANGSUNG, beda dari basis di binance_get_funding_rate yang vs INDEX price ` +
+            `(rata-rata beberapa exchange). Kalau tool ini error "Invalid symbol", pair tersebut FUTURES-ONLY (tidak listed ` +
+            `di Binance Spot) — basis futures-vs-spot tidak bisa dihitung untuk pair semacam itu._`,
+        ].join("\n");
+
+        return {
+          content: [{ type: "text", text }],
+          structuredContent: { symbol, spotPrice, markPrice, basis, basisInterpretation },
+        };
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  // ─────────────────────────────────────────────────────────────
   // OPEN INTEREST
   // ─────────────────────────────────────────────────────────────
   server.registerTool(

@@ -64,7 +64,9 @@ dalam percakapan dengan Claude, tanpa perlu buka dashboard exchange terpisah.
   lihat `proxy/README.md`). Ini jalur untuk funding rate (current & histori),
   klines/OHLCV, bias multi-timeframe, realized volatility, statistik 24 jam,
   order book depth, aggregate trades, open interest (current & histori),
-  long/short ratio (blended & top-trader), dan taker buy/sell volume ratio.
+  long/short ratio (blended & top-trader), taker buy/sell volume ratio, dan
+  harga spot (proxy juga relay ke Binance Spot API `api.binance.com` lewat
+  parameter `market=spot`, lihat `proxy/README.md`).
 - **[Coinalyze](https://coinalyze.net)**, sekarang cuma untuk satu tool yang
   belum dipindah ke jalur native: histori liquidation
   (`binance_get_liquidation_history`). Coinalyze meng-agregasi ulang data yang
@@ -80,6 +82,7 @@ dan `PROXY_URL`/`PROXY_SECRET` (proxy Vercel) — lihat bagian Setup di bawah.
 |---|---|---|
 | `binance_get_funding_rate` | Funding rate terkini + basis (deviasi mark vs index price) | Binance native |
 | `binance_get_funding_rate_history` | Tren funding rate dari waktu ke waktu | Binance native |
+| `binance_get_spot_price` | Harga spot Binance + basis riil vs mark price futures (beda dari basis di atas yang vs index price). Error jelas kalau pair futures-only (tidak listed di Spot) | Binance native (Spot) |
 | `binance_get_open_interest` | OI snapshot terkini | Binance native |
 | `binance_get_open_interest_history` | Tren OI naik/turun | Binance native |
 | `binance_get_long_short_ratio` | Rasio long vs short agregat (blended, semua trader) + tren | Binance native |
