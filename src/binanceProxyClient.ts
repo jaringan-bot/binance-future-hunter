@@ -27,6 +27,18 @@
 // Lihat proxy/README.md untuk detail whitelist path yang diizinkan proxy ini.
 
 import { fetchWithRetry } from "./retry.js";
+import { cachedFetch } from "./cache.js";
+
+// Path yang TIDAK di-cache sama sekali (ttl=0) -- order book & trade granular
+// butuh freshness ketat, cache di sini bisa bikin sinyal spoofing/absorption
+// jadi bias (lihat docs/mm_detection_framework.md Section 3, snapshot sesaat
+// yang basi = analisis salah). Path lain di-cache TTL pendek lewat cache.ts.
+const NO_CACHE_PATHS = new Set(["/fapi/v1/depth", "/fapi/v1/aggTrades", "/api/v3/depth", "/api/v3/aggTrades"]);
+const DEFAULT_CACHE_TTL_SECONDS = 5;
+
+function cacheTtlForPath(path: string): number {
+  return NO_CACHE_PATHS.has(path) ? 0 : DEFAULT_CACHE_TTL_SECONDS;
+}
 
 const PROXY_ALLOWED_PATHS = new Set([
   "/fapi/v1/depth",
@@ -105,9 +117,12 @@ async function callProxy<T>(
 
   let response: Response;
   try {
-    response = await fetchWithRetry(url.toString(), {
-      headers: { "x-proxy-secret": proxySecret, Accept: "application/json" },
-    });
+    response = await cachedFetch(
+      url.toString(),
+      { headers: { "x-proxy-secret": proxySecret, Accept: "application/json" } },
+      cacheTtlForPath(path),
+      fetchWithRetry,
+    );
   } catch (err) {
     throw new BinanceProxyError(
       `Gagal menghubungi proxy Vercel: ${(err as Error).message}. Cek apakah PROXY_URL benar dan proxy sedang aktif.`,

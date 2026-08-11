@@ -10,6 +10,9 @@
 // Provider yang punya breakdown itu (CoinGlass, CoinAnk) semua berbayar.
 
 import { fetchWithRetry } from "./retry.js";
+import { cachedFetch } from "./cache.js";
+
+const CACHE_TTL_SECONDS = 5;
 
 const BASE_URL = "https://api.coinalyze.net/v1";
 const EXCHANGE_CODE = "A"; // Binance — dari GET /v1/exchanges
@@ -83,9 +86,12 @@ async function callCoinalyze<T>(
 
   let response: Response;
   try {
-    response = await fetchWithRetry(url.toString(), {
-      headers: { "api-key": apiKey, Accept: "application/json" },
-    });
+    response = await cachedFetch(
+      url.toString(),
+      { headers: { "api-key": apiKey, Accept: "application/json" } },
+      CACHE_TTL_SECONDS,
+      fetchWithRetry,
+    );
   } catch (err) {
     throw new CoinalyzeApiError(
       `Gagal menghubungi Coinalyze API: ${(err as Error).message}. Coba lagi sebentar lagi.`,
