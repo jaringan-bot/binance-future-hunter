@@ -9,6 +9,8 @@
 // ada breakdown "global account" vs "top trader" seperti API Binance asli.
 // Provider yang punya breakdown itu (CoinGlass, CoinAnk) semua berbayar.
 
+import { fetchWithRetry } from "./retry.js";
+
 const BASE_URL = "https://api.coinalyze.net/v1";
 const EXCHANGE_CODE = "A"; // Binance — dari GET /v1/exchanges
 
@@ -81,7 +83,7 @@ async function callCoinalyze<T>(
 
   let response: Response;
   try {
-    response = await fetch(url.toString(), {
+    response = await fetchWithRetry(url.toString(), {
       headers: { "api-key": apiKey, Accept: "application/json" },
     });
   } catch (err) {

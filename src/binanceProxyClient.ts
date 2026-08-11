@@ -26,6 +26,8 @@
 //
 // Lihat proxy/README.md untuk detail whitelist path yang diizinkan proxy ini.
 
+import { fetchWithRetry } from "./retry.js";
+
 const PROXY_ALLOWED_PATHS = new Set([
   "/fapi/v1/depth",
   "/fapi/v1/aggTrades",
@@ -103,7 +105,7 @@ async function callProxy<T>(
 
   let response: Response;
   try {
-    response = await fetch(url.toString(), {
+    response = await fetchWithRetry(url.toString(), {
       headers: { "x-proxy-secret": proxySecret, Accept: "application/json" },
     });
   } catch (err) {
