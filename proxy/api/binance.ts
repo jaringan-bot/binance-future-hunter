@@ -25,10 +25,19 @@ const BINANCE_BASE = "https://fapi.binance.com";
 // whitelist, supaya proxy ini tidak bisa disalahgunakan untuk hit endpoint
 // Binance sembarangan (termasuk endpoint yang butuh API key/trading, yang
 // TIDAK boleh lewat proxy publik seperti ini).
+//
+// fundingRate/premiumIndex/klines/ticker-24hr ditambahkan supaya worker bisa
+// pakai Binance sebagai source of truth untuk funding rate & harga OHLC,
+// menggantikan Coinalyze yang ternyata punya masalah presisi/skala untuk
+// pair kecil (lihat PR fix/native-binance-precision untuk detail).
 const ALLOWED_PATHS = new Set([
   "/fapi/v1/ping",
   "/fapi/v1/depth",
   "/fapi/v1/aggTrades",
+  "/fapi/v1/fundingRate",
+  "/fapi/v1/premiumIndex",
+  "/fapi/v1/klines",
+  "/fapi/v1/ticker/24hr",
   "/futures/data/topLongShortAccountRatio",
   "/futures/data/topLongShortPositionRatio",
   "/futures/data/globalLongShortAccountRatio",
