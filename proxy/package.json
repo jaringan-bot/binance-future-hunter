@@ -5,5 +5,9 @@
   "description": "Proxy relay Vercel ke Binance Futures API, dipanggil dari worker Cloudflare whale.jaringan.dev yang diblokir langsung oleh WAF Binance.",
   "dependencies": {
     "@vercel/node": "^3.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
   }
 }
