@@ -66,6 +66,23 @@ function errorResult(err: unknown) {
   };
 }
 
+// RV = sqrt(mean(log_return^2)) * sqrt(periode/tahun) — realized volatility
+// standar dari log-return close-to-close.
+function computeRealizedVolatility(
+  closes: number[],
+  periodsPerYear: number,
+): { periodPct: number; annualizedPct: number } {
+  if (closes.length < 2) return { periodPct: 0, annualizedPct: 0 };
+  const logReturns: number[] = [];
+  for (let i = 1; i < closes.length; i++) {
+    logReturns.push(Math.log(closes[i] / closes[i - 1]));
+  }
+  const sumSq = logReturns.reduce((acc, r) => acc + r * r, 0);
+  const periodVol = Math.sqrt(sumSq / logReturns.length);
+  const annualizedVol = periodVol * Math.sqrt(periodsPerYear);
+  return { periodPct: periodVol * 100, annualizedPct: annualizedVol * 100 };
+}
+
 export function createServer(): McpServer {
   const server = new McpServer({
     name: "binance-futures-mcp",
@@ -918,6 +935,66 @@ export function createServer(): McpServer {
         ].join("\n");
 
         return { content: [{ type: "text", text }] };
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "binance_get_realized_volatility",
+    {
+      title: "Realized Volatility (Historis)",
+      description:
+        "Menghitung realized volatility (RV) historis untuk sebuah pair Binance Futures di dua timeframe " +
+        "(15 menit, ~24 jam terakhir; dan 1 jam, ~30 jam terakhir), LANGSUNG dari Binance native klines. " +
+        "RV dihitung dari log-return antar candle close (RV = sqrt(mean(log_return^2)) * sqrt(periode/tahun)), " +
+        "ditampilkan baik dalam bentuk annualized (%) maupun per-periode (%) supaya tidak menyesatkan untuk pair " +
+        "kecil yang volatil (angka annualized saja bisa terlihat ekstrem tapi tidak intuitif). " +
+        "RV tinggi menandakan range candle historis melebar dibanding biasanya — berguna untuk cross-check " +
+        "dengan input i_atrMult di indikator Pine Script Grid Advisor saat mengkalibrasi lebar grid range.",
+      inputSchema: { symbol: symbolSchema },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ symbol }) => {
+      try {
+        const [klines15m, klines1h] = await Promise.all([
+          binanceProxy.getKlinesNative(symbol, "15m", 96),
+          binanceProxy.getKlinesNative(symbol, "1h", 30),
+        ]);
+
+        const closes15m = klines15m.map((k) => parseFloat(k[4]));
+        const closes1h = klines1h.map((k) => parseFloat(k[4]));
+
+        const rv15m = computeRealizedVolatility(closes15m, 35040);
+        const rv1h = computeRealizedVolatility(closes1h, 8760);
+
+        const text = [
+          `# Realized Volatility — ${symbol}`,
+          ``,
+          `| Timeframe | Annualized | Per-Periode | Jumlah Candle |`,
+          `|---|---|---|---|`,
+          `| 15 Menit (~24 jam) | ${rv15m.annualizedPct.toFixed(2)}% | ${rv15m.periodPct.toFixed(4)}% | ${closes15m.length} |`,
+          `| 1 Jam (~30 jam) | ${rv1h.annualizedPct.toFixed(2)}% | ${rv1h.periodPct.toFixed(4)}% | ${closes1h.length} |`,
+          ``,
+          `**Interpretasi**: RV annualized tinggi menandakan range candle historis melebar dibanding biasanya — ` +
+            `gunakan angka per-periode untuk intuisi pergerakan riil per candle (annualized saja bisa terlihat ` +
+            `ekstrem untuk pair kecil yang volatil). Cross-check dengan i_atrMult di Grid Advisor Pine Script ` +
+            `saat mengkalibrasi lebar grid range.`,
+          ``,
+          `_Data LANGSUNG dari Binance native (klines). RV dihitung dari log-return close-to-close, bukan true range._`,
+        ].join("\n");
+
+        return {
+          content: [{ type: "text", text }],
+          structuredContent: {
+            symbol,
+            rv15mAnnualizedPct: rv15m.annualizedPct,
+            rv15mPeriodPct: rv15m.periodPct,
+            rv1hAnnualizedPct: rv1h.annualizedPct,
+            rv1hPeriodPct: rv1h.periodPct,
+          },
+        };
       } catch (err) {
         return errorResult(err);
       }

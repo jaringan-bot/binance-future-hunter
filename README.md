@@ -26,6 +26,7 @@ bagian Setup di bawah.
 | `binance_get_taker_volume_ratio` | Tekanan beli/jual agresif (taker volume) |
 | `binance_get_klines` | Candlestick OHLCV per timeframe |
 | `binance_get_multi_timeframe_bias` | Bias Bullish/Bearish/Sideways di 5 timeframe sekaligus (1m/5m/15m/1h/1d) |
+| `binance_get_realized_volatility` | Realized volatility historis (15m/1h) dari log-return, untuk kalibrasi lebar grid |
 | `binance_get_24hr_ticker` | Ringkasan statistik 24 jam |
 
 ## Keterbatasan yang jujur perlu diketahui
