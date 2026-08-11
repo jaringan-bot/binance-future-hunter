@@ -32,10 +32,11 @@ dalam percakapan dengan Claude, tanpa perlu buka dashboard exchange terpisah.
 
 ## Kelebihan
 
-- 23 tools mencakup lima sudut analisis: bias arah pasar, area harga kunci
+- 24 tools mencakup lima sudut analisis: bias arah pasar, area harga kunci
   (order book), konfirmasi eksekusi (order flow/aggressor), pembanding
   Futures-vs-Spot (leverage-driven vs demand riil), dan market-wide scan
-  (funding rate ekstrem lintas semua pair sekaligus).
+  (funding rate ekstrem lintas semua pair sekaligus) — plus 1 tool composite
+  (`binance_analyze_pair`) buat overview cepat tanpa banyak tool call.
 - Read-only murni — tidak ada risiko custodial atau trading tak disengaja.
 - Transparan soal keterbatasan tiap tool (lihat bagian di bawah), bukan
   dibungkus seolah semua data sempurna.
@@ -109,6 +110,7 @@ dan `PROXY_URL`/`PROXY_SECRET` (proxy Vercel) — lihat bagian Setup di bawah.
 | `binance_get_spot_agg_trades` | Trade individual granular Spot (CVD riil, bukan leverage) | Binance native (Spot) |
 | `binance_get_spot_avg_price` | Harga rata-rata bergerak Spot (window beberapa menit, lebih stabil dari last-trade) | Binance native (Spot) |
 | `binance_check_spot_listing` | Cek apakah pair listed di Binance Spot + status trading — dipakai sebelum panggil tool Spot lain untuk pair yang belum pasti | Binance native (Spot) |
+| `binance_analyze_pair` | Overview cepat 1 pair (composite): funding, tren OI, tren top trader, taker volume, order book, bias harga — 6 tool sekaligus dalam 1 call | Binance native |
 
 ## Framework Analisis
 

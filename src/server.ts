@@ -1747,5 +1747,141 @@ export function createServer(): McpServer {
     },
   );
 
+  // ─────────────────────────────────────────────────────────────
+  // COMPOSITE ANALYSIS — 1 tool call yang internally manggil 6 tool
+  // sekaligus lewat Promise.all (funding, OI trend, top trader trend,
+  // taker volume trend, order book, klines/bias), kembalikan summary
+  // terstruktur. Mengurangi jumlah tool call buat overview cepat, tapi
+  // TETAP bukan pengganti tool individual kalau butuh detail/histori
+  // lebih panjang -- ini snapshot ringkas per masing-masing sudut.
+  // ─────────────────────────────────────────────────────────────
+  server.registerTool(
+    "binance_analyze_pair",
+    {
+      title: "Analisis Ringkas Satu Pair (Composite)",
+      description:
+        "Overview cepat satu pair dalam SATU tool call: funding rate & basis, tren OI 6 jam terakhir, tren top-trader " +
+        "positioning 4 jam terakhir, tren taker volume 4 jam terakhir, snapshot order book, dan bias harga dari 24 " +
+        "candle 1 jam -- internally manggil 6 tool sekaligus lewat Promise.all. Cocok untuk pertanyaan 'gimana kondisi " +
+        "pair X sekarang' tanpa perlu panggil tool satu-satu. Untuk histori lebih panjang atau detail per-sudut, tetap " +
+        "pakai tool individual (binance_get_open_interest_history, binance_get_klines, dst) -- ini snapshot ringkas, " +
+        "bukan pengganti analisis mendalam.",
+      inputSchema: { symbol: symbolSchema },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ symbol }) => {
+      try {
+        const [funding, oiHist, topTrader, taker, orderBook, klines] = await Promise.all([
+          binanceProxy.getCurrentFundingRateNative(symbol),
+          binanceProxy.getOpenInterestHistNative(symbol, "1h", 6),
+          binanceProxy.getTopTraderPositionRatio(symbol, "1h", 4),
+          binanceProxy.getTakerLongShortRatioNative(symbol, "1h", 4),
+          binanceProxy.getOrderBookDepth(symbol, 20),
+          binanceProxy.getKlinesNative(symbol, "1h", 24),
+        ]);
+
+        // Funding & basis
+        const fundingRate = parseFloat(funding.lastFundingRate);
+        const markPrice = parseFloat(funding.markPrice);
+        const indexPrice = parseFloat(funding.indexPrice);
+        const basis = (markPrice - indexPrice) / indexPrice;
+        const fundingBias =
+          fundingRate >= 0.0003 ? "CROWDED LONG" : fundingRate <= -0.0003 ? "CROWDED SHORT" : "netral";
+
+        // OI trend
+        const oiValues = oiHist.map((p) => parseFloat(p.sumOpenInterest));
+        const oiTrend = trendDirection(oiValues);
+        const oiChangePct =
+          oiValues.length >= 2 && oiValues[0] !== 0
+            ? ((oiValues[oiValues.length - 1] - oiValues[0]) / oiValues[0]) * 100
+            : 0;
+
+        // Top trader trend
+        const topTraderLongPct = topTrader.map((p) => parseFloat(p.longAccount) * 100);
+        const topTraderTrend = trendDirection(topTraderLongPct);
+        const topTraderLatest = topTraderLongPct[topTraderLongPct.length - 1] ?? 0;
+
+        // Taker volume
+        const takerRatios = taker.map((p) => parseFloat(p.buySellRatio));
+        const takerLatest = takerRatios[takerRatios.length - 1] ?? 1;
+        const takerBias = takerLatest > 1.05 ? "BUY dominan" : takerLatest < 0.95 ? "SELL dominan" : "seimbang";
+
+        // Order book
+        const bestBid = orderBook.bids[0] ? parseFloat(orderBook.bids[0][0]) : null;
+        const bestAsk = orderBook.asks[0] ? parseFloat(orderBook.asks[0][0]) : null;
+        const spreadPct =
+          bestBid !== null && bestAsk !== null ? ((bestAsk - bestBid) / bestBid) * 100 : null;
+
+        // Klines bias
+        const closes = klines.map((k) => parseFloat(k[4]));
+        const highs = klines.map((k) => parseFloat(k[2]));
+        const lows = klines.map((k) => parseFloat(k[3]));
+        const changePct =
+          closes.length >= 2 ? ((closes[closes.length - 1] - closes[0]) / closes[0]) * 100 : 0;
+        const priceBias = changePct > 1 ? "BULLISH" : changePct < -1 ? "BEARISH" : "SIDEWAYS";
+        const swingHigh = highs.length ? Math.max(...highs) : 0;
+        const swingLow = lows.length ? Math.min(...lows) : 0;
+        const lastClose = closes[closes.length - 1] ?? 0;
+
+        const text = [
+          `# Analisis Ringkas — ${symbol}`,
+          ``,
+          `## Funding & Basis`,
+          `- Funding Rate: ${fmtPct(fundingRate, 4)} (${fundingBias})`,
+          `- Basis (mark vs index): ${fmtPct(basis, 4)}`,
+          ``,
+          `## Open Interest (6 jam terakhir)`,
+          `- Tren: ${oiTrend} (${oiChangePct >= 0 ? "+" : ""}${oiChangePct.toFixed(2)}%)`,
+          `- OI Terkini: ${fmtNum(oiValues[oiValues.length - 1] ?? 0, 2)}`,
+          ``,
+          `## Top Trader Positioning (4 jam terakhir, by size posisi)`,
+          `- Long Terkini: ${topTraderLatest.toFixed(2)}%`,
+          `- Tren: ${topTraderTrend}`,
+          ``,
+          `## Taker Volume (4 jam terakhir)`,
+          `- Rasio Buy/Sell Terkini: ${fmtNum(takerLatest, 4)} → ${takerBias}`,
+          ``,
+          `## Order Book (depth 20)`,
+          `- Best Bid: ${bestBid !== null ? fmtPrice(bestBid) : "N/A"} | Best Ask: ${bestAsk !== null ? fmtPrice(bestAsk) : "N/A"}`,
+          `- Spread: ${spreadPct !== null ? spreadPct.toFixed(4) : "N/A"}%`,
+          ``,
+          `## Price Action (24 candle @1h)`,
+          `- Bias: ${priceBias} (${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}%)`,
+          `- Swing High: ${fmtPrice(swingHigh)} | Swing Low: ${fmtPrice(swingLow)}`,
+          `- Harga Terakhir: ${fmtPrice(lastClose)}`,
+          ``,
+          `_Snapshot ringkas dari 6 tool sekaligus (funding, OI history, top trader ratio, taker volume, order book, klines). ` +
+            `Untuk histori lebih panjang atau detail lebih dalam per sudut, panggil tool individual yang relevan._`,
+        ].join("\n");
+
+        return {
+          content: [{ type: "text", text }],
+          structuredContent: {
+            symbol,
+            fundingRate,
+            basis,
+            fundingBias,
+            oiTrend,
+            oiChangePct,
+            topTraderLatest,
+            topTraderTrend,
+            takerLatest,
+            takerBias,
+            bestBid,
+            bestAsk,
+            spreadPct,
+            priceBias,
+            changePct,
+            swingHigh,
+            swingLow,
+            lastClose,
+          },
+        };
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
   return server;
 }
