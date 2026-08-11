@@ -82,10 +82,17 @@ export function createServer(): McpServer {
       title: "Ambil Funding Rate Terkini",
       description:
         "Mengambil funding rate TERKINI untuk sebuah pair Binance Futures (LANGSUNG dari Binance native premiumIndex, " +
-        "bukan lewat Coinalyze — source of truth). " +
+        "bukan lewat Coinalyze — source of truth), plus basis (deviasi mark price dari index price) untuk membaca " +
+        "sentimen premium/discount futures vs spot. " +
         "Funding rate positif besar menandakan long crowded (bias kontrarian: waspada potensi long squeeze). " +
         "Funding rate negatif besar menandakan short crowded (bias kontrarian: waspada potensi short squeeze). " +
-        "Gunakan tool ini untuk membaca sentimen leverage pasar saat ini.",
+        "Basis positif besar menandakan futures premium tinggi (sentimen long agresif, funding biasanya menyusul naik); " +
+        "basis negatif besar menandakan futures discount (sentimen short agresif); basis mendekati nol tapi funding " +
+        "masih ekstrem menandakan funding lagging, kemungkinan mean-revert akan terjadi. " +
+        "Gunakan tool ini untuk membaca sentimen leverage pasar saat ini. " +
+        "PERHATIAN: index price Binance adalah rata-rata tertimbang dari beberapa exchange spot — untuk pair kecil " +
+        "atau baru listing, salah satu exchange sumber bisa illikuid dan membuat index price (dan karenanya basis) " +
+        "jadi noisy; interpretasikan dengan hati-hati untuk pair semacam itu.",
       inputSchema: { symbol: symbolSchema },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -94,6 +101,12 @@ export function createServer(): McpServer {
         const data = await binanceProxy.getCurrentFundingRateNative(symbol);
         const rate = parseFloat(data.lastFundingRate);
         const markPrice = parseFloat(data.markPrice);
+        const indexPrice = parseFloat(data.indexPrice);
+        // Basis = deviasi mark price dari index price. Ini SATU-SATUNYA angka
+        // divergensi mark-vs-index yang kita tampilkan — sengaja tidak dihitung
+        // dua kali dengan nama berbeda karena keduanya angka yang sama persis.
+        const basis = (markPrice - indexPrice) / indexPrice;
+
         const interpretation =
           rate >= 0.0003
             ? "CROWDED LONG (funding cukup tinggi — mayoritas leverage di sisi long, ada risiko long squeeze jika harga berbalik turun)"
@@ -101,22 +114,43 @@ export function createServer(): McpServer {
               ? "CROWDED SHORT (funding negatif signifikan — mayoritas leverage di sisi short, ada risiko short squeeze jika harga berbalik naik)"
               : "NETRAL (funding dalam rentang wajar, tidak ada crowding ekstrem yang jelas)";
 
+        const BASIS_THRESHOLD = 0.0005; // 0.05% — basis wajar biasanya lebih sempit dari ini di pair likuid
+        const basisInterpretation =
+          basis >= BASIS_THRESHOLD
+            ? "PREMIUM TINGGI (mark price jauh di atas index — sentimen long agresif di futures, funding rate biasanya menyusul naik)"
+            : basis <= -BASIS_THRESHOLD
+              ? "DISCOUNT TINGGI (mark price jauh di bawah index — sentimen short agresif di futures, funding rate biasanya menyusul turun)"
+              : Math.abs(rate) >= 0.0003
+                ? "BASIS NETRAL TAPI FUNDING EKSTREM (basis belum mengkonfirmasi funding — kemungkinan funding lagging, waspada potensi mean-revert funding ke arah netral)"
+                : "NETRAL (basis dalam rentang wajar, mark price mengikuti index dengan dekat)";
+
         const text = [
           `# Funding Rate — ${symbol}`,
           ``,
           `- Funding Rate Saat Ini: ${fmtPct(rate, 4)}`,
           `- Mark Price: ${fmtPrice(markPrice)}`,
+          `- Index Price: ${fmtPrice(indexPrice)}`,
+          `- Basis (Mark vs Index): ${fmtPct(basis, 4)}`,
           `- Waktu Funding Berikutnya: ${fmtTime(data.nextFundingTime)}`,
           `- Update Terakhir: ${fmtTime(data.time)}`,
           ``,
-          `**Interpretasi**: ${interpretation}`,
+          `**Interpretasi Funding**: ${interpretation}`,
+          `**Interpretasi Basis**: ${basisInterpretation}`,
           ``,
-          `_Catatan: threshold crowded (±0.03%) adalah heuristik umum, sesuaikan dengan konteks volatilitas pair yang sedang ditradingkan. Data LANGSUNG dari Binance native (premiumIndex)._`,
+          `_Catatan: threshold crowded funding (±0.03%) dan basis (±0.05%) adalah heuristik umum, sesuaikan dengan konteks volatilitas pair yang sedang ditradingkan. Index price Binance adalah rata-rata tertimbang dari beberapa exchange spot — untuk pair kecil/baru listing, salah satu exchange sumber bisa illikuid dan membuat index price sendiri jadi noisy. Data LANGSUNG dari Binance native (premiumIndex)._`,
         ].join("\n");
 
         return {
           content: [{ type: "text", text }],
-          structuredContent: { symbol, fundingRate: rate, markPrice, interpretation },
+          structuredContent: {
+            symbol,
+            fundingRate: rate,
+            markPrice,
+            indexPrice,
+            basis,
+            interpretation,
+            basisInterpretation,
+          },
         };
       } catch (err) {
         return errorResult(err);
