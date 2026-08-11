@@ -32,12 +32,12 @@ conversation with Claude, without needing a separate exchange dashboard.
 
 ## Strengths
 
-- 24 tools covering five analytical angles: directional market bias, key
+- 25 tools covering five analytical angles: directional market bias, key
   price areas (order book), execution confirmation (order flow/aggressor),
   Futures-vs-Spot comparison (leverage-driven vs real demand), and
-  market-wide scanning (extreme funding rates across every pair at once) —
-  plus 1 composite tool (`binance_analyze_pair`) for a quick overview
-  without many tool calls.
+  market-wide scanning (extreme funding rates across every pair, or
+  comparing a metric across several pairs) — plus a composite tool
+  (`binance_analyze_pair`) for a quick overview without many tool calls.
 - Purely read-only — no custodial risk or accidental trading.
 - Transparent about each tool's limitations (see the section below), not
   glossed over as if all data were perfect.
@@ -113,6 +113,7 @@ Setup section below.
 | `binance_get_spot_avg_price` | Spot moving average price (a few-minute window, more stable than last-trade) | Binance native (Spot) |
 | `binance_check_spot_listing` | Checks whether a pair is listed on Binance Spot + trading status — used before calling other Spot tools for a pair that isn't certain to be listed | Binance native (Spot) |
 | `binance_analyze_pair` | Quick composite overview of one pair: funding, OI trend, top-trader trend, taker volume, order book, price bias — 6 tools at once in a single call | Binance native |
+| `binance_compare_symbols` | Compare one metric (funding rate, 24h % change, OI, top-trader ratio, taker ratio) across 2-10 pairs at once, sorted from most extreme | Binance native |
 
 ## Analysis Framework
 

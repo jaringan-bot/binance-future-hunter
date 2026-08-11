@@ -1883,5 +1883,121 @@ export function createServer(): McpServer {
     },
   );
 
+  // ─────────────────────────────────────────────────────────────
+  // MULTI-SYMBOL COMPARISON — bandingkan 1 metrik across beberapa pair
+  // sekaligus (Promise.all per symbol), diurutkan dari yang paling ekstrem.
+  // Beda dari binance_scan_funding_extremes yang scan SEMUA pair di market
+  // untuk funding rate doang -- ini untuk pair yang SUDAH kamu tentukan,
+  // dan bisa pilih metrik apa yang mau dibandingkan.
+  // ─────────────────────────────────────────────────────────────
+  const COMPARE_METRIC_ENUM = [
+    "funding_rate",
+    "price_change_24h",
+    "open_interest",
+    "top_trader_ratio",
+    "taker_volume_ratio",
+  ] as const;
+
+  server.registerTool(
+    "binance_compare_symbols",
+    {
+      title: "Bandingkan Beberapa Pair (Multi-Symbol)",
+      description:
+        "Bandingkan 1 metrik across beberapa pair Futures sekaligus (2-10 symbol), diurutkan dari yang paling " +
+        "ekstrem. Metrik yang bisa dipilih: funding_rate (funding terkini), price_change_24h (%perubahan 24 jam), " +
+        "open_interest (OI snapshot mentah, BUKAN notional USD -- jangan bandingkan langsung antar pair beda harga " +
+        "tanpa konteks), top_trader_ratio (long% top trader terkini, by size posisi), taker_volume_ratio (rasio " +
+        "buy/sell taker terkini). Beda dari binance_scan_funding_extremes yang scan SEMUA pair di market -- ini " +
+        "untuk pair yang sudah kamu tentukan sendiri.",
+      inputSchema: {
+        symbols: z
+          .array(symbolSchema)
+          .min(2)
+          .max(10)
+          .describe("Daftar symbol yang mau dibandingkan, minimal 2 maksimal 10, contoh: [\"BTCUSDT\", \"ETHUSDT\", \"SOLUSDT\"]"),
+        metric: z
+          .enum(COMPARE_METRIC_ENUM)
+          .describe(
+            "Metrik yang dibandingkan: funding_rate, price_change_24h, open_interest, top_trader_ratio, atau taker_volume_ratio",
+          ),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ symbols, metric }) => {
+      try {
+        const uniqueSymbols = Array.from(new Set(symbols));
+
+        const fetchValue = async (symbol: string): Promise<{ symbol: string; value: number; extra?: string }> => {
+          switch (metric) {
+            case "funding_rate": {
+              const data = await binanceProxy.getCurrentFundingRateNative(symbol);
+              return { symbol, value: parseFloat(data.lastFundingRate) };
+            }
+            case "price_change_24h": {
+              const data = await binanceProxy.getTicker24hrNative(symbol);
+              return { symbol, value: parseFloat(data.priceChangePercent) };
+            }
+            case "open_interest": {
+              const data = await binanceProxy.getOpenInterestNative(symbol);
+              return { symbol, value: parseFloat(data.openInterest) };
+            }
+            case "top_trader_ratio": {
+              const data = await binanceProxy.getTopTraderPositionRatio(symbol, "1h", 1);
+              const latest = data[data.length - 1];
+              return { symbol, value: latest ? parseFloat(latest.longAccount) * 100 : 0 };
+            }
+            case "taker_volume_ratio": {
+              const data = await binanceProxy.getTakerLongShortRatioNative(symbol, "1h", 1);
+              const latest = data[data.length - 1];
+              return { symbol, value: latest ? parseFloat(latest.buySellRatio) : 0 };
+            }
+          }
+        };
+
+        const results = await Promise.all(uniqueSymbols.map(fetchValue));
+        const sorted = [...results].sort((a, b) => b.value - a.value);
+
+        const metricLabel: Record<(typeof COMPARE_METRIC_ENUM)[number], string> = {
+          funding_rate: "Funding Rate",
+          price_change_24h: "Perubahan 24 Jam",
+          open_interest: "Open Interest (mentah)",
+          top_trader_ratio: "Top Trader Long %",
+          taker_volume_ratio: "Taker Buy/Sell Ratio",
+        };
+        const formatValue = (v: number): string => {
+          if (metric === "funding_rate") return fmtPct(v, 4);
+          if (metric === "price_change_24h") return `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
+          if (metric === "top_trader_ratio") return `${v.toFixed(2)}%`;
+          return fmtNum(v, 4);
+        };
+
+        const rows = sorted
+          .map((r, i) => `| ${i + 1} | ${r.symbol} | ${formatValue(r.value)} |`)
+          .join("\n");
+
+        const text = [
+          `# Perbandingan ${metricLabel[metric]} — ${uniqueSymbols.length} pair`,
+          ``,
+          `| # | Symbol | ${metricLabel[metric]} |`,
+          `|---|---|---|`,
+          rows,
+          ``,
+          `_Diurutkan dari nilai tertinggi ke terendah. Data snapshot terkini per pair (bukan histori). ` +
+            (metric === "open_interest"
+              ? "PENTING: open_interest di sini angka mentah (jumlah kontrak), BUKAN notional USD -- pair beda harga tidak apple-to-apple dibandingkan langsung tanpa dikonversi."
+              : "") +
+            `_`,
+        ].join("\n");
+
+        return {
+          content: [{ type: "text", text }],
+          structuredContent: { metric, results: sorted },
+        };
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
   return server;
 }
