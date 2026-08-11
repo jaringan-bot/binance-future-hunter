@@ -43,9 +43,9 @@ dalam percakapan dengan Claude, tanpa perlu buka dashboard exchange terpisah.
   atau histori periodik) — tidak ada push event detik-demi-detik (misalnya
   liquidation baru terjadi). Menambah itu butuh komponen infrastruktur
   tambahan yang di luar cakupan project ini saat ini.
-- **Sebagian data masih lewat agregator pihak ketiga** (Coinalyze) — lihat
-  bagian [Keterbatasan](#keterbatasan-yang-jujur-perlu-diketahui) untuk detail
-  per tool.
+- **Satu tool masih lewat agregator pihak ketiga** (Coinalyze, khusus histori
+  liquidation) — lihat bagian
+  [Keterbatasan](#keterbatasan-yang-jujur-perlu-diketahui) untuk detail.
 - **Setup awal butuh beberapa kredensial** (Coinalyze API key + proxy Vercel)
   — bukan pasang-langsung-jalan, ada langkah konfigurasi manual sekali di
   awal.
@@ -63,13 +63,13 @@ dalam percakapan dengan Claude, tanpa perlu buka dashboard exchange terpisah.
   Cloudflare relay lewat proxy kecil di `proxy/` (project Vercel terpisah,
   lihat `proxy/README.md`). Ini jalur untuk funding rate (current & histori),
   klines/OHLCV, bias multi-timeframe, realized volatility, statistik 24 jam,
-  top-trader long/short ratio, order book depth, dan aggregate trades.
-- **[Coinalyze](https://coinalyze.net)**, untuk data yang belum (atau sengaja
-  belum) dipindah ke jalur native: open interest, long/short ratio blended
-  (semua trader), histori liquidation, dan taker buy/sell volume ratio.
-  Coinalyze meng-agregasi ulang data yang sama (sumber asli tetap Binance)
-  dan API-nya sendiri di-hosting di Cloudflare, jadi tidak kena block yang
-  sama.
+  order book depth, aggregate trades, open interest (current & histori),
+  long/short ratio (blended & top-trader), dan taker buy/sell volume ratio.
+- **[Coinalyze](https://coinalyze.net)**, sekarang cuma untuk satu tool yang
+  belum dipindah ke jalur native: histori liquidation
+  (`binance_get_liquidation_history`). Coinalyze meng-agregasi ulang data yang
+  sama (sumber asli tetap Binance) dan API-nya sendiri di-hosting di
+  Cloudflare, jadi tidak kena block yang sama.
 
 Konsekuensinya, worker ini butuh **dua set kredensial**: `COINALYZE_API_KEY`
 dan `PROXY_URL`/`PROXY_SECRET` (proxy Vercel) — lihat bagian Setup di bawah.
@@ -80,15 +80,15 @@ dan `PROXY_URL`/`PROXY_SECRET` (proxy Vercel) — lihat bagian Setup di bawah.
 |---|---|---|
 | `binance_get_funding_rate` | Funding rate terkini + basis (deviasi mark vs index price) | Binance native |
 | `binance_get_funding_rate_history` | Tren funding rate dari waktu ke waktu | Binance native |
-| `binance_get_open_interest` | OI snapshot terkini | Coinalyze |
-| `binance_get_open_interest_history` | Tren OI naik/turun | Coinalyze |
-| `binance_get_long_short_ratio` | Rasio long vs short agregat (blended, semua trader) + tren | Coinalyze |
+| `binance_get_open_interest` | OI snapshot terkini | Binance native |
+| `binance_get_open_interest_history` | Tren OI naik/turun | Binance native |
+| `binance_get_long_short_ratio` | Rasio long vs short agregat (blended, semua trader) + tren | Binance native |
 | `binance_get_top_trader_ratio` | Rasio long/short KHUSUS top trader (breakdown murni, akun atau size posisi) | Binance native |
 | `binance_get_order_book_depth` | Snapshot order book (bid/ask), spread, wall terbesar | Binance native |
 | `binance_get_order_book_imbalance` | Imbalance volume bid vs ask di depth 5/10/20, dengan label bias (BULLISH/BEARISH/SEIMBANG) | Binance native |
 | `binance_get_agg_trades` | Trade individual granular (buy/sell aggressor) untuk deteksi absorption | Binance native |
 | `binance_get_liquidation_history` | Histori liquidation | Coinalyze |
-| `binance_get_taker_volume_ratio` | Tekanan beli/jual agresif (taker volume), derivasi dari OHLCV | Coinalyze |
+| `binance_get_taker_volume_ratio` | Tekanan beli/jual agresif (taker volume), statistik resmi Binance | Binance native |
 | `binance_get_klines` | Candlestick OHLCV per timeframe | Binance native |
 | `binance_get_multi_timeframe_bias` | Bias Bullish/Bearish/Sideways di 5 timeframe sekaligus (1m/5m/15m/1h/1d) | Binance native |
 | `binance_get_realized_volatility` | Realized volatility historis (15m/1h) dari log-return, untuk kalibrasi lebar grid | Binance native |
@@ -101,10 +101,6 @@ dan `PROXY_URL`/`PROXY_SECRET` (proxy Vercel) — lihat bagian Setup di bawah.
   trader (whale)". Untuk breakdown murni top-trader, pakai
   `binance_get_top_trader_ratio` (sudah native Binance, terpisah dari tool
   ini).
-- **Taker buy/sell ratio adalah hasil derivasi**, bukan angka resmi dari
-  endpoint taker ratio Binance — dihitung dari data candlestick (OHLCV)
-  Coinalyze. Cukup akurat untuk overview, tapi bukan 1:1 sama persis dengan
-  yang ditampilkan di Binance.
 - **Basis funding rate bisa noisy untuk pair kecil/baru listing** — index
   price Binance adalah rata-rata tertimbang dari beberapa exchange spot,
   salah satunya bisa illikuid untuk pair semacam itu.
@@ -112,11 +108,12 @@ dan `PROXY_URL`/`PROXY_SECRET` (proxy Vercel) — lihat bagian Setup di bawah.
   hitungan detik (potensi spoofing), jangan overinterpretasi satu snapshot.
 - **Threshold "top trader" tidak dipublikasikan Binance secara pasti**, dan
   datanya snapshot periodik, bukan real-time tick-by-tick.
-- Data histori OI (`binance_get_open_interest_history`) dibatasi
-  ketersediaannya oleh Coinalyze (umumnya beberapa bulan terakhir, tergantung
-  symbol).
+- Data histori OI (`binance_get_open_interest_history`) dibatasi retensi
+  endpoint resmi Binance (`/futures/data/openInterestHist`) — tidak selama
+  histori Coinalyze sebelumnya, cek langsung kalau butuh rentang panjang.
 - Tidak ada data wallet on-chain.
-- Coinalyze free tier: rate limit 40 request/menit per API key.
+- Coinalyze free tier: rate limit 40 request/menit per API key — sekarang
+  cuma berlaku untuk `binance_get_liquidation_history`.
 
 ## Setup Coinalyze API Key (wajib, sekali saja)
 
@@ -128,8 +125,9 @@ dan `PROXY_URL`/`PROXY_SECRET` (proxy Vercel) — lihat bagian Setup di bawah.
    ```
    (paste API key saat diminta)
 
-Tanpa secret ini, tool yang bersumber Coinalyze (lihat tabel di atas) akan
-gagal dengan pesan error yang jelas ("COINALYZE_API_KEY belum diset").
+Tanpa secret ini, `binance_get_liquidation_history` (satu-satunya tool
+bersumber Coinalyze, lihat tabel di atas) akan gagal dengan pesan error yang
+jelas ("COINALYZE_API_KEY belum diset").
 
 ## Setup Proxy Vercel (wajib, sekali saja)
 
@@ -250,8 +248,9 @@ curl -X POST http://localhost:8787/mcp \
 ```
 
 Kalau ini mengembalikan data funding rate + basis BTCUSDT yang valid, jalur
-proxy Vercel bekerja. Untuk tool Coinalyze, ganti `name` ke misalnya
-`binance_get_open_interest` — kalau itu juga valid, jalur Coinalyze bekerja.
+proxy Vercel bekerja. Untuk jalur Coinalyze, ganti `name` ke
+`binance_get_liquidation_history` — kalau itu juga valid, jalur Coinalyze
+bekerja.
 
 ## Biaya
 
