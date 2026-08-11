@@ -66,6 +66,23 @@ function errorResult(err: unknown) {
   };
 }
 
+// RV = sqrt(mean(log_return^2)) * sqrt(periode/tahun) — realized volatility
+// standar dari log-return close-to-close.
+function computeRealizedVolatility(
+  closes: number[],
+  periodsPerYear: number,
+): { periodPct: number; annualizedPct: number } {
+  if (closes.length < 2) return { periodPct: 0, annualizedPct: 0 };
+  const logReturns: number[] = [];
+  for (let i = 1; i < closes.length; i++) {
+    logReturns.push(Math.log(closes[i] / closes[i - 1]));
+  }
+  const sumSq = logReturns.reduce((acc, r) => acc + r * r, 0);
+  const periodVol = Math.sqrt(sumSq / logReturns.length);
+  const annualizedVol = periodVol * Math.sqrt(periodsPerYear);
+  return { periodPct: periodVol * 100, annualizedPct: annualizedVol * 100 };
+}
+
 export function createServer(): McpServer {
   const server = new McpServer({
     name: "binance-futures-mcp",
@@ -82,10 +99,17 @@ export function createServer(): McpServer {
       title: "Ambil Funding Rate Terkini",
       description:
         "Mengambil funding rate TERKINI untuk sebuah pair Binance Futures (LANGSUNG dari Binance native premiumIndex, " +
-        "bukan lewat Coinalyze — source of truth). " +
+        "bukan lewat Coinalyze — source of truth), plus basis (deviasi mark price dari index price) untuk membaca " +
+        "sentimen premium/discount futures vs spot. " +
         "Funding rate positif besar menandakan long crowded (bias kontrarian: waspada potensi long squeeze). " +
         "Funding rate negatif besar menandakan short crowded (bias kontrarian: waspada potensi short squeeze). " +
-        "Gunakan tool ini untuk membaca sentimen leverage pasar saat ini.",
+        "Basis positif besar menandakan futures premium tinggi (sentimen long agresif, funding biasanya menyusul naik); " +
+        "basis negatif besar menandakan futures discount (sentimen short agresif); basis mendekati nol tapi funding " +
+        "masih ekstrem menandakan funding lagging, kemungkinan mean-revert akan terjadi. " +
+        "Gunakan tool ini untuk membaca sentimen leverage pasar saat ini. " +
+        "PERHATIAN: index price Binance adalah rata-rata tertimbang dari beberapa exchange spot — untuk pair kecil " +
+        "atau baru listing, salah satu exchange sumber bisa illikuid dan membuat index price (dan karenanya basis) " +
+        "jadi noisy; interpretasikan dengan hati-hati untuk pair semacam itu.",
       inputSchema: { symbol: symbolSchema },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -94,6 +118,12 @@ export function createServer(): McpServer {
         const data = await binanceProxy.getCurrentFundingRateNative(symbol);
         const rate = parseFloat(data.lastFundingRate);
         const markPrice = parseFloat(data.markPrice);
+        const indexPrice = parseFloat(data.indexPrice);
+        // Basis = deviasi mark price dari index price. Ini SATU-SATUNYA angka
+        // divergensi mark-vs-index yang kita tampilkan — sengaja tidak dihitung
+        // dua kali dengan nama berbeda karena keduanya angka yang sama persis.
+        const basis = (markPrice - indexPrice) / indexPrice;
+
         const interpretation =
           rate >= 0.0003
             ? "CROWDED LONG (funding cukup tinggi — mayoritas leverage di sisi long, ada risiko long squeeze jika harga berbalik turun)"
@@ -101,22 +131,43 @@ export function createServer(): McpServer {
               ? "CROWDED SHORT (funding negatif signifikan — mayoritas leverage di sisi short, ada risiko short squeeze jika harga berbalik naik)"
               : "NETRAL (funding dalam rentang wajar, tidak ada crowding ekstrem yang jelas)";
 
+        const BASIS_THRESHOLD = 0.0005; // 0.05% — basis wajar biasanya lebih sempit dari ini di pair likuid
+        const basisInterpretation =
+          basis >= BASIS_THRESHOLD
+            ? "PREMIUM TINGGI (mark price jauh di atas index — sentimen long agresif di futures, funding rate biasanya menyusul naik)"
+            : basis <= -BASIS_THRESHOLD
+              ? "DISCOUNT TINGGI (mark price jauh di bawah index — sentimen short agresif di futures, funding rate biasanya menyusul turun)"
+              : Math.abs(rate) >= 0.0003
+                ? "BASIS NETRAL TAPI FUNDING EKSTREM (basis belum mengkonfirmasi funding — kemungkinan funding lagging, waspada potensi mean-revert funding ke arah netral)"
+                : "NETRAL (basis dalam rentang wajar, mark price mengikuti index dengan dekat)";
+
         const text = [
           `# Funding Rate — ${symbol}`,
           ``,
           `- Funding Rate Saat Ini: ${fmtPct(rate, 4)}`,
           `- Mark Price: ${fmtPrice(markPrice)}`,
+          `- Index Price: ${fmtPrice(indexPrice)}`,
+          `- Basis (Mark vs Index): ${fmtPct(basis, 4)}`,
           `- Waktu Funding Berikutnya: ${fmtTime(data.nextFundingTime)}`,
           `- Update Terakhir: ${fmtTime(data.time)}`,
           ``,
-          `**Interpretasi**: ${interpretation}`,
+          `**Interpretasi Funding**: ${interpretation}`,
+          `**Interpretasi Basis**: ${basisInterpretation}`,
           ``,
-          `_Catatan: threshold crowded (±0.03%) adalah heuristik umum, sesuaikan dengan konteks volatilitas pair yang sedang ditradingkan. Data LANGSUNG dari Binance native (premiumIndex)._`,
+          `_Catatan: threshold crowded funding (±0.03%) dan basis (±0.05%) adalah heuristik umum, sesuaikan dengan konteks volatilitas pair yang sedang ditradingkan. Index price Binance adalah rata-rata tertimbang dari beberapa exchange spot — untuk pair kecil/baru listing, salah satu exchange sumber bisa illikuid dan membuat index price sendiri jadi noisy. Data LANGSUNG dari Binance native (premiumIndex)._`,
         ].join("\n");
 
         return {
           content: [{ type: "text", text }],
-          structuredContent: { symbol, fundingRate: rate, markPrice, interpretation },
+          structuredContent: {
+            symbol,
+            fundingRate: rate,
+            markPrice,
+            indexPrice,
+            basis,
+            interpretation,
+            basisInterpretation,
+          },
         };
       } catch (err) {
         return errorResult(err);
@@ -884,6 +935,66 @@ export function createServer(): McpServer {
         ].join("\n");
 
         return { content: [{ type: "text", text }] };
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "binance_get_realized_volatility",
+    {
+      title: "Realized Volatility (Historis)",
+      description:
+        "Menghitung realized volatility (RV) historis untuk sebuah pair Binance Futures di dua timeframe " +
+        "(15 menit, ~24 jam terakhir; dan 1 jam, ~30 jam terakhir), LANGSUNG dari Binance native klines. " +
+        "RV dihitung dari log-return antar candle close (RV = sqrt(mean(log_return^2)) * sqrt(periode/tahun)), " +
+        "ditampilkan baik dalam bentuk annualized (%) maupun per-periode (%) supaya tidak menyesatkan untuk pair " +
+        "kecil yang volatil (angka annualized saja bisa terlihat ekstrem tapi tidak intuitif). " +
+        "RV tinggi menandakan range candle historis melebar dibanding biasanya — berguna untuk cross-check " +
+        "dengan input i_atrMult di indikator Pine Script Grid Advisor saat mengkalibrasi lebar grid range.",
+      inputSchema: { symbol: symbolSchema },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ symbol }) => {
+      try {
+        const [klines15m, klines1h] = await Promise.all([
+          binanceProxy.getKlinesNative(symbol, "15m", 96),
+          binanceProxy.getKlinesNative(symbol, "1h", 30),
+        ]);
+
+        const closes15m = klines15m.map((k) => parseFloat(k[4]));
+        const closes1h = klines1h.map((k) => parseFloat(k[4]));
+
+        const rv15m = computeRealizedVolatility(closes15m, 35040);
+        const rv1h = computeRealizedVolatility(closes1h, 8760);
+
+        const text = [
+          `# Realized Volatility — ${symbol}`,
+          ``,
+          `| Timeframe | Annualized | Per-Periode | Jumlah Candle |`,
+          `|---|---|---|---|`,
+          `| 15 Menit (~24 jam) | ${rv15m.annualizedPct.toFixed(2)}% | ${rv15m.periodPct.toFixed(4)}% | ${closes15m.length} |`,
+          `| 1 Jam (~30 jam) | ${rv1h.annualizedPct.toFixed(2)}% | ${rv1h.periodPct.toFixed(4)}% | ${closes1h.length} |`,
+          ``,
+          `**Interpretasi**: RV annualized tinggi menandakan range candle historis melebar dibanding biasanya — ` +
+            `gunakan angka per-periode untuk intuisi pergerakan riil per candle (annualized saja bisa terlihat ` +
+            `ekstrem untuk pair kecil yang volatil). Cross-check dengan i_atrMult di Grid Advisor Pine Script ` +
+            `saat mengkalibrasi lebar grid range.`,
+          ``,
+          `_Data LANGSUNG dari Binance native (klines). RV dihitung dari log-return close-to-close, bukan true range._`,
+        ].join("\n");
+
+        return {
+          content: [{ type: "text", text }],
+          structuredContent: {
+            symbol,
+            rv15mAnnualizedPct: rv15m.annualizedPct,
+            rv15mPeriodPct: rv15m.periodPct,
+            rv1hAnnualizedPct: rv1h.annualizedPct,
+            rv1hPeriodPct: rv1h.periodPct,
+          },
+        };
       } catch (err) {
         return errorResult(err);
       }
