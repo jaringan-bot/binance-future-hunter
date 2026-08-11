@@ -58,10 +58,16 @@ const ALLOWED_PATHS_BY_MARKET: Record<string, Set<string>> = {
     "/futures/data/openInterestHist",
     "/futures/data/takerlongshortRatio",
   ]),
-  // Spot cuma expose ticker/price (harga spot mentah) — sengaja minimal,
-  // tambah path lain di sini kalau ada kebutuhan baru (klines spot, depth
-  // spot, dst).
-  spot: new Set(["/api/v3/ticker/price"]),
+  spot: new Set([
+    "/api/v3/ticker/price",
+    "/api/v3/ticker/24hr",
+    "/api/v3/ticker/bookTicker",
+    "/api/v3/depth",
+    "/api/v3/klines",
+    "/api/v3/aggTrades",
+    "/api/v3/avgPrice",
+    "/api/v3/exchangeInfo",
+  ]),
 };
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {

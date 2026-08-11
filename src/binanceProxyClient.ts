@@ -40,8 +40,17 @@ const PROXY_ALLOWED_PATHS = new Set([
   "/futures/data/openInterestHist",
   "/futures/data/takerlongshortRatio",
   // Spot (lihat proxy/api/binance.ts market='spot') — dipakai untuk basis
-  // futures-vs-spot riil, bukan cuma vs index price blended.
+  // futures-vs-spot riil, bukan cuma vs index price blended, plus data spot
+  // pelengkap lain (24hr, book ticker, depth, klines, aggTrades, avgPrice,
+  // exchangeInfo untuk cek status listing).
   "/api/v3/ticker/price",
+  "/api/v3/ticker/24hr",
+  "/api/v3/ticker/bookTicker",
+  "/api/v3/depth",
+  "/api/v3/klines",
+  "/api/v3/aggTrades",
+  "/api/v3/avgPrice",
+  "/api/v3/exchangeInfo",
 ]);
 
 let proxyUrl: string | undefined;
@@ -390,4 +399,120 @@ export interface SpotPrice {
 
 export async function getSpotPrice(symbol: string): Promise<SpotPrice> {
   return callProxy<SpotPrice>("/api/v3/ticker/price", { symbol: symbol.toUpperCase() }, "spot");
+}
+
+// ─────────────────────────────────────────────────────────────
+// SPOT 24HR TICKER — lebih kaya dari futures Ticker24hr: ada
+// weightedAvgPrice (VWAP), openPrice, bidPrice/askPrice, dan count
+// (jumlah trade dalam window).
+// ─────────────────────────────────────────────────────────────
+export interface SpotTicker24hr {
+  symbol: string;
+  priceChange: string;
+  priceChangePercent: string;
+  weightedAvgPrice: string;
+  openPrice: string;
+  highPrice: string;
+  lowPrice: string;
+  lastPrice: string;
+  bidPrice: string;
+  askPrice: string;
+  volume: string;
+  quoteVolume: string;
+  count: number;
+}
+
+export async function getSpotTicker24hr(symbol: string): Promise<SpotTicker24hr> {
+  return callProxy<SpotTicker24hr>("/api/v3/ticker/24hr", { symbol: symbol.toUpperCase() }, "spot");
+}
+
+// ─────────────────────────────────────────────────────────────
+// SPOT BOOK TICKER — best bid/ask real-time, lebih ringan dari full
+// depth kalau cuma butuh spread sesaat.
+// ─────────────────────────────────────────────────────────────
+export interface SpotBookTicker {
+  symbol: string;
+  bidPrice: string;
+  bidQty: string;
+  askPrice: string;
+  askQty: string;
+}
+
+export async function getSpotBookTicker(symbol: string): Promise<SpotBookTicker> {
+  return callProxy<SpotBookTicker>("/api/v3/ticker/bookTicker", { symbol: symbol.toUpperCase() }, "spot");
+}
+
+// ─────────────────────────────────────────────────────────────
+// SPOT ORDER BOOK — sama konsepnya dengan OrderBookDepth futures, tapi
+// response spot TIDAK punya field E/T (event/transaction time).
+// ─────────────────────────────────────────────────────────────
+export interface SpotOrderBook {
+  lastUpdateId: number;
+  bids: [string, string][];
+  asks: [string, string][];
+}
+
+export async function getSpotOrderBook(symbol: string, limit: number): Promise<SpotOrderBook> {
+  return callProxy<SpotOrderBook>("/api/v3/depth", { symbol: symbol.toUpperCase(), limit }, "spot");
+}
+
+// ─────────────────────────────────────────────────────────────
+// SPOT KLINES & AGG TRADES — format response sama persis dengan versi
+// Futures (array-of-array untuk klines, object array untuk aggTrades),
+// jadi reuse tipe KlineTuple & AggTrade yang sudah ada di atas.
+// ─────────────────────────────────────────────────────────────
+export async function getSpotKlinesNative(
+  symbol: string,
+  interval: string,
+  limit: number,
+): Promise<KlineTuple[]> {
+  return callProxy<KlineTuple[]>(
+    "/api/v3/klines",
+    { symbol: symbol.toUpperCase(), interval, limit },
+    "spot",
+  );
+}
+
+export async function getSpotAggTrades(symbol: string, limit: number): Promise<AggTrade[]> {
+  return callProxy<AggTrade[]>("/api/v3/aggTrades", { symbol: symbol.toUpperCase(), limit }, "spot");
+}
+
+// ─────────────────────────────────────────────────────────────
+// SPOT AVG PRICE — harga rata-rata bergerak (default window 5 menit
+// dari sisi Binance, ditentukan oleh 'mins' pada response).
+// ─────────────────────────────────────────────────────────────
+export interface SpotAvgPrice {
+  mins: number;
+  price: string;
+}
+
+export async function getSpotAvgPrice(symbol: string): Promise<SpotAvgPrice> {
+  return callProxy<SpotAvgPrice>("/api/v3/avgPrice", { symbol: symbol.toUpperCase() }, "spot");
+}
+
+// ─────────────────────────────────────────────────────────────
+// SPOT EXCHANGE INFO (per-symbol) — buat cek apakah sebuah pair BENAR
+// listed di Binance Spot dan status tradingnya, bukan cuma nebak dari
+// error "Invalid symbol" di endpoint lain. Banyak pair Futures (terutama
+// koin baru/kecil) TIDAK listed di Spot sama sekali.
+// ─────────────────────────────────────────────────────────────
+export interface SpotSymbolInfo {
+  symbol: string;
+  status: string;
+  baseAsset: string;
+  quoteAsset: string;
+  isSpotTradingAllowed: boolean;
+}
+
+interface SpotExchangeInfoResponse {
+  symbols: SpotSymbolInfo[];
+}
+
+export async function getSpotExchangeInfo(symbol: string): Promise<SpotSymbolInfo | null> {
+  const data = await callProxy<SpotExchangeInfoResponse>(
+    "/api/v3/exchangeInfo",
+    { symbol: symbol.toUpperCase() },
+    "spot",
+  );
+  return data.symbols[0] ?? null;
 }

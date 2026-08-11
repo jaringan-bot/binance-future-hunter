@@ -2,9 +2,10 @@
 
 MCP server yang menyediakan data publik Binance USDS-M Futures (funding rate,
 open interest, long/short ratio, taker volume, candlestick, order book,
-volatility) sebagai tools yang bisa dipanggil Claude. Semua data yang
-disajikan bersifat **publik read-only** — tidak ada order/trading, tidak ada
-akses ke data akun pribadi.
+volatility) plus pembanding Binance Spot (harga, order book, candlestick,
+CVD) sebagai tools yang bisa dipanggil Claude. Semua data yang disajikan
+bersifat **publik read-only** — tidak ada order/trading, tidak ada akses ke
+data akun pribadi.
 
 ## Tujuan
 
@@ -29,8 +30,9 @@ dalam percakapan dengan Claude, tanpa perlu buka dashboard exchange terpisah.
 
 ## Kelebihan
 
-- 14 tools mencakup tiga sudut analisis: bias arah pasar, area harga kunci
-  (order book), dan konfirmasi eksekusi (order flow/aggressor).
+- 22 tools mencakup empat sudut analisis: bias arah pasar, area harga kunci
+  (order book), konfirmasi eksekusi (order flow/aggressor), dan pembanding
+  Futures-vs-Spot (leverage-driven vs demand riil).
 - Read-only murni — tidak ada risiko custodial atau trading tak disengaja.
 - Transparan soal keterbatasan tiap tool (lihat bagian di bawah), bukan
   dibungkus seolah semua data sempurna.
@@ -96,6 +98,13 @@ dan `PROXY_URL`/`PROXY_SECRET` (proxy Vercel) — lihat bagian Setup di bawah.
 | `binance_get_multi_timeframe_bias` | Bias Bullish/Bearish/Sideways di 5 timeframe sekaligus (1m/5m/15m/1h/1d) | Binance native |
 | `binance_get_realized_volatility` | Realized volatility historis (15m/1h) dari log-return, untuk kalibrasi lebar grid | Binance native |
 | `binance_get_24hr_ticker` | Ringkasan statistik 24 jam (rolling window resmi) | Binance native |
+| `binance_get_spot_ticker_24hr` | Statistik 24 jam versi Spot (harga, %change, VWAP, volume, jumlah trade) — bandingkan dengan versi Futures di atas | Binance native (Spot) |
+| `binance_get_spot_book_ticker` | Best bid/ask + qty real-time Spot, lebih ringan dari full order book | Binance native (Spot) |
+| `binance_get_spot_order_book` | Order book depth Spot (bid/ask, spread, wall terbesar) | Binance native (Spot) |
+| `binance_get_spot_klines` | Candlestick OHLCV Spot per timeframe | Binance native (Spot) |
+| `binance_get_spot_agg_trades` | Trade individual granular Spot (CVD riil, bukan leverage) | Binance native (Spot) |
+| `binance_get_spot_avg_price` | Harga rata-rata bergerak Spot (window beberapa menit, lebih stabil dari last-trade) | Binance native (Spot) |
+| `binance_check_spot_listing` | Cek apakah pair listed di Binance Spot + status trading — dipakai sebelum panggil tool Spot lain untuk pair yang belum pasti | Binance native (Spot) |
 
 ## Keterbatasan yang jujur perlu diketahui
 

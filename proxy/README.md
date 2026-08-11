@@ -72,6 +72,13 @@ Whitelist di-split per market (lihat `ALLOWED_PATHS_BY_MARKET` di
 
 **`market=spot`**:
 - `/api/v3/ticker/price` — harga spot terkini (dipakai `binance_get_spot_price`)
+- `/api/v3/ticker/24hr` — statistik 24 jam spot (dipakai `binance_get_spot_ticker_24hr`)
+- `/api/v3/ticker/bookTicker` — best bid/ask real-time (dipakai `binance_get_spot_book_ticker`)
+- `/api/v3/depth` — order book spot (dipakai `binance_get_spot_order_book`)
+- `/api/v3/klines` — candlestick spot (dipakai `binance_get_spot_klines`)
+- `/api/v3/aggTrades` — aggregate trades spot / CVD riil (dipakai `binance_get_spot_agg_trades`)
+- `/api/v3/avgPrice` — harga rata-rata bergerak spot (dipakai `binance_get_spot_avg_price`)
+- `/api/v3/exchangeInfo` — metadata & status listing pair (dipakai `binance_check_spot_listing`)
 
 Untuk menambah path baru, edit whitelist market yang relevan di
 `ALLOWED_PATHS_BY_MARKET` (`api/binance.ts`) — JANGAN buka proxy generic
