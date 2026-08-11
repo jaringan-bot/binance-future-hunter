@@ -58,7 +58,7 @@ const symbolSchema = z
 // Parse ISO 8601 datetime string ke epoch ms. Dipakai untuk startTime/endTime
 // klines (Futures & Spot) supaya backtest bisa narik histori jauh ke belakang,
 // bukan cuma N candle terakhir.
-function parseTimeParam(value: string | undefined, label: string): number | undefined {
+export function parseTimeParam(value: string | undefined, label: string): number | undefined {
   if (value === undefined) return undefined;
   const ms = Date.parse(value);
   if (Number.isNaN(ms)) {
@@ -84,7 +84,7 @@ function errorResult(err: unknown) {
 
 // RV = sqrt(mean(log_return^2)) * sqrt(periode/tahun) — realized volatility
 // standar dari log-return close-to-close.
-function computeRealizedVolatility(
+export function computeRealizedVolatility(
   closes: number[],
   periodsPerYear: number,
 ): { periodPct: number; annualizedPct: number } {
