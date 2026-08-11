@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { computeRealizedVolatility, parseTimeParam } from "./server.js";
+import { computeRealizedVolatility, parseTimeParam } from "./shared.js";
 
 describe("computeRealizedVolatility", () => {
   it("returns zero for fewer than 2 closes", () => {
