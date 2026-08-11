@@ -19,6 +19,10 @@
 //   dilaporkan -57% padahal Binance asli 0.005%) dan harga dibulatkan
 //   terlalu kasar (2 desimal fixed, menghancurkan presisi pair < $1).
 //   Binance native adalah source of truth untuk keduanya.
+// - Open interest (snapshot & histori), long/short ratio blended (global
+//   account), dan taker buy/sell volume ratio — dipindah dari Coinalyze
+//   karena Binance punya endpoint publik resmi untuk ketiganya, jadi tidak
+//   perlu lagi bergantung ke agregator pihak ketiga untuk data ini.
 //
 // Lihat proxy/README.md untuk detail whitelist path yang diizinkan proxy ini.
 
@@ -29,9 +33,12 @@ const PROXY_ALLOWED_PATHS = new Set([
   "/fapi/v1/premiumIndex",
   "/fapi/v1/klines",
   "/fapi/v1/ticker/24hr",
+  "/fapi/v1/openInterest",
   "/futures/data/topLongShortAccountRatio",
   "/futures/data/topLongShortPositionRatio",
   "/futures/data/globalLongShortAccountRatio",
+  "/futures/data/openInterestHist",
+  "/futures/data/takerlongshortratio",
 ]);
 
 let proxyUrl: string | undefined;
@@ -189,6 +196,64 @@ export async function getGlobalAccountRatio(
   limit: number,
 ): Promise<GlobalAccountRatioPoint[]> {
   return callProxy<GlobalAccountRatioPoint[]>("/futures/data/globalLongShortAccountRatio", {
+    symbol: symbol.toUpperCase(),
+    period,
+    limit,
+  });
+}
+
+// ─────────────────────────────────────────────────────────────
+// OPEN INTEREST (NATIVE) — menggantikan Coinalyze untuk OI snapshot
+// terkini dan histori. openInterest/sumOpenInterest sudah dalam satuan
+// kontrak (base asset), tidak perlu konversi.
+// ─────────────────────────────────────────────────────────────
+export interface OpenInterestPoint {
+  symbol: string;
+  openInterest: string;
+  time: number;
+}
+
+export async function getOpenInterestNative(symbol: string): Promise<OpenInterestPoint> {
+  return callProxy<OpenInterestPoint>("/fapi/v1/openInterest", { symbol: symbol.toUpperCase() });
+}
+
+export interface OpenInterestHistPoint {
+  symbol: string;
+  sumOpenInterest: string;
+  sumOpenInterestValue: string;
+  timestamp: number;
+}
+
+export async function getOpenInterestHistNative(
+  symbol: string,
+  period: string,
+  limit: number,
+): Promise<OpenInterestHistPoint[]> {
+  return callProxy<OpenInterestHistPoint[]>("/futures/data/openInterestHist", {
+    symbol: symbol.toUpperCase(),
+    period,
+    limit,
+  });
+}
+
+// ─────────────────────────────────────────────────────────────
+// TAKER BUY/SELL VOLUME RATIO (NATIVE) — statistik resmi Binance,
+// menggantikan pendekatan Coinalyze yang diturunkan manual dari volume
+// candlestick. buySellRatio sudah dihitung Binance sendiri (buyVol/sellVol).
+// ─────────────────────────────────────────────────────────────
+export interface TakerLongShortRatioPoint {
+  buySellRatio: string;
+  buyVol: string;
+  sellVol: string;
+  timestamp: number;
+}
+
+export async function getTakerLongShortRatioNative(
+  symbol: string,
+  period: string,
+  limit: number,
+): Promise<TakerLongShortRatioPoint[]> {
+  return callProxy<TakerLongShortRatioPoint[]>("/futures/data/takerlongshortratio", {
     symbol: symbol.toUpperCase(),
     period,
     limit,

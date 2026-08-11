@@ -32,9 +32,11 @@ const KLINE_INTERVAL_ENUM = [
   "1d",
 ] as const;
 
-// Binance topLongShortAccountRatio/positionRatio hanya support subset period ini
-// (beda dari Coinalyze yang lebih fleksibel).
-const TOP_TRADER_PERIOD_ENUM = [
+// Semua endpoint /futures/data/* Binance (topLongShortAccountRatio,
+// topLongShortPositionRatio, globalLongShortAccountRatio, openInterestHist,
+// takerlongshortratio) cuma support subset period ini (beda dari Coinalyze
+// yang lebih fleksibel untuk endpoint yang masih dia sumberi).
+const FUTURES_DATA_PERIOD_ENUM = [
   "5m",
   "15m",
   "30m",
@@ -247,7 +249,8 @@ export function createServer(): McpServer {
     {
       title: "Open Interest Saat Ini",
       description:
-        "Mengambil Open Interest (total kontrak terbuka) TERKINI untuk sebuah pair (data via Coinalyze, sumber asli Binance). " +
+        "Mengambil Open Interest (total kontrak terbuka) TERKINI untuk sebuah pair (LANGSUNG dari Binance native, bukan lewat " +
+        "Coinalyze — source of truth). " +
         "OI naik + harga naik = tren didukung entry baru (sehat). " +
         "OI turun + harga naik = short covering / posisi ditutup, bukan entry baru (kurang solid). " +
         "OI turun tajam = kemungkinan capitulation/liquidation massal.",
@@ -256,18 +259,19 @@ export function createServer(): McpServer {
     },
     async ({ symbol }) => {
       try {
-        const data = await coinalyze.getCurrentOpenInterest(symbol);
+        const data = await binanceProxy.getOpenInterestNative(symbol);
+        const openInterest = parseFloat(data.openInterest);
         const text = [
           `# Open Interest — ${symbol}`,
           ``,
-          `- Open Interest: ${fmtNum(data.value, 2)} kontrak`,
-          `- Waktu: ${fmtTime(data.update)}`,
+          `- Open Interest: ${fmtNum(openInterest, 2)} kontrak`,
+          `- Waktu: ${fmtTime(data.time)}`,
           ``,
-          `_Gunakan bersama \`binance_get_open_interest_history\` untuk melihat tren naik/turun, dan bandingkan dengan pergerakan harga untuk interpretasi yang benar (OI saja tanpa konteks harga bisa menyesatkan)._`,
+          `_Gunakan bersama \`binance_get_open_interest_history\` untuk melihat tren naik/turun, dan bandingkan dengan pergerakan harga untuk interpretasi yang benar (OI saja tanpa konteks harga bisa menyesatkan). Data LANGSUNG dari Binance native._`,
         ].join("\n");
         return {
           content: [{ type: "text", text }],
-          structuredContent: { symbol, openInterest: data.value, time: data.update },
+          structuredContent: { symbol, openInterest, time: data.time },
         };
       } catch (err) {
         return errorResult(err);
@@ -280,14 +284,15 @@ export function createServer(): McpServer {
     {
       title: "Histori Tren Open Interest",
       description:
-        "Mengambil histori Open Interest untuk melihat TREN naik/turun sepanjang waktu (bukan cuma snapshot), data via Coinalyze " +
-        "(sumber asli Binance). Ini yang dibutuhkan untuk menjawab 'apakah OI sedang naik atau turun hari ini'. " +
-        "Kombinasikan dengan data candlestick harga (binance_get_klines) pada periode yang sama untuk interpretasi yang valid: " +
-        "OI naik + harga naik = trend genuinely didukung entry baru; OI turun + harga naik = short covering (rally rapuh).",
+        "Mengambil histori Open Interest untuk melihat TREN naik/turun sepanjang waktu (bukan cuma snapshot), LANGSUNG dari " +
+        "Binance native (bukan lewat Coinalyze — source of truth). Ini yang dibutuhkan untuk menjawab 'apakah OI sedang naik " +
+        "atau turun hari ini'. Kombinasikan dengan data candlestick harga (binance_get_klines) pada periode yang sama untuk " +
+        "interpretasi yang valid: OI naik + harga naik = trend genuinely didukung entry baru; OI turun + harga naik = short " +
+        "covering (rally rapuh).",
       inputSchema: {
         symbol: symbolSchema,
         period: z
-          .enum(PERIOD_ENUM)
+          .enum(FUTURES_DATA_PERIOD_ENUM)
           .default("15m")
           .describe("Interval antar data poin: 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d"),
         limit: z.number().int().min(1).max(500).default(30).describe("Jumlah data poin"),
@@ -296,7 +301,7 @@ export function createServer(): McpServer {
     },
     async ({ symbol, period, limit }) => {
       try {
-        const bars = await coinalyze.getOpenInterestHistory(symbol, period, limit);
+        const bars = await binanceProxy.getOpenInterestHistNative(symbol, period, limit);
         if (bars.length === 0) {
           return {
             content: [
@@ -307,14 +312,14 @@ export function createServer(): McpServer {
             ],
           };
         }
-        const values = bars.map((b) => b.c);
+        const values = bars.map((b) => parseFloat(b.sumOpenInterest));
         const direction = trendDirection(values);
         const first = values[0];
         const last = values[values.length - 1];
         const changePct = first !== 0 ? ((last - first) / first) * 100 : 0;
 
         const rows = bars
-          .map((b) => `| ${fmtTime(b.t * 1000)} | ${fmtNum(b.c, 2)} |`)
+          .map((b, i) => `| ${fmtTime(b.timestamp)} | ${fmtNum(values[i], 2)} |`)
           .join("\n");
 
         const text = [
@@ -326,7 +331,7 @@ export function createServer(): McpServer {
           `|---|---|`,
           rows,
           ``,
-          `_Langkah selanjutnya yang disarankan: panggil \`binance_get_klines\` pair & timeframe yang sama untuk cek apakah OI ${direction} ini terjadi bersamaan dengan harga naik atau turun — kombinasi keduanya yang menentukan interpretasi (entry baru vs covering vs capitulation)._`,
+          `_Langkah selanjutnya yang disarankan: panggil \`binance_get_klines\` pair & timeframe yang sama untuk cek apakah OI ${direction} ini terjadi bersamaan dengan harga naik atau turun — kombinasi keduanya yang menentukan interpretasi (entry baru vs covering vs capitulation). Data LANGSUNG dari Binance native._`,
         ].join("\n");
 
         return { content: [{ type: "text", text }] };
@@ -344,14 +349,15 @@ export function createServer(): McpServer {
     {
       title: "Long/Short Ratio",
       description:
-        "Mengambil rasio posisi long vs short agregat (semua trader) untuk sebuah pair Binance Futures, beserta tren dari waktu " +
-        "ke waktu (data via Coinalyze, sumber asli Binance). Ratio > 1 berarti lebih banyak/besar posisi long dibanding short. " +
+        "Mengambil rasio posisi long vs short agregat (semua akun/global) untuk sebuah pair Binance Futures, beserta tren dari " +
+        "waktu ke waktu (LANGSUNG dari Binance native globalLongShortAccountRatio, bukan lewat Coinalyze — source of truth). " +
+        "Ratio > 1 berarti lebih banyak/besar posisi long dibanding short. " +
         "KETERBATASAN: ini rasio agregat BLENDED, BUKAN breakdown terpisah retail-vs-top-trader — untuk breakdown top-trader " +
-        "murni, pakai binance_get_top_trader_ratio yang datanya langsung dari Binance (bukan Coinalyze).",
+        "murni, pakai binance_get_top_trader_ratio.",
       inputSchema: {
         symbol: symbolSchema,
         period: z
-          .enum(PERIOD_ENUM)
+          .enum(FUTURES_DATA_PERIOD_ENUM)
           .default("15m")
           .describe("Interval antar data poin: 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d"),
         limit: z.number().int().min(1).max(500).default(10).describe("Jumlah data poin terakhir"),
@@ -360,8 +366,8 @@ export function createServer(): McpServer {
     },
     async ({ symbol, period, limit }) => {
       try {
-        const bars = await coinalyze.getLongShortRatioHistory(symbol, period, limit);
-        if (bars.length === 0) {
+        const points = await binanceProxy.getGlobalAccountRatio(symbol, period, limit);
+        if (points.length === 0) {
           return {
             content: [
               {
@@ -372,14 +378,20 @@ export function createServer(): McpServer {
           };
         }
 
-        const latest = bars[bars.length - 1];
-        const bias = latest.l > 55 ? "LONG" : latest.l < 45 ? "SHORT" : "NETRAL";
-        const direction = trendDirection(bars.map((b) => b.r));
+        const longPcts = points.map((p) => parseFloat(p.longAccount) * 100);
+        const shortPcts = points.map((p) => parseFloat(p.shortAccount) * 100);
+        const ratios = points.map((p) => parseFloat(p.longShortRatio));
 
-        const rows = bars
+        const latestLongPct = longPcts[longPcts.length - 1];
+        const latestShortPct = shortPcts[shortPcts.length - 1];
+        const latestRatio = ratios[ratios.length - 1];
+        const bias = latestLongPct > 55 ? "LONG" : latestLongPct < 45 ? "SHORT" : "NETRAL";
+        const direction = trendDirection(ratios);
+
+        const rows = points
           .map(
-            (b) =>
-              `| ${fmtTime(b.t * 1000)} | ${b.l.toFixed(2)}% | ${b.s.toFixed(2)}% | ${fmtNum(b.r, 4)} |`,
+            (p, i) =>
+              `| ${fmtTime(p.timestamp)} | ${longPcts[i].toFixed(2)}% | ${shortPcts[i].toFixed(2)}% | ${fmtNum(ratios[i], 4)} |`,
           )
           .join("\n");
 
@@ -387,7 +399,7 @@ export function createServer(): McpServer {
           `# Long/Short Ratio — ${symbol} (period: ${period})`,
           ``,
           `## Snapshot Terkini`,
-          `- **Long**: ${latest.l.toFixed(1)}% / **Short**: ${latest.s.toFixed(1)}% → ratio ${fmtNum(latest.r, 4)} → bias ${bias}`,
+          `- **Long**: ${latestLongPct.toFixed(1)}% / **Short**: ${latestShortPct.toFixed(1)}% → ratio ${fmtNum(latestRatio, 4)} → bias ${bias}`,
           `**Tren**: ${direction}`,
           ``,
           `## Histori`,
@@ -395,12 +407,18 @@ export function createServer(): McpServer {
           `|---|---|---|---|`,
           rows,
           ``,
-          `_Ini rasio agregat semua trader (blended), bukan breakdown top-trader/whale terpisah dari retail — pakai binance_get_top_trader_ratio untuk breakdown murni._`,
+          `_Ini rasio agregat semua trader (blended), bukan breakdown top-trader/whale terpisah dari retail — pakai binance_get_top_trader_ratio untuk breakdown murni. Data LANGSUNG dari Binance native._`,
         ].join("\n");
 
         return {
           content: [{ type: "text", text }],
-          structuredContent: { symbol, longPct: latest.l, shortPct: latest.s, ratio: latest.r, bias },
+          structuredContent: {
+            symbol,
+            longPct: latestLongPct,
+            shortPct: latestShortPct,
+            ratio: latestRatio,
+            bias,
+          },
         };
       } catch (err) {
         return errorResult(err);
@@ -433,7 +451,7 @@ export function createServer(): McpServer {
           .default("account")
           .describe("'account' = breakdown jumlah akun top trader, 'position' = breakdown size posisi top trader"),
         period: z
-          .enum(TOP_TRADER_PERIOD_ENUM)
+          .enum(FUTURES_DATA_PERIOD_ENUM)
           .default("1h")
           .describe("Interval antar data poin: 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d"),
         limit: z.number().int().min(1).max(500).default(10).describe("Jumlah data poin terakhir"),
@@ -736,33 +754,30 @@ export function createServer(): McpServer {
       title: "Taker Buy/Sell Volume Ratio",
       description:
         "Mengambil rasio volume taker buy vs sell — proxy tekanan beli/jual AGRESIF (market order), berbeda dari long/short ratio " +
-        "yang berbasis posisi terbuka (data via Coinalyze, diturunkan dari volume candlestick). Berguna sebagai konfirmasi tambahan: " +
-        "apakah tekanan eksekusi market saat ini condong beli atau jual.",
+        "yang berbasis posisi terbuka (LANGSUNG dari Binance native takerlongshortratio, bukan lagi diturunkan manual dari volume " +
+        "candlestick Coinalyze — source of truth). Berguna sebagai konfirmasi tambahan: apakah tekanan eksekusi market saat ini " +
+        "condong beli atau jual.",
       inputSchema: {
         symbol: symbolSchema,
-        period: z.enum(PERIOD_ENUM).default("15m"),
+        period: z.enum(FUTURES_DATA_PERIOD_ENUM).default("15m"),
         limit: z.number().int().min(1).max(500).default(10),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ symbol, period, limit }) => {
       try {
-        const bars = await coinalyze.getOhlcvHistory(symbol, period, limit);
-        if (bars.length === 0) {
+        const points = await binanceProxy.getTakerLongShortRatioNative(symbol, period, limit);
+        if (points.length === 0) {
           return {
             content: [{ type: "text", text: `Tidak ada data taker volume untuk ${symbol}.` }],
           };
         }
-        const ratioOf = (b: coinalyze.OhlcvBar) => {
-          const sellVol = b.v - b.bv;
-          return sellVol > 0 ? b.bv / sellVol : b.bv > 0 ? Infinity : 1;
-        };
-        const latest = bars[bars.length - 1];
-        const ratio = ratioOf(latest);
+        const ratios = points.map((p) => parseFloat(p.buySellRatio));
+        const ratio = ratios[ratios.length - 1];
         const bias = ratio > 1.05 ? "BUY dominan" : ratio < 0.95 ? "SELL dominan" : "seimbang";
 
-        const rows = bars
-          .map((b) => `| ${fmtTime(b.t * 1000)} | ${fmtNum(ratioOf(b), 4)} |`)
+        const rows = points
+          .map((p, i) => `| ${fmtTime(p.timestamp)} | ${fmtNum(ratios[i], 4)} |`)
           .join("\n");
 
         const text = [
@@ -774,6 +789,8 @@ export function createServer(): McpServer {
           `| Waktu | Buy/Sell Ratio |`,
           `|---|---|`,
           rows,
+          ``,
+          `_Data LANGSUNG dari Binance native (takerlongshortratio) — buySellRatio dihitung resmi oleh Binance, bukan derivasi manual dari candlestick._`,
         ].join("\n");
 
         return { content: [{ type: "text", text }] };

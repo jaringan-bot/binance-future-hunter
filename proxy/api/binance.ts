@@ -30,6 +30,11 @@ const BINANCE_BASE = "https://fapi.binance.com";
 // pakai Binance sebagai source of truth untuk funding rate & harga OHLC,
 // menggantikan Coinalyze yang ternyata punya masalah presisi/skala untuk
 // pair kecil (lihat PR fix/native-binance-precision untuk detail).
+//
+// openInterest/openInterestHist/takerlongshortratio ditambahkan supaya
+// open interest dan taker buy/sell ratio juga bisa pindah dari Coinalyze
+// ke Binance native (endpoint publik resmi, tidak perlu agregator pihak
+// ketiga untuk data ini).
 const ALLOWED_PATHS = new Set([
   "/fapi/v1/ping",
   "/fapi/v1/depth",
@@ -38,9 +43,12 @@ const ALLOWED_PATHS = new Set([
   "/fapi/v1/premiumIndex",
   "/fapi/v1/klines",
   "/fapi/v1/ticker/24hr",
+  "/fapi/v1/openInterest",
   "/futures/data/topLongShortAccountRatio",
   "/futures/data/topLongShortPositionRatio",
   "/futures/data/globalLongShortAccountRatio",
+  "/futures/data/openInterestHist",
+  "/futures/data/takerlongshortratio",
 ]);
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
