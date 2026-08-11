@@ -147,7 +147,7 @@ https://whalescope-mcp.<subdomain-cloudflare-kamu>.workers.dev
 
 Buka URL tersebut — harus muncul JSON status `"ok"`.
 
-## Setup Custom Domain (whale.jaringan.dev)
+## Setup Custom Domain (whalescope-mcp.jaringan.dev)
 
 Ini **tidak** bisa dilakukan lewat GitHub Actions — perlu langkah manual satu
 kali di dashboard Cloudflare:
@@ -156,20 +156,20 @@ kali di dashboard Cloudflare:
 2. Buka **Workers & Pages** → pilih worker `whalescope-mcp`
 3. Buka tab **Settings** → **Domains & Routes**
 4. Klik **Add** → **Custom Domain**
-5. Masukkan `whale.jaringan.dev`
+5. Masukkan `whalescope-mcp.jaringan.dev`
 6. Cloudflare akan otomatis membuat DNS record yang diperlukan **jika**
    domain `jaringan.dev` sudah berada di zona Cloudflare akun yang sama.
    Kalau domain itu terdaftar di akun/registrar lain, kamu perlu tambahkan
    CNAME record secara manual mengarah ke target yang ditampilkan Cloudflare.
 
 Setelah custom domain aktif, worker bisa diakses di
-`https://whale.jaringan.dev` (bukan lagi domain `.workers.dev`).
+`https://whalescope-mcp.jaringan.dev` (bukan lagi domain `.workers.dev`).
 
 ## Daftarkan sebagai Custom Connector di Claude
 
 1. Buka Claude (claude.ai) → **Settings** → **Connectors**
 2. Pilih **Add custom connector**
-3. Masukkan URL: `https://whale.jaringan.dev/mcp`
+3. Masukkan URL: `https://whalescope-mcp.jaringan.dev/mcp`
    (atau `https://whalescope-mcp.<subdomain>.workers.dev/mcp` jika belum
    setup custom domain — perhatikan path `/mcp` di akhir, wajib)
 4. Simpan, lalu aktifkan connector tersebut untuk percakapan yang kamu mau
