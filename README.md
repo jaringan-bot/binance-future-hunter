@@ -1,10 +1,58 @@
-# Binance Futures MCP Server (whale)
+# WhaleScope MCP — Binance Futures Market Intelligence
 
 MCP server yang menyediakan data publik Binance USDS-M Futures (funding rate,
 open interest, long/short ratio, taker volume, candlestick, order book,
 volatility) sebagai tools yang bisa dipanggil Claude. Semua data yang
 disajikan bersifat **publik read-only** — tidak ada order/trading, tidak ada
 akses ke data akun pribadi.
+
+## Tujuan
+
+Menyediakan gambaran positioning pasar Binance Futures — bukan cuma harga,
+tapi juga *siapa* yang lagi buka posisi apa (retail vs top trader), *seberapa
+crowded* leverage-nya, dan *di harga berapa* likuiditas menumpuk — langsung
+dalam percakapan dengan Claude, tanpa perlu buka dashboard exchange terpisah.
+
+## Manfaat
+
+- **Satu pintu buat banyak sinyal.** Funding rate, open interest, order book,
+  order flow, dan histori liquidation — semua lewat satu MCP connector, bukan
+  gonta-ganti tab.
+- **Bisa bedain retail vs whale.** `binance_get_top_trader_ratio` kasih
+  breakdown murni top-trader (terpisah dari `binance_get_long_short_ratio`
+  yang blended) — berguna buat lihat kalau posisi retail dan whale lagi
+  divergen.
+- **Native Binance di mana itu penting.** Harga, funding rate, klines, order
+  book — semua lewat jalur native Binance (bukan derivasi pihak ketiga),
+  supaya presisi terjaga terutama untuk pair kecil/kurang likuid.
+- **Gratis buat pemakaian personal** — lihat bagian [Biaya](#biaya).
+
+## Kelebihan
+
+- 14 tools mencakup tiga sudut analisis: bias arah pasar, area harga kunci
+  (order book), dan konfirmasi eksekusi (order flow/aggressor).
+- Read-only murni — tidak ada risiko custodial atau trading tak disengaja.
+- Transparan soal keterbatasan tiap tool (lihat bagian di bawah), bukan
+  dibungkus seolah semua data sempurna.
+- Infrastruktur cukup dengan free tier (Cloudflare Workers + Vercel Hobby +
+  Coinalyze free tier) untuk pemakaian personal.
+
+## Kekurangan
+
+- **Bukan stream real-time.** Semua tool bersifat request/response (snapshot
+  atau histori periodik) — tidak ada push event detik-demi-detik (misalnya
+  liquidation baru terjadi). Menambah itu butuh komponen infrastruktur
+  tambahan yang di luar cakupan project ini saat ini.
+- **Sebagian data masih lewat agregator pihak ketiga** (Coinalyze) — lihat
+  bagian [Keterbatasan](#keterbatasan-yang-jujur-perlu-diketahui) untuk detail
+  per tool.
+- **Setup awal butuh beberapa kredensial** (Coinalyze API key + proxy Vercel)
+  — bukan pasang-langsung-jalan, ada langkah konfigurasi manual sekali di
+  awal.
+- **Rate limit free tier Coinalyze** (40 request/menit per API key) bisa jadi
+  bottleneck kalau dipakai sangat intensif.
+- Tidak ada data wallet on-chain atau data dari exchange selain Binance
+  Futures USDS-M.
 
 **Sumber data: dua jalur, tergantung tool.**
 
