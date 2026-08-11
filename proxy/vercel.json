@@ -1,8 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "buildCommand": null,
   "functions": {
-    "proxy/api/binance.ts": {
+    "api/binance.ts": {
       "maxDuration": 10
     }
   }
