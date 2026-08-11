@@ -38,7 +38,7 @@ const PROXY_ALLOWED_PATHS = new Set([
   "/futures/data/topLongShortPositionRatio",
   "/futures/data/globalLongShortAccountRatio",
   "/futures/data/openInterestHist",
-  "/futures/data/takerlongshortratio",
+  "/futures/data/takerlongshortRatio",
 ]);
 
 let proxyUrl: string | undefined;
@@ -253,7 +253,7 @@ export async function getTakerLongShortRatioNative(
   period: string,
   limit: number,
 ): Promise<TakerLongShortRatioPoint[]> {
-  return callProxy<TakerLongShortRatioPoint[]>("/futures/data/takerlongshortratio", {
+  return callProxy<TakerLongShortRatioPoint[]>("/futures/data/takerlongshortRatio", {
     symbol: symbol.toUpperCase(),
     period,
     limit,

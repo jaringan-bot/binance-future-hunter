@@ -34,7 +34,7 @@ const KLINE_INTERVAL_ENUM = [
 
 // Semua endpoint /futures/data/* Binance (topLongShortAccountRatio,
 // topLongShortPositionRatio, globalLongShortAccountRatio, openInterestHist,
-// takerlongshortratio) cuma support subset period ini (beda dari Coinalyze
+// takerlongshortRatio) cuma support subset period ini (beda dari Coinalyze
 // yang lebih fleksibel untuk endpoint yang masih dia sumberi).
 const FUTURES_DATA_PERIOD_ENUM = [
   "5m",
@@ -754,7 +754,7 @@ export function createServer(): McpServer {
       title: "Taker Buy/Sell Volume Ratio",
       description:
         "Mengambil rasio volume taker buy vs sell — proxy tekanan beli/jual AGRESIF (market order), berbeda dari long/short ratio " +
-        "yang berbasis posisi terbuka (LANGSUNG dari Binance native takerlongshortratio, bukan lagi diturunkan manual dari volume " +
+        "yang berbasis posisi terbuka (LANGSUNG dari Binance native takerlongshortRatio, bukan lagi diturunkan manual dari volume " +
         "candlestick Coinalyze — source of truth). Berguna sebagai konfirmasi tambahan: apakah tekanan eksekusi market saat ini " +
         "condong beli atau jual.",
       inputSchema: {
@@ -790,7 +790,7 @@ export function createServer(): McpServer {
           `|---|---|`,
           rows,
           ``,
-          `_Data LANGSUNG dari Binance native (takerlongshortratio) — buySellRatio dihitung resmi oleh Binance, bukan derivasi manual dari candlestick._`,
+          `_Data LANGSUNG dari Binance native (takerlongshortRatio) — buySellRatio dihitung resmi oleh Binance, bukan derivasi manual dari candlestick._`,
         ].join("\n");
 
         return { content: [{ type: "text", text }] };

@@ -31,7 +31,7 @@ const BINANCE_BASE = "https://fapi.binance.com";
 // menggantikan Coinalyze yang ternyata punya masalah presisi/skala untuk
 // pair kecil (lihat PR fix/native-binance-precision untuk detail).
 //
-// openInterest/openInterestHist/takerlongshortratio ditambahkan supaya
+// openInterest/openInterestHist/takerlongshortRatio ditambahkan supaya
 // open interest dan taker buy/sell ratio juga bisa pindah dari Coinalyze
 // ke Binance native (endpoint publik resmi, tidak perlu agregator pihak
 // ketiga untuk data ini).
@@ -48,7 +48,7 @@ const ALLOWED_PATHS = new Set([
   "/futures/data/topLongShortPositionRatio",
   "/futures/data/globalLongShortAccountRatio",
   "/futures/data/openInterestHist",
-  "/futures/data/takerlongshortratio",
+  "/futures/data/takerlongshortRatio",
 ]);
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
