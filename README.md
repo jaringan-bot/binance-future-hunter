@@ -94,14 +94,14 @@ dan `PROXY_URL`/`PROXY_SECRET` (proxy Vercel) — lihat bagian Setup di bawah.
 | `binance_get_agg_trades` | Trade individual granular (buy/sell aggressor) untuk deteksi absorption | Binance native |
 | `binance_get_liquidation_history` | Histori liquidation | Coinalyze |
 | `binance_get_taker_volume_ratio` | Tekanan beli/jual agresif (taker volume), statistik resmi Binance | Binance native |
-| `binance_get_klines` | Candlestick OHLCV per timeframe | Binance native |
+| `binance_get_klines` | Candlestick OHLCV per timeframe, dukung `startTime`/`endTime` (histori jauh ke belakang, buat backtest, maks 1500 candle/panggilan) | Binance native |
 | `binance_get_multi_timeframe_bias` | Bias Bullish/Bearish/Sideways di 5 timeframe sekaligus (1m/5m/15m/1h/1d) | Binance native |
 | `binance_get_realized_volatility` | Realized volatility historis (15m/1h) dari log-return, untuk kalibrasi lebar grid | Binance native |
 | `binance_get_24hr_ticker` | Ringkasan statistik 24 jam (rolling window resmi) | Binance native |
 | `binance_get_spot_ticker_24hr` | Statistik 24 jam versi Spot (harga, %change, VWAP, volume, jumlah trade) — bandingkan dengan versi Futures di atas | Binance native (Spot) |
 | `binance_get_spot_book_ticker` | Best bid/ask + qty real-time Spot, lebih ringan dari full order book | Binance native (Spot) |
 | `binance_get_spot_order_book` | Order book depth Spot (bid/ask, spread, wall terbesar) | Binance native (Spot) |
-| `binance_get_spot_klines` | Candlestick OHLCV Spot per timeframe | Binance native (Spot) |
+| `binance_get_spot_klines` | Candlestick OHLCV Spot per timeframe, dukung `startTime`/`endTime` (maks 1000 candle/panggilan) | Binance native (Spot) |
 | `binance_get_spot_agg_trades` | Trade individual granular Spot (CVD riil, bukan leverage) | Binance native (Spot) |
 | `binance_get_spot_avg_price` | Harga rata-rata bergerak Spot (window beberapa menit, lebih stabil dari last-trade) | Binance native (Spot) |
 | `binance_check_spot_listing` | Cek apakah pair listed di Binance Spot + status trading — dipakai sebelum panggil tool Spot lain untuk pair yang belum pasti | Binance native (Spot) |

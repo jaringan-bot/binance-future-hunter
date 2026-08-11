@@ -358,11 +358,15 @@ export async function getKlinesNative(
   symbol: string,
   interval: string,
   limit: number,
+  startTime?: number,
+  endTime?: number,
 ): Promise<KlineTuple[]> {
   return callProxy<KlineTuple[]>("/fapi/v1/klines", {
     symbol: symbol.toUpperCase(),
     interval,
     limit,
+    startTime,
+    endTime,
   });
 }
 
@@ -465,10 +469,12 @@ export async function getSpotKlinesNative(
   symbol: string,
   interval: string,
   limit: number,
+  startTime?: number,
+  endTime?: number,
 ): Promise<KlineTuple[]> {
   return callProxy<KlineTuple[]>(
     "/api/v3/klines",
-    { symbol: symbol.toUpperCase(), interval, limit },
+    { symbol: symbol.toUpperCase(), interval, limit, startTime, endTime },
     "spot",
   );
 }

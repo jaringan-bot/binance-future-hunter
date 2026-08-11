@@ -55,6 +55,20 @@ const symbolSchema = z
     "Simbol pair Binance Futures, contoh: BTCUSDT, ETHUSDT. Harus pair perpetual yang terdaftar di Binance USDS-M Futures.",
   );
 
+// Parse ISO 8601 datetime string ke epoch ms. Dipakai untuk startTime/endTime
+// klines (Futures & Spot) supaya backtest bisa narik histori jauh ke belakang,
+// bukan cuma N candle terakhir.
+function parseTimeParam(value: string | undefined, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  const ms = Date.parse(value);
+  if (Number.isNaN(ms)) {
+    throw new Error(
+      `${label} tidak valid: "${value}" bukan format tanggal yang bisa di-parse. Gunakan ISO 8601, contoh: "2026-07-01T00:00:00Z".`,
+    );
+  }
+  return ms;
+}
+
 function errorResult(err: unknown) {
   const message =
     err instanceof coinalyze.CoinalyzeApiError
@@ -953,19 +967,35 @@ export function createServer(): McpServer {
         "Mengambil data candlestick OHLCV untuk sebuah pair pada timeframe tertentu (LANGSUNG dari Binance native, " +
         "bukan lewat Coinalyze — source of truth, presisi harga menyesuaikan magnitude pair). " +
         "Gunakan ini untuk menentukan bias arah (bullish/bearish/sideways) di berbagai timeframe, mencari swing high/low, " +
-        "dan level psikologis untuk estimasi zona SL/TP.",
+        "dan level psikologis untuk estimasi zona SL/TP. " +
+        "Default (tanpa startTime/endTime) balikin candle TERBARU. Isi startTime untuk narik histori jauh ke belakang " +
+        "(misal buat backtest strategi grid) — Binance balikin candle MULAI dari startTime ke depan, maksimal `limit` candle " +
+        "per panggilan (limit maksimal 1500 untuk Futures). Untuk rentang lebih dari 1500 candle, panggil berkali-kali sambil " +
+        "geser startTime ke closeTime candle terakhir dari hasil sebelumnya (pagination manual, tidak otomatis).",
       inputSchema: {
         symbol: symbolSchema,
         interval: z
           .enum(KLINE_INTERVAL_ENUM)
           .describe("Timeframe candle: 1m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d"),
-        limit: z.number().int().min(1).max(500).default(100).describe("Jumlah candle yang diambil"),
+        limit: z.number().int().min(1).max(1500).default(100).describe("Jumlah candle yang diambil, maksimal 1500"),
+        startTime: z
+          .string()
+          .optional()
+          .describe(
+            'Waktu mulai (ISO 8601, contoh "2026-07-01T00:00:00Z") — opsional, buat narik histori jauh ke belakang untuk backtest, bukan cuma data terbaru.',
+          ),
+        endTime: z
+          .string()
+          .optional()
+          .describe("Waktu akhir (ISO 8601) — opsional, dipakai bareng startTime untuk membatasi window spesifik."),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ symbol, interval, limit }) => {
+    async ({ symbol, interval, limit, startTime, endTime }) => {
       try {
-        const raw = await binanceProxy.getKlinesNative(symbol, interval, limit);
+        const startMs = parseTimeParam(startTime, "startTime");
+        const endMs = parseTimeParam(endTime, "endTime");
+        const raw = await binanceProxy.getKlinesNative(symbol, interval, limit, startMs, endMs);
         if (raw.length === 0) {
           return { content: [{ type: "text", text: `Tidak ada data candle untuk ${symbol} @ ${interval}.` }] };
         }
@@ -1028,6 +1058,7 @@ export function createServer(): McpServer {
             swingHigh,
             swingLow,
             lastClose,
+            candles,
           },
         };
       } catch (err) {
@@ -1388,19 +1419,34 @@ export function createServer(): McpServer {
         "Mengambil data candlestick OHLCV di pasar SPOT Binance untuk sebuah pair pada timeframe tertentu, LANGSUNG dari " +
         "Binance native. Versi Spot dari binance_get_klines (Futures) — bandingkan bias/volume kedua versi untuk pair yang " +
         "sama: kalau candle futures jauh lebih volatil/volumenya jauh lebih besar dari spot di jam yang sama, pergerakan " +
-        "itu kemungkinan besar leverage-driven, bukan demand/supply riil.",
+        "itu kemungkinan besar leverage-driven, bukan demand/supply riil. " +
+        "Default (tanpa startTime/endTime) balikin candle TERBARU. Isi startTime untuk narik histori jauh ke belakang " +
+        "(misal buat backtest) — maksimal `limit` candle per panggilan (limit maksimal 1000 untuk Spot, beda dari Futures " +
+        "yang 1500). Untuk rentang lebih dari 1000 candle, panggil berkali-kali sambil geser startTime (pagination manual).",
       inputSchema: {
         symbol: symbolSchema,
         interval: z
           .enum(KLINE_INTERVAL_ENUM)
           .describe("Timeframe candle: 1m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d"),
-        limit: z.number().int().min(1).max(500).default(100).describe("Jumlah candle yang diambil"),
+        limit: z.number().int().min(1).max(1000).default(100).describe("Jumlah candle yang diambil, maksimal 1000"),
+        startTime: z
+          .string()
+          .optional()
+          .describe(
+            'Waktu mulai (ISO 8601, contoh "2026-07-01T00:00:00Z") — opsional, buat narik histori jauh ke belakang untuk backtest.',
+          ),
+        endTime: z
+          .string()
+          .optional()
+          .describe("Waktu akhir (ISO 8601) — opsional, dipakai bareng startTime untuk membatasi window spesifik."),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ symbol, interval, limit }) => {
+    async ({ symbol, interval, limit, startTime, endTime }) => {
       try {
-        const raw = await binanceProxy.getSpotKlinesNative(symbol, interval, limit);
+        const startMs = parseTimeParam(startTime, "startTime");
+        const endMs = parseTimeParam(endTime, "endTime");
+        const raw = await binanceProxy.getSpotKlinesNative(symbol, interval, limit, startMs, endMs);
         if (raw.length === 0) {
           return { content: [{ type: "text", text: `Tidak ada data candle Spot untuk ${symbol} @ ${interval}.` }] };
         }
@@ -1448,7 +1494,7 @@ export function createServer(): McpServer {
 
         return {
           content: [{ type: "text", text }],
-          structuredContent: { symbol, interval, bias, changePct, swingHigh, swingLow, lastClose },
+          structuredContent: { symbol, interval, bias, changePct, swingHigh, swingLow, lastClose, candles },
         };
       } catch (err) {
         return errorResult(err);
