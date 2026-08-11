@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import * as coinalyze from "./coinalyzeClient.js";
+import * as binanceProxy from "./binanceProxyClient.js";
 import { fmtNum, fmtPct, fmtTime, trendDirection } from "./format.js";
 
 const PERIOD_ENUM = [
@@ -29,6 +30,20 @@ const KLINE_INTERVAL_ENUM = [
   "1d",
 ] as const;
 
+// Binance topLongShortAccountRatio/positionRatio hanya support subset period ini
+// (beda dari Coinalyze yang lebih fleksibel).
+const TOP_TRADER_PERIOD_ENUM = [
+  "5m",
+  "15m",
+  "30m",
+  "1h",
+  "2h",
+  "4h",
+  "6h",
+  "12h",
+  "1d",
+] as const;
+
 const symbolSchema = z
   .string()
   .toUpperCase()
@@ -40,7 +55,9 @@ function errorResult(err: unknown) {
   const message =
     err instanceof coinalyze.CoinalyzeApiError
       ? err.message
-      : `Terjadi error tak terduga: ${(err as Error)?.message ?? String(err)}`;
+      : err instanceof binanceProxy.BinanceProxyError
+        ? err.message
+        : `Terjadi error tak terduga: ${(err as Error)?.message ?? String(err)}`;
   return {
     isError: true,
     content: [{ type: "text" as const, text: message }],
@@ -267,8 +284,8 @@ export function createServer(): McpServer {
       description:
         "Mengambil rasio posisi long vs short agregat (semua trader) untuk sebuah pair Binance Futures, beserta tren dari waktu " +
         "ke waktu (data via Coinalyze, sumber asli Binance). Ratio > 1 berarti lebih banyak/besar posisi long dibanding short. " +
-        "KETERBATASAN: ini rasio agregat BLENDED, BUKAN breakdown terpisah retail-vs-top-trader seperti data resmi Binance " +
-        "(breakdown itu cuma tersedia dari provider berbayar seperti CoinGlass/CoinAnk, tidak ada versi gratis).",
+        "KETERBATASAN: ini rasio agregat BLENDED, BUKAN breakdown terpisah retail-vs-top-trader — untuk breakdown top-trader " +
+        "murni, pakai binance_get_top_trader_ratio yang datanya langsung dari Binance (bukan Coinalyze).",
       inputSchema: {
         symbol: symbolSchema,
         period: z
@@ -316,12 +333,258 @@ export function createServer(): McpServer {
           `|---|---|---|---|`,
           rows,
           ``,
-          `_Ini rasio agregat semua trader (blended), bukan breakdown top-trader/whale terpisah dari retail — lihat deskripsi tool untuk keterbatasan ini._`,
+          `_Ini rasio agregat semua trader (blended), bukan breakdown top-trader/whale terpisah dari retail — pakai binance_get_top_trader_ratio untuk breakdown murni._`,
         ].join("\n");
 
         return {
           content: [{ type: "text", text }],
           structuredContent: { symbol, longPct: latest.l, shortPct: latest.s, ratio: latest.r, bias },
+        };
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // TOP-TRADER LONG/SHORT RATIO (BARU) — breakdown top trader murni,
+  // langsung dari Binance lewat proxy Vercel, BUKAN blended seperti
+  // binance_get_long_short_ratio di atas.
+  // ─────────────────────────────────────────────────────────────
+  server.registerTool(
+    "binance_get_top_trader_ratio",
+    {
+      title: "Top-Trader Long/Short Ratio (Breakdown Murni)",
+      description:
+        "Mengambil rasio long/short KHUSUS TOP TRADER (akun dengan posisi/margin terbesar di Binance Futures), TERPISAH dari " +
+        "retail — data ini LANGSUNG dari Binance (lewat proxy relay, bukan lewat Coinalyze), jadi tidak ter-blend dengan akun kecil. " +
+        "Ini proxy yang lebih dekat ke 'whale positioning' dibanding binance_get_long_short_ratio yang blended. " +
+        "mode='account' = breakdown berdasarkan JUMLAH akun top trader yang long vs short. " +
+        "mode='position' = breakdown berdasarkan SIZE POSISI top trader (mungkin lebih relevan untuk melihat dominasi modal besar, " +
+        "karena satu akun besar dengan posisi masif tetap terhitung 1 akun di mode='account' tapi bobotnya besar di mode='position'). " +
+        "KETERBATASAN: Binance tidak mempublikasikan threshold pasti 'top trader' itu top berapa persen, dan data ini snapshot " +
+        "periodik (bukan real-time tick-by-tick).",
+      inputSchema: {
+        symbol: symbolSchema,
+        mode: z
+          .enum(["account", "position"])
+          .default("account")
+          .describe("'account' = breakdown jumlah akun top trader, 'position' = breakdown size posisi top trader"),
+        period: z
+          .enum(TOP_TRADER_PERIOD_ENUM)
+          .default("1h")
+          .describe("Interval antar data poin: 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d"),
+        limit: z.number().int().min(1).max(500).default(10).describe("Jumlah data poin terakhir"),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ symbol, mode, period, limit }) => {
+      try {
+        const points =
+          mode === "position"
+            ? await binanceProxy.getTopTraderPositionRatio(symbol, period, limit)
+            : await binanceProxy.getTopTraderAccountRatio(symbol, period, limit);
+
+        if (points.length === 0) {
+          return {
+            content: [
+              { type: "text", text: `Tidak ada data top-trader ratio untuk ${symbol} (mode: ${mode}).` },
+            ],
+          };
+        }
+
+        const latest = points[points.length - 1];
+        const longPct = parseFloat(latest.longAccount) * 100;
+        const shortPct = parseFloat(latest.shortAccount) * 100;
+        const ratio = parseFloat(latest.longShortRatio);
+        const bias = longPct > 55 ? "LONG" : longPct < 45 ? "SHORT" : "NETRAL";
+        const direction = trendDirection(points.map((p) => parseFloat(p.longShortRatio)));
+
+        const rows = points
+          .map(
+            (p) =>
+              `| ${fmtTime(p.timestamp)} | ${(parseFloat(p.longAccount) * 100).toFixed(2)}% | ${(parseFloat(p.shortAccount) * 100).toFixed(2)}% | ${fmtNum(parseFloat(p.longShortRatio), 4)} |`,
+          )
+          .join("\n");
+
+        const modeLabel = mode === "position" ? "SIZE POSISI top trader" : "JUMLAH AKUN top trader";
+
+        const text = [
+          `# Top-Trader Long/Short Ratio — ${symbol} (mode: ${mode}, period: ${period})`,
+          ``,
+          `## Snapshot Terkini (berdasarkan ${modeLabel})`,
+          `- **Long**: ${longPct.toFixed(2)}% / **Short**: ${shortPct.toFixed(2)}% → ratio ${fmtNum(ratio, 4)} → bias ${bias}`,
+          `**Tren**: ${direction}`,
+          ``,
+          `## Histori`,
+          `| Waktu | Long % | Short % | Ratio |`,
+          `|---|---|---|---|`,
+          rows,
+          ``,
+          `_Data LANGSUNG dari Binance (bukan Coinalyze), khusus akun TOP TRADER — lebih dekat ke proxy whale dibanding binance_get_long_short_ratio yang blended semua trader. Threshold 'top trader' tidak dipublikasikan Binance secara pasti._`,
+        ].join("\n");
+
+        return {
+          content: [{ type: "text", text }],
+          structuredContent: { symbol, mode, longPct, shortPct, ratio, bias },
+        };
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // ORDER BOOK DEPTH (BARU)
+  // ─────────────────────────────────────────────────────────────
+  server.registerTool(
+    "binance_get_order_book_depth",
+    {
+      title: "Order Book Depth",
+      description:
+        "Mengambil snapshot order book (bid/ask) real-time dengan size per level harga, LANGSUNG dari Binance lewat proxy relay. " +
+        "Berguna untuk melihat wall besar (potensi order whale/spoofing), spread bid-ask, dan likuiditas di sekitar harga saat ini. " +
+        "PENTING: ini snapshot SESAAT — order book berubah sangat cepat, terutama untuk pair dengan volume tinggi. Wall besar bisa " +
+        "hilang dalam hitungan detik (bisa jadi spoofing/fake wall, bukan komitmen order sungguhan). Jangan overinterpretasi satu " +
+        "snapshot sebagai sinyal pasti.",
+      inputSchema: {
+        symbol: symbolSchema,
+        limit: z
+          .number()
+          .int()
+          .refine((v) => [5, 10, 20, 50, 100, 500, 1000].includes(v), {
+            message: "limit harus salah satu dari: 5, 10, 20, 50, 100, 500, 1000 (sesuai batasan Binance API)",
+          })
+          .default(20)
+          .describe("Jumlah level bid/ask yang diambil per sisi. Harus salah satu dari: 5, 10, 20, 50, 100, 500, 1000."),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ symbol, limit }) => {
+      try {
+        const data = await binanceProxy.getOrderBookDepth(symbol, limit);
+
+        const bidRows = data.bids
+          .slice(0, 10)
+          .map(([price, qty]) => `| ${fmtNum(parseFloat(price), 4)} | ${fmtNum(parseFloat(qty), 4)} |`)
+          .join("\n");
+        const askRows = data.asks
+          .slice(0, 10)
+          .map(([price, qty]) => `| ${fmtNum(parseFloat(price), 4)} | ${fmtNum(parseFloat(qty), 4)} |`)
+          .join("\n");
+
+        const bestBid = data.bids[0] ? parseFloat(data.bids[0][0]) : null;
+        const bestAsk = data.asks[0] ? parseFloat(data.asks[0][0]) : null;
+        const spread = bestBid !== null && bestAsk !== null ? bestAsk - bestBid : null;
+        const spreadPct = spread !== null && bestBid !== null ? (spread / bestBid) * 100 : null;
+
+        // Cari level dengan quantity terbesar di masing-masing sisi (potensi wall).
+        const largestBid = data.bids.reduce(
+          (max, [p, q]) => (parseFloat(q) > parseFloat(max[1]) ? [p, q] : max),
+          data.bids[0] ?? ["0", "0"],
+        );
+        const largestAsk = data.asks.reduce(
+          (max, [p, q]) => (parseFloat(q) > parseFloat(max[1]) ? [p, q] : max),
+          data.asks[0] ?? ["0", "0"],
+        );
+
+        const text = [
+          `# Order Book Depth — ${symbol} (${limit} level per sisi)`,
+          ``,
+          `**Best Bid**: ${bestBid !== null ? fmtNum(bestBid, 4) : "N/A"} | **Best Ask**: ${bestAsk !== null ? fmtNum(bestAsk, 4) : "N/A"}`,
+          `**Spread**: ${spread !== null ? fmtNum(spread, 4) : "N/A"} (${spreadPct !== null ? spreadPct.toFixed(4) : "N/A"}%)`,
+          ``,
+          `**Wall terbesar (Bid)**: harga ${fmtNum(parseFloat(largestBid[0]), 4)}, size ${fmtNum(parseFloat(largestBid[1]), 4)}`,
+          `**Wall terbesar (Ask)**: harga ${fmtNum(parseFloat(largestAsk[0]), 4)}, size ${fmtNum(parseFloat(largestAsk[1]), 4)}`,
+          ``,
+          `## Top 10 Bids (harga tertinggi dulu)`,
+          `| Harga | Quantity |`,
+          `|---|---|`,
+          bidRows,
+          ``,
+          `## Top 10 Asks (harga terendah dulu)`,
+          `| Harga | Quantity |`,
+          `|---|---|`,
+          askRows,
+          ``,
+          `_Snapshot sesaat (waktu server Binance: ${fmtTime(data.T)}). Order book berubah cepat — wall besar bisa jadi spoofing, jangan jadi satu-satunya sinyal keputusan._`,
+        ].join("\n");
+
+        return {
+          content: [{ type: "text", text }],
+          structuredContent: { symbol, bestBid, bestAsk, spread, spreadPct },
+        };
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // AGGREGATE TRADES / CVD GRANULAR (BARU)
+  // ─────────────────────────────────────────────────────────────
+  server.registerTool(
+    "binance_get_agg_trades",
+    {
+      title: "Aggregate Trades (untuk CVD Granular)",
+      description:
+        "Mengambil trade individual terbaru (aggregate trades) LANGSUNG dari Binance lewat proxy relay, termasuk apakah masing- " +
+        "masing trade adalah buy atau sell aggressor (taker). Berbeda dari binance_get_taker_volume_ratio yang teragregasi per-jam, " +
+        "ini granular per-trade — cocok untuk mendeteksi absorption (harga stagnan tapi volume besar masuk searah, indikasi entitas " +
+        "besar menyerap likuiditas tanpa menggerakkan harga secara signifikan) atau lonjakan agresi mendadak. " +
+        "PENTING: limit maksimal dibatasi ketat karena ini data granular, tidak cocok untuk analisis periode panjang — gunakan " +
+        "binance_get_taker_volume_ratio untuk gambaran periode lebih panjang.",
+      inputSchema: {
+        symbol: symbolSchema,
+        limit: z.number().int().min(1).max(200).default(50).describe("Jumlah trade terakhir yang diambil, maksimal 200."),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ symbol, limit }) => {
+      try {
+        const trades = await binanceProxy.getAggTrades(symbol, limit);
+        if (trades.length === 0) {
+          return { content: [{ type: "text", text: `Tidak ada data trade untuk ${symbol}.` }] };
+        }
+
+        // m: true = buyer adalah maker → artinya SELLER yang agresif (taker sell).
+        // m: false = buyer adalah taker → artinya BUYER yang agresif (taker buy).
+        let buyVolume = 0;
+        let sellVolume = 0;
+        for (const t of trades) {
+          const qty = parseFloat(t.q);
+          if (t.m) sellVolume += qty;
+          else buyVolume += qty;
+        }
+        const totalVolume = buyVolume + sellVolume;
+        const buyPct = totalVolume > 0 ? (buyVolume / totalVolume) * 100 : 0;
+        const cvd = buyVolume - sellVolume; // Cumulative Volume Delta sederhana untuk window ini
+
+        const recent = trades.slice(-15);
+        const rows = recent
+          .map((t) => {
+            const side = t.m ? "SELL (taker)" : "BUY (taker)";
+            return `| ${fmtTime(t.T)} | ${fmtNum(parseFloat(t.p), 4)} | ${fmtNum(parseFloat(t.q), 4)} | ${side} |`;
+          })
+          .join("\n");
+
+        const text = [
+          `# Aggregate Trades — ${symbol} (${trades.length} trade terakhir)`,
+          ``,
+          `**CVD window ini**: ${cvd >= 0 ? "+" : ""}${fmtNum(cvd, 4)} (Buy: ${fmtNum(buyVolume, 4)} / Sell: ${fmtNum(sellVolume, 4)})`,
+          `**Dominasi**: ${buyPct.toFixed(1)}% BUY vs ${(100 - buyPct).toFixed(1)}% SELL`,
+          ``,
+          `## ${recent.length} Trade Terakhir`,
+          `| Waktu | Harga | Quantity | Sisi |`,
+          `|---|---|---|---|`,
+          rows,
+          ``,
+          `_CVD positif = tekanan beli agresif dominan di window ini. CVD negatif = tekanan jual agresif dominan. Window ini sangat pendek (${trades.length} trade) — untuk gambaran lebih luas, kombinasikan dengan binance_get_taker_volume_ratio._`,
+        ].join("\n");
+
+        return {
+          content: [{ type: "text", text }],
+          structuredContent: { symbol, cvd, buyVolume, sellVolume, buyPct },
         };
       } catch (err) {
         return errorResult(err);
