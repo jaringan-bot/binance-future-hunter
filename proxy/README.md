@@ -1,5 +1,7 @@
 # whale-binance-proxy
 
+🇮🇩 Bahasa Indonesia | [🇬🇧 English](README.en.md)
+
 Proxy relay kecil di Vercel untuk fetch data Binance Futures API secara
 langsung, dipakai sebagai jalur alternatif karena worker Cloudflare
 (`whale.jaringan.dev` di root repo ini) diblokir total oleh WAF Binance

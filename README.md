@@ -1,5 +1,7 @@
 # WhaleScope MCP — Binance Futures Market Intelligence
 
+🇮🇩 Bahasa Indonesia | [🇬🇧 English](README.en.md)
+
 MCP server yang menyediakan data publik Binance USDS-M Futures (funding rate,
 open interest, long/short ratio, taker volume, candlestick, order book,
 volatility) plus pembanding Binance Spot (harga, order book, candlestick,

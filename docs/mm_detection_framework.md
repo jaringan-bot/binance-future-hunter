@@ -1,5 +1,7 @@
 # Market Maker Detection Framework
 
+🇮🇩 Bahasa Indonesia | [🇬🇧 English](mm_detection_framework.en.md)
+
 > Framework deteksi aktivitas market maker (MM) menggunakan tool WhaleScope MCP (Binance Futures + Spot).
 > **Catatan penting:** Tidak ada tool yang bisa melihat identitas atau posisi spesifik MM secara langsung. Framework ini membangun profil aktivitas MM dari jejak yang mereka tinggalkan di pasar.
 
