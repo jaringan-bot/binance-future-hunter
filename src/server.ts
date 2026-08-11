@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import * as coinalyze from "./coinalyzeClient.js";
 import * as binanceProxy from "./binanceProxyClient.js";
-import { fmtNum, fmtPct, fmtTime, trendDirection } from "./format.js";
+import { fmtNum, fmtPrice, fmtPct, fmtTime, trendDirection } from "./format.js";
 
 const PERIOD_ENUM = [
   "5m",
@@ -17,6 +17,8 @@ const PERIOD_ENUM = [
 ] as const;
 
 // Coinalyze tidak punya interval "3m" atau "8h" — dua itu di-drop dari enum ini.
+// (Binance native klines/fundingRate mendukung superset ini juga, jadi tetap
+// aman dipakai untuk kedua sumber.)
 const KLINE_INTERVAL_ENUM = [
   "1m",
   "5m",
@@ -71,14 +73,16 @@ export function createServer(): McpServer {
   });
 
   // ─────────────────────────────────────────────────────────────
-  // FUNDING RATE
+  // FUNDING RATE (Binance native via premiumIndex — funding TERKINI,
+  // belum settled, plus mark price & waktu funding berikutnya)
   // ─────────────────────────────────────────────────────────────
   server.registerTool(
     "binance_get_funding_rate",
     {
       title: "Ambil Funding Rate Terkini",
       description:
-        "Mengambil funding rate TERKINI untuk sebuah pair Binance Futures (data via Coinalyze, sumber asli Binance). " +
+        "Mengambil funding rate TERKINI untuk sebuah pair Binance Futures (LANGSUNG dari Binance native premiumIndex, " +
+        "bukan lewat Coinalyze — source of truth). " +
         "Funding rate positif besar menandakan long crowded (bias kontrarian: waspada potensi long squeeze). " +
         "Funding rate negatif besar menandakan short crowded (bias kontrarian: waspada potensi short squeeze). " +
         "Gunakan tool ini untuk membaca sentimen leverage pasar saat ini.",
@@ -87,8 +91,9 @@ export function createServer(): McpServer {
     },
     async ({ symbol }) => {
       try {
-        const data = await coinalyze.getCurrentFundingRate(symbol);
-        const rate = data.value;
+        const data = await binanceProxy.getCurrentFundingRateNative(symbol);
+        const rate = parseFloat(data.lastFundingRate);
+        const markPrice = parseFloat(data.markPrice);
         const interpretation =
           rate >= 0.0003
             ? "CROWDED LONG (funding cukup tinggi — mayoritas leverage di sisi long, ada risiko long squeeze jika harga berbalik turun)"
@@ -100,16 +105,18 @@ export function createServer(): McpServer {
           `# Funding Rate — ${symbol}`,
           ``,
           `- Funding Rate Saat Ini: ${fmtPct(rate, 4)}`,
-          `- Update Terakhir: ${fmtTime(data.update)}`,
+          `- Mark Price: ${fmtPrice(markPrice)}`,
+          `- Waktu Funding Berikutnya: ${fmtTime(data.nextFundingTime)}`,
+          `- Update Terakhir: ${fmtTime(data.time)}`,
           ``,
           `**Interpretasi**: ${interpretation}`,
           ``,
-          `_Catatan: threshold crowded (±0.03%) adalah heuristik umum, sesuaikan dengan konteks volatilitas pair yang sedang ditradingkan. Data via Coinalyze (agregasi ulang data Binance)._`,
+          `_Catatan: threshold crowded (±0.03%) adalah heuristik umum, sesuaikan dengan konteks volatilitas pair yang sedang ditradingkan. Data LANGSUNG dari Binance native (premiumIndex)._`,
         ].join("\n");
 
         return {
           content: [{ type: "text", text }],
-          structuredContent: { symbol, fundingRate: rate, interpretation },
+          structuredContent: { symbol, fundingRate: rate, markPrice, interpretation },
         };
       } catch (err) {
         return errorResult(err);
@@ -122,15 +129,17 @@ export function createServer(): McpServer {
     {
       title: "Histori Funding Rate",
       description:
-        "Mengambil histori funding rate untuk melihat tren crowding leverage dari waktu ke waktu, bukan hanya snapshot sesaat " +
-        "(data via Coinalyze, sumber asli Binance). Berguna untuk melihat apakah sentimen long/short sudah crowded dalam " +
-        "beberapa hari terakhir atau baru saja berubah.",
+        "Mengambil histori funding rate (yang sudah settled) untuk melihat tren crowding leverage dari waktu ke waktu " +
+        "(LANGSUNG dari Binance native, bukan lewat Coinalyze — source of truth). Berguna untuk melihat apakah sentimen " +
+        "long/short sudah crowded dalam beberapa hari terakhir atau baru saja berubah.",
       inputSchema: {
         symbol: symbolSchema,
         period: z
           .enum(PERIOD_ENUM)
           .default("1h")
-          .describe("Interval antar data poin: 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d"),
+          .describe(
+            "Diabaikan — histori funding rate native Binance settled per interval funding pair itu sendiri (biasanya tiap 4-8 jam), bukan per-period custom. Parameter dipertahankan untuk kompatibilitas.",
+          ),
         limit: z
           .number()
           .int()
@@ -141,33 +150,35 @@ export function createServer(): McpServer {
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ symbol, period, limit }) => {
+    async ({ symbol, limit }) => {
       try {
-        const bars = await coinalyze.getFundingRateHistory(symbol, period, limit);
-        if (bars.length === 0) {
+        const points = await binanceProxy.getFundingRateHistoryNative(symbol, limit);
+        if (points.length === 0) {
           return {
             content: [
               { type: "text", text: `Tidak ada data histori funding rate untuk ${symbol}.` },
             ],
           };
         }
-        const rows = bars
-          .map((b) => `| ${fmtTime(b.t * 1000)} | ${fmtPct(b.c, 4)} |`)
+        const rates = points.map((p) => parseFloat(p.fundingRate));
+        const rows = points
+          .map((p, i) => `| ${fmtTime(p.fundingTime)} | ${fmtPct(rates[i], 4)} |`)
           .join("\n");
 
-        const rates = bars.map((b) => b.c);
         const avg = rates.reduce((a, b) => a + b, 0) / rates.length;
         const direction = trendDirection(rates);
 
         const text = [
-          `# Histori Funding Rate — ${symbol} (${bars.length} data terakhir)`,
+          `# Histori Funding Rate — ${symbol} (${points.length} data terakhir)`,
           ``,
-          `| Waktu | Funding Rate |`,
+          `| Waktu Settlement | Funding Rate |`,
           `|---|---|`,
           rows,
           ``,
           `**Rata-rata funding**: ${fmtPct(avg, 4)}`,
           `**Tren**: ${direction} (dibandingkan data paling lama vs paling baru dalam window ini)`,
+          ``,
+          `_Data LANGSUNG dari Binance native (fundingRate history — sudah settled)._`,
         ].join("\n");
 
         return { content: [{ type: "text", text }] };
@@ -347,7 +358,7 @@ export function createServer(): McpServer {
   );
 
   // ─────────────────────────────────────────────────────────────
-  // TOP-TRADER LONG/SHORT RATIO (BARU) — breakdown top trader murni,
+  // TOP-TRADER LONG/SHORT RATIO — breakdown top trader murni,
   // langsung dari Binance lewat proxy Vercel, BUKAN blended seperti
   // binance_get_long_short_ratio di atas.
   // ─────────────────────────────────────────────────────────────
@@ -435,7 +446,7 @@ export function createServer(): McpServer {
   );
 
   // ─────────────────────────────────────────────────────────────
-  // ORDER BOOK DEPTH (BARU)
+  // ORDER BOOK DEPTH
   // ─────────────────────────────────────────────────────────────
   server.registerTool(
     "binance_get_order_book_depth",
@@ -466,11 +477,11 @@ export function createServer(): McpServer {
 
         const bidRows = data.bids
           .slice(0, 10)
-          .map(([price, qty]) => `| ${fmtNum(parseFloat(price), 4)} | ${fmtNum(parseFloat(qty), 4)} |`)
+          .map(([price, qty]) => `| ${fmtPrice(parseFloat(price))} | ${fmtNum(parseFloat(qty), 4)} |`)
           .join("\n");
         const askRows = data.asks
           .slice(0, 10)
-          .map(([price, qty]) => `| ${fmtNum(parseFloat(price), 4)} | ${fmtNum(parseFloat(qty), 4)} |`)
+          .map(([price, qty]) => `| ${fmtPrice(parseFloat(price))} | ${fmtNum(parseFloat(qty), 4)} |`)
           .join("\n");
 
         const bestBid = data.bids[0] ? parseFloat(data.bids[0][0]) : null;
@@ -491,11 +502,11 @@ export function createServer(): McpServer {
         const text = [
           `# Order Book Depth — ${symbol} (${limit} level per sisi)`,
           ``,
-          `**Best Bid**: ${bestBid !== null ? fmtNum(bestBid, 4) : "N/A"} | **Best Ask**: ${bestAsk !== null ? fmtNum(bestAsk, 4) : "N/A"}`,
-          `**Spread**: ${spread !== null ? fmtNum(spread, 4) : "N/A"} (${spreadPct !== null ? spreadPct.toFixed(4) : "N/A"}%)`,
+          `**Best Bid**: ${bestBid !== null ? fmtPrice(bestBid) : "N/A"} | **Best Ask**: ${bestAsk !== null ? fmtPrice(bestAsk) : "N/A"}`,
+          `**Spread**: ${spread !== null ? fmtPrice(spread) : "N/A"} (${spreadPct !== null ? spreadPct.toFixed(4) : "N/A"}%)`,
           ``,
-          `**Wall terbesar (Bid)**: harga ${fmtNum(parseFloat(largestBid[0]), 4)}, size ${fmtNum(parseFloat(largestBid[1]), 4)}`,
-          `**Wall terbesar (Ask)**: harga ${fmtNum(parseFloat(largestAsk[0]), 4)}, size ${fmtNum(parseFloat(largestAsk[1]), 4)}`,
+          `**Wall terbesar (Bid)**: harga ${fmtPrice(parseFloat(largestBid[0]))}, size ${fmtNum(parseFloat(largestBid[1]), 4)}`,
+          `**Wall terbesar (Ask)**: harga ${fmtPrice(parseFloat(largestAsk[0]))}, size ${fmtNum(parseFloat(largestAsk[1]), 4)}`,
           ``,
           `## Top 10 Bids (harga tertinggi dulu)`,
           `| Harga | Quantity |`,
@@ -521,7 +532,7 @@ export function createServer(): McpServer {
   );
 
   // ─────────────────────────────────────────────────────────────
-  // AGGREGATE TRADES / CVD GRANULAR (BARU)
+  // AGGREGATE TRADES / CVD GRANULAR
   // ─────────────────────────────────────────────────────────────
   server.registerTool(
     "binance_get_agg_trades",
@@ -564,7 +575,7 @@ export function createServer(): McpServer {
         const rows = recent
           .map((t) => {
             const side = t.m ? "SELL (taker)" : "BUY (taker)";
-            return `| ${fmtTime(t.T)} | ${fmtNum(parseFloat(t.p), 4)} | ${fmtNum(parseFloat(t.q), 4)} | ${side} |`;
+            return `| ${fmtTime(t.T)} | ${fmtPrice(parseFloat(t.p))} | ${fmtNum(parseFloat(t.q), 4)} | ${side} |`;
           })
           .join("\n");
 
@@ -722,14 +733,15 @@ export function createServer(): McpServer {
   );
 
   // ─────────────────────────────────────────────────────────────
-  // KLINES / PRICE ACTION untuk bias per-timeframe
+  // KLINES / PRICE ACTION untuk bias per-timeframe (Binance native)
   // ─────────────────────────────────────────────────────────────
   server.registerTool(
     "binance_get_klines",
     {
       title: "Data Candlestick (Klines)",
       description:
-        "Mengambil data candlestick OHLCV untuk sebuah pair pada timeframe tertentu (data via Coinalyze, sumber asli Binance). " +
+        "Mengambil data candlestick OHLCV untuk sebuah pair pada timeframe tertentu (LANGSUNG dari Binance native, " +
+        "bukan lewat Coinalyze — source of truth, presisi harga menyesuaikan magnitude pair). " +
         "Gunakan ini untuk menentukan bias arah (bullish/bearish/sideways) di berbagai timeframe, mencari swing high/low, " +
         "dan level psikologis untuk estimasi zona SL/TP.",
       inputSchema: {
@@ -743,18 +755,19 @@ export function createServer(): McpServer {
     },
     async ({ symbol, interval, limit }) => {
       try {
-        const bars = await coinalyze.getOhlcvHistory(symbol, interval, limit);
-        if (bars.length === 0) {
+        const raw = await binanceProxy.getKlinesNative(symbol, interval, limit);
+        if (raw.length === 0) {
           return { content: [{ type: "text", text: `Tidak ada data candle untuk ${symbol} @ ${interval}.` }] };
         }
 
-        const candles = bars.map((b) => ({
-          openTime: b.t * 1000,
-          open: b.o,
-          high: b.h,
-          low: b.l,
-          close: b.c,
-          volume: b.v,
+        // Format Binance native: [openTime, open, high, low, close, volume, closeTime, ...]
+        const candles = raw.map((k) => ({
+          openTime: k[0],
+          open: parseFloat(k[1]),
+          high: parseFloat(k[2]),
+          low: parseFloat(k[3]),
+          close: parseFloat(k[4]),
+          volume: parseFloat(k[5]),
         }));
 
         const closes = candles.map((c) => c.close);
@@ -777,7 +790,7 @@ export function createServer(): McpServer {
         const rows = recent
           .map(
             (c) =>
-              `| ${fmtTime(c.openTime)} | ${fmtNum(c.open, 2)} | ${fmtNum(c.high, 2)} | ${fmtNum(c.low, 2)} | ${fmtNum(c.close, 2)} | ${fmtNum(c.volume, 2)} |`,
+              `| ${fmtTime(c.openTime)} | ${fmtPrice(c.open)} | ${fmtPrice(c.high)} | ${fmtPrice(c.low)} | ${fmtPrice(c.close)} | ${fmtNum(c.volume, 2)} |`,
           )
           .join("\n");
 
@@ -785,9 +798,9 @@ export function createServer(): McpServer {
           `# Candlestick — ${symbol} @ ${interval} (${candles.length} candle)`,
           ``,
           `**Bias periode ini**: ${bias} (${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}% dari candle pertama ke terakhir)`,
-          `**Swing High**: ${fmtNum(swingHigh, 2)}`,
-          `**Swing Low**: ${fmtNum(swingLow, 2)}`,
-          `**Harga penutupan terakhir**: ${fmtNum(lastClose, 2)}`,
+          `**Swing High**: ${fmtPrice(swingHigh)}`,
+          `**Swing Low**: ${fmtPrice(swingLow)}`,
+          `**Harga penutupan terakhir**: ${fmtPrice(lastClose)}`,
           ``,
           `## ${recent.length} Candle Terakhir`,
           `| Waktu Buka | Open | High | Low | Close | Volume |`,
@@ -819,7 +832,8 @@ export function createServer(): McpServer {
       title: "Bias Multi-Timeframe Sekaligus",
       description:
         "Tool ringkas untuk langsung mendapatkan bias arah (Bullish/Bearish/Sideways) di 5 timeframe umum " +
-        "(1m, 5m, 15m, 1h, 1d) dalam satu panggilan, tanpa perlu memanggil binance_get_klines berulang kali. " +
+        "(1m, 5m, 15m, 1h, 1d) dalam satu panggilan, tanpa perlu memanggil binance_get_klines berulang kali " +
+        "(LANGSUNG dari Binance native, presisi harga menyesuaikan magnitude pair). " +
         "Cocok untuk menjawab pertanyaan 'apa bias BTCUSDT di semua timeframe saat ini'.",
       inputSchema: { symbol: symbolSchema },
       annotations: { readOnlyHint: true, openWorldHint: true },
@@ -836,9 +850,9 @@ export function createServer(): McpServer {
 
         const results = await Promise.all(
           timeframes.map(async (tf) => {
-            const bars = await coinalyze.getOhlcvHistory(symbol, tf.interval, tf.limit);
-            if (bars.length === 0) return { ...tf, bias: "N/A", changePct: 0, lastClose: 0 };
-            const closes = bars.map((b) => b.c);
+            const raw = await binanceProxy.getKlinesNative(symbol, tf.interval, tf.limit);
+            if (raw.length === 0) return { ...tf, bias: "N/A", changePct: 0, lastClose: 0 };
+            const closes = raw.map((k) => parseFloat(k[4]));
             const changePct = ((closes[closes.length - 1] - closes[0]) / closes[0]) * 100;
             const bias = changePct > 1 ? "BULLISH" : changePct < -1 ? "BEARISH" : "SIDEWAYS";
             return { ...tf, bias, changePct, lastClose: closes[closes.length - 1] };
@@ -848,7 +862,7 @@ export function createServer(): McpServer {
         const rows = results
           .map(
             (r) =>
-              `| ${r.label} (${r.interval}) | ${r.bias} | ${r.changePct >= 0 ? "+" : ""}${r.changePct.toFixed(2)}% | ${fmtNum(r.lastClose, 2)} |`,
+              `| ${r.label} (${r.interval}) | ${r.bias} | ${r.changePct >= 0 ? "+" : ""}${r.changePct.toFixed(2)}% | ${fmtPrice(r.lastClose)} |`,
           )
           .join("\n");
 
@@ -881,36 +895,32 @@ export function createServer(): McpServer {
     {
       title: "Statistik 24 Jam",
       description:
-        "Mengambil ringkasan statistik 24 jam: harga terakhir, perubahan %, high/low 24 jam, volume (diturunkan dari 24 candle " +
-        "1 jam via Coinalyze — pendekatan, bukan angka resmi ticker Binance). Cocok sebagai overview cepat sebelum masuk ke " +
-        "analisis lebih dalam.",
+        "Mengambil ringkasan statistik 24 jam: harga terakhir, perubahan %, high/low 24 jam, volume — LANGSUNG dari Binance " +
+        "native ticker/24hr (rolling window resmi Binance, bukan pendekatan dari 24 candle 1 jam seperti sebelumnya). " +
+        "Cocok sebagai overview cepat sebelum masuk ke analisis lebih dalam.",
       inputSchema: { symbol: symbolSchema },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ symbol }) => {
       try {
-        const bars = await coinalyze.getOhlcvHistory(symbol, "1h", 24);
-        if (bars.length === 0) {
-          return { content: [{ type: "text", text: `Tidak ada data untuk ${symbol}.` }] };
-        }
-        const openPrice = bars[0].o;
-        const lastPrice = bars[bars.length - 1].c;
-        const highPrice = Math.max(...bars.map((b) => b.h));
-        const lowPrice = Math.min(...bars.map((b) => b.l));
-        const volume = bars.reduce((sum, b) => sum + b.v, 0);
-        const priceChange = lastPrice - openPrice;
-        const priceChangePercent = (priceChange / openPrice) * 100;
+        const data = await binanceProxy.getTicker24hrNative(symbol);
+        const lastPrice = parseFloat(data.lastPrice);
+        const priceChange = parseFloat(data.priceChange);
+        const priceChangePercent = parseFloat(data.priceChangePercent);
+        const highPrice = parseFloat(data.highPrice);
+        const lowPrice = parseFloat(data.lowPrice);
+        const volume = parseFloat(data.volume);
 
         const text = [
           `# Statistik 24 Jam — ${symbol}`,
           ``,
-          `- Harga Terakhir: ${fmtNum(lastPrice, 2)}`,
-          `- Perubahan 24 Jam: ${priceChangePercent >= 0 ? "+" : ""}${priceChangePercent.toFixed(2)}% (${fmtNum(priceChange, 2)})`,
-          `- High 24 Jam: ${fmtNum(highPrice, 2)}`,
-          `- Low 24 Jam: ${fmtNum(lowPrice, 2)}`,
-          `- Volume (24 candle 1h): ${fmtNum(volume, 2)}`,
+          `- Harga Terakhir: ${fmtPrice(lastPrice)}`,
+          `- Perubahan 24 Jam: ${priceChangePercent >= 0 ? "+" : ""}${priceChangePercent.toFixed(2)}% (${fmtPrice(priceChange)})`,
+          `- High 24 Jam: ${fmtPrice(highPrice)}`,
+          `- Low 24 Jam: ${fmtPrice(lowPrice)}`,
+          `- Volume: ${fmtNum(volume, 2)}`,
           ``,
-          `_Angka ini pendekatan dari 24 candle 1 jam terakhir (via Coinalyze), bukan hasil kalkulasi rolling-window resmi Binance._`,
+          `_Data LANGSUNG dari Binance native (ticker/24hr — rolling window resmi, bukan pendekatan dari candle 1 jam)._`,
         ].join("\n");
         return { content: [{ type: "text", text }] };
       } catch (err) {

@@ -7,18 +7,28 @@
 // tidak kena block WAF itu DAN tidak kena geo-restriction Binance (yang
 // memblokir region US/iad1, region default Vercel).
 //
-// Proxy ini expose 3 data yang TIDAK tersedia di Coinalyze:
+// Proxy ini expose data yang TIDAK tersedia atau tidak akurat presisinya
+// lewat Coinalyze:
 // - Order book depth (bid/ask real-time dengan size per level)
 // - Top-trader long/short ratio (breakdown akun TOP TRADER, terpisah dari
 //   retail/global account — ini yang Coinalyze TIDAK punya, cuma versi
 //   blended semua trader)
 // - Aggregate trades (untuk hitung CVD granular per-trade, bukan per-jam)
+// - Funding rate (history & terkini) dan klines/OHLCV — ditambahkan karena
+//   Coinalyze terbukti salah skala untuk pair kecil (funding rate DODOXUSDT
+//   dilaporkan -57% padahal Binance asli 0.005%) dan harga dibulatkan
+//   terlalu kasar (2 desimal fixed, menghancurkan presisi pair < $1).
+//   Binance native adalah source of truth untuk keduanya.
 //
 // Lihat proxy/README.md untuk detail whitelist path yang diizinkan proxy ini.
 
 const PROXY_ALLOWED_PATHS = new Set([
   "/fapi/v1/depth",
   "/fapi/v1/aggTrades",
+  "/fapi/v1/fundingRate",
+  "/fapi/v1/premiumIndex",
+  "/fapi/v1/klines",
+  "/fapi/v1/ticker/24hr",
   "/futures/data/topLongShortAccountRatio",
   "/futures/data/topLongShortPositionRatio",
   "/futures/data/globalLongShortAccountRatio",
@@ -200,4 +210,99 @@ export interface AggTrade {
 
 export async function getAggTrades(symbol: string, limit: number): Promise<AggTrade[]> {
   return callProxy<AggTrade[]>("/fapi/v1/aggTrades", { symbol: symbol.toUpperCase(), limit });
+}
+
+// ─────────────────────────────────────────────────────────────
+// FUNDING RATE (NATIVE) — menggantikan Coinalyze untuk sumber
+// funding rate. Field "fundingRate" dari Binance sudah berupa
+// desimal murni (contoh: "0.00010000" = 0.01%), TIDAK perlu
+// diproses ulang skalanya di sini.
+// ─────────────────────────────────────────────────────────────
+export interface FundingRateHistoryPoint {
+  symbol: string;
+  fundingTime: number;
+  fundingRate: string;
+  markPrice: string;
+}
+
+export async function getFundingRateHistoryNative(
+  symbol: string,
+  limit: number,
+): Promise<FundingRateHistoryPoint[]> {
+  return callProxy<FundingRateHistoryPoint[]>("/fapi/v1/fundingRate", {
+    symbol: symbol.toUpperCase(),
+    limit,
+  });
+}
+
+// premiumIndex adalah endpoint Binance native untuk funding rate TERKINI
+// (belum settled) + mark price + waktu funding berikutnya. Ini pengganti
+// coinalyze.getCurrentFundingRate.
+export interface PremiumIndexPoint {
+  symbol: string;
+  markPrice: string;
+  indexPrice: string;
+  estimatedSettlePrice: string;
+  lastFundingRate: string;
+  nextFundingTime: number;
+  interestRate: string;
+  time: number;
+}
+
+export async function getCurrentFundingRateNative(symbol: string): Promise<PremiumIndexPoint> {
+  return callProxy<PremiumIndexPoint>("/fapi/v1/premiumIndex", { symbol: symbol.toUpperCase() });
+}
+
+// ─────────────────────────────────────────────────────────────
+// KLINES / CANDLESTICK (NATIVE) — menggantikan Coinalyze ohlcv-history
+// untuk sumber harga. Format response Binance adalah array-of-array
+// (bukan object), urutan field: [openTime, open, high, low, close,
+// volume, closeTime, quoteAssetVolume, numberOfTrades,
+// takerBuyBaseAssetVolume, takerBuyQuoteAssetVolume, ignore].
+// ─────────────────────────────────────────────────────────────
+export type KlineTuple = [
+  number, // openTime
+  string, // open
+  string, // high
+  string, // low
+  string, // close
+  string, // volume
+  number, // closeTime
+  string, // quoteAssetVolume
+  number, // numberOfTrades
+  string, // takerBuyBaseAssetVolume
+  string, // takerBuyQuoteAssetVolume
+  string, // ignore
+];
+
+export async function getKlinesNative(
+  symbol: string,
+  interval: string,
+  limit: number,
+): Promise<KlineTuple[]> {
+  return callProxy<KlineTuple[]>("/fapi/v1/klines", {
+    symbol: symbol.toUpperCase(),
+    interval,
+    limit,
+  });
+}
+
+// ─────────────────────────────────────────────────────────────
+// 24HR TICKER (NATIVE) — statistik 24 jam resmi Binance (rolling
+// window asli), menggantikan pendekatan Coinalyze yang dihitung
+// manual dari 24 candle 1 jam.
+// ─────────────────────────────────────────────────────────────
+export interface Ticker24hr {
+  symbol: string;
+  lastPrice: string;
+  priceChange: string;
+  priceChangePercent: string;
+  highPrice: string;
+  lowPrice: string;
+  volume: string;
+  quoteVolume: string;
+}
+
+export async function getTicker24hrNative(symbol: string): Promise<Ticker24hr> {
+  return callProxy<Ticker24hr>("/fapi/v1/ticker/24hr", { symbol: symbol.toUpperCase() });
 }
