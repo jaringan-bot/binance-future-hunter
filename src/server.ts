@@ -277,7 +277,10 @@ export function createServer(): McpServer {
         "sempat menyusul naik/turun. " +
         "PENTING: banyak pair di Binance Futures adalah FUTURES-ONLY (terutama koin baru/kecil) dan TIDAK punya listing " +
         "di Binance Spot — tool ini akan gagal dengan error jelas untuk pair semacam itu (bukan bug, memang tidak ada " +
-        "harga spot Binance untuk dibandingkan).",
+        "harga spot Binance untuk dibandingkan). " +
+        "Untuk deteksi basis arbitrage (docs/mm_detection_framework.md Section 5): panggil binance_check_spot_listing dulu " +
+        "kalau belum yakin pair-nya listed di Spot, dan ingat tool ini cuma snapshot sesaat — deteksi 'basis melebar lalu " +
+        "kembali' butuh panggil berkali-kali manual, tidak ada tool histori basis time-series.",
       inputSchema: { symbol: symbolSchema },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -624,7 +627,11 @@ export function createServer(): McpServer {
         "mode='position' = breakdown berdasarkan SIZE POSISI top trader (mungkin lebih relevan untuk melihat dominasi modal besar, " +
         "karena satu akun besar dengan posisi masif tetap terhitung 1 akun di mode='account' tapi bobotnya besar di mode='position'). " +
         "KETERBATASAN: Binance tidak mempublikasikan threshold pasti 'top trader' itu top berapa persen, dan data ini snapshot " +
-        "periodik (bukan real-time tick-by-tick).",
+        "periodik (bukan real-time tick-by-tick). " +
+        "Untuk deteksi divergence smart-money vs retail (docs/mm_detection_framework.md Section 4.2): JANGAN pakai threshold " +
+        "absolut universal (misal '15%') — tervalidasi data riil, pergerakan pair likuid (BTC/ETH) cuma <2.5 poin per 2 jam. " +
+        "Bandingkan RELATIF ke histori pendek pair itu sendiri (~5-30 hari tergantung resolusi, retensi Binance terbatas), " +
+        "fokus ke ARAH pergerakan yang berlawanan dari binance_get_long_short_ratio, bukan magnitude absolut.",
       inputSchema: {
         symbol: symbolSchema,
         mode: z
@@ -707,7 +714,9 @@ export function createServer(): McpServer {
         "Berguna untuk melihat wall besar (potensi order whale/spoofing), spread bid-ask, dan likuiditas di sekitar harga saat ini. " +
         "PENTING: ini snapshot SESAAT — order book berubah sangat cepat, terutama untuk pair dengan volume tinggi. Wall besar bisa " +
         "hilang dalam hitungan detik (bisa jadi spoofing/fake wall, bukan komitmen order sungguhan). Jangan overinterpretasi satu " +
-        "snapshot sebagai sinyal pasti.",
+        "snapshot sebagai sinyal pasti. " +
+        "Untuk deteksi spoofing/absorption yang lebih sistematis, lihat docs/mm_detection_framework.md Section 2-3 — rule of " +
+        "thumb: butuh minimal 3 sinyal align (misal wall + CVD + OI) sebelum menyimpulkan aktivitas MM, satu snapshot saja tidak cukup.",
       inputSchema: {
         symbol: symbolSchema,
         limit: z
@@ -939,7 +948,10 @@ export function createServer(): McpServer {
         "dalam rentang waktu tertentu (data via Coinalyze, sumber asli Binance). PENTING: ini data LAGGING/REAKTIF — " +
         "mencatat apa yang SUDAH terjadi, bukan sinyal arah ke depan. Long liquidation dominan = tekanan turun baru saja " +
         "menyapu posisi long (bisa berarti downtrend berlanjut ATAU seller sudah kehabisan tenaga — perlu konfirmasi " +
-        "tambahan dari funding rate/OI/price action). Short liquidation dominan = kebalikannya untuk sisi atas.",
+        "tambahan dari funding rate/OI/price action). Short liquidation dominan = kebalikannya untuk sisi atas. " +
+        "Untuk deteksi stop hunt (docs/mm_detection_framework.md Section 4): PENTING, response ini TIDAK punya field " +
+        "harga sama sekali (cuma total per window waktu) — cross-check manual dengan binance_get_klines di window waktu " +
+        "yang sama untuk mapping ke level harga (wick candle).",
       inputSchema: {
         symbol: symbolSchema,
         period: z
