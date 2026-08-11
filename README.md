@@ -32,13 +32,17 @@ dalam percakapan dengan Claude, tanpa perlu buka dashboard exchange terpisah.
 
 ## Kelebihan
 
-- 25 tools mencakup lima sudut analisis: bias arah pasar, area harga kunci
+- 29 tools mencakup lima sudut analisis: bias arah pasar, area harga kunci
   (order book), konfirmasi eksekusi (order flow/aggressor), pembanding
   Futures-vs-Spot (leverage-driven vs demand riil), dan market-wide scan
   (funding rate ekstrem lintas semua pair, atau bandingkan metrik across
   beberapa pair) — plus tool composite (`binance_analyze_pair`) buat
-  overview cepat tanpa banyak tool call.
-- Read-only murni — tidak ada risiko custodial atau trading tak disengaja.
+  overview cepat tanpa banyak tool call, dan config/histori (threshold
+  per-pair, basis time-series) yang tersimpan di Workers KV.
+- Read-only terhadap data pasar Binance — tidak ada order/trading. Satu-
+  satunya tool yang menulis state (`binance_set_pair_threshold`) cuma
+  nyimpen preferensi threshold kamu sendiri di Workers KV, tidak menyentuh
+  akun Binance/data pihak luar sama sekali.
 - Transparan soal keterbatasan tiap tool (lihat bagian di bawah), bukan
   dibungkus seolah semua data sempurna.
 - Infrastruktur cukup dengan free tier (Cloudflare Workers + Vercel Hobby +
@@ -83,6 +87,15 @@ dalam percakapan dengan Claude, tanpa perlu buka dashboard exchange terpisah.
 Konsekuensinya, worker ini butuh **dua set kredensial**: `COINALYZE_API_KEY`
 dan `PROXY_URL`/`PROXY_SECRET` (proxy Vercel) — lihat bagian Setup di bawah.
 
+**Caching & state, tanpa kredensial tambahan.** Response upstream (funding
+rate, klines, OI, dll — kecuali order book & aggregate trades yang butuh
+freshness ketat) di-cache singkat (5 detik) lewat Cache API bawaan
+Cloudflare Workers, tidak perlu setup apapun. Threshold custom per-pair dan
+histori basis time-series tersimpan di Workers KV (binding `CONFIG_KV`,
+sudah termasuk di `wrangler.toml` repo ini) — snapshot basis diisi otomatis
+oleh Cron Trigger tiap 5 menit untuk watchlist tetap (BTCUSDT, ETHUSDT,
+SOLUSDT).
+
 ## Yang disediakan
 
 | Tool | Fungsi | Sumber |
@@ -113,6 +126,9 @@ dan `PROXY_URL`/`PROXY_SECRET` (proxy Vercel) — lihat bagian Setup di bawah.
 | `binance_check_spot_listing` | Cek apakah pair listed di Binance Spot + status trading — dipakai sebelum panggil tool Spot lain untuk pair yang belum pasti | Binance native (Spot) |
 | `binance_analyze_pair` | Overview cepat 1 pair (composite): funding, tren OI, tren top trader, taker volume, order book, bias harga — 6 tool sekaligus dalam 1 call | Binance native |
 | `binance_compare_symbols` | Bandingkan 1 metrik (funding rate, %change 24h, OI, top trader ratio, taker ratio) across 2-10 pair sekaligus, diurutkan dari paling ekstrem | Binance native |
+| `binance_set_pair_threshold` | Set threshold funding/basis custom per-pair (override default ±0.03%/±0.05%), tersimpan di Workers KV | Workers KV |
+| `binance_get_pair_threshold` | Cek threshold custom yang sudah di-set untuk sebuah pair | Workers KV |
+| `binance_get_basis_history` | Histori basis futures-vs-spot time-series (snapshot Cron tiap 5 menit), watchlist tetap BTCUSDT/ETHUSDT/SOLUSDT — deteksi "basis melebar lalu kembali" tanpa cek manual berkali-kali | Workers KV + Cron Trigger |
 
 ## Framework Analisis
 
@@ -188,6 +204,22 @@ error yang jelas ("PROXY_URL atau PROXY_SECRET belum diset di worker").
 `wrangler secret list` hanya boleh membocorkan nama secret, tidak pernah
 value — kesalahan ini membuat value asli bocor lewat command yang seharusnya
 aman.
+
+## Setup Workers KV (wajib, sekali saja — kalau fork/deploy repo ini sendiri)
+
+`id` KV namespace di `wrangler.toml` repo ini terikat ke akun Cloudflare
+yang bikin — kalau kamu fork/clone dan deploy ke akun sendiri, wajib bikin
+namespace baru:
+
+```bash
+npx wrangler kv namespace create WHALESCOPE_CONFIG
+```
+
+Copy `id` yang muncul ke `[[kv_namespaces]]` di `wrangler.toml`, ganti value
+`id` yang lama (binding-nya biarkan tetap `CONFIG_KV`, kode worker rujuk
+nama binding itu, bukan id). Tanpa ini, `binance_set_pair_threshold`,
+`binance_get_pair_threshold`, dan `binance_get_basis_history` akan gagal
+dengan error jelas ("CONFIG_KV belum ke-bind di worker").
 
 ## Setup Deploy Otomatis (GitHub Actions → Cloudflare Workers)
 

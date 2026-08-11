@@ -3,6 +3,7 @@ import { z } from "zod";
 import * as binanceProxy from "../binanceProxyClient.js";
 import { fmtPrice, fmtPct, fmtTime, trendDirection } from "../format.js";
 import { symbolSchema, PERIOD_ENUM, errorResult } from "../shared.js";
+import { getPairThreshold } from "./config.js";
 
 export function registerFundingTools(server: McpServer): void {
 
@@ -26,13 +27,19 @@ export function registerFundingTools(server: McpServer): void {
         "Gunakan tool ini untuk membaca sentimen leverage pasar saat ini. " +
         "PERHATIAN: index price Binance adalah rata-rata tertimbang dari beberapa exchange spot — untuk pair kecil " +
         "atau baru listing, salah satu exchange sumber bisa illikuid dan membuat index price (dan karenanya basis) " +
-        "jadi noisy; interpretasikan dengan hati-hati untuk pair semacam itu.",
+        "jadi noisy; interpretasikan dengan hati-hati untuk pair semacam itu. " +
+        "Threshold crowded default ±0.03% funding / ±0.05% basis bisa dioverride per-pair lewat " +
+        "binance_set_pair_threshold (tersimpan di Workers KV) -- berguna untuk pair volatil/altcoin kecil yang " +
+        "'normal range'-nya beda jauh dari BTC/ETH.",
       inputSchema: { symbol: symbolSchema },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ symbol }) => {
       try {
-        const data = await binanceProxy.getCurrentFundingRateNative(symbol);
+        const [data, customThreshold] = await Promise.all([
+          binanceProxy.getCurrentFundingRateNative(symbol),
+          getPairThreshold(symbol),
+        ]);
         const rate = parseFloat(data.lastFundingRate);
         const markPrice = parseFloat(data.markPrice);
         const indexPrice = parseFloat(data.indexPrice);
@@ -41,20 +48,25 @@ export function registerFundingTools(server: McpServer): void {
         // dua kali dengan nama berbeda karena keduanya angka yang sama persis.
         const basis = (markPrice - indexPrice) / indexPrice;
 
+        // Default ±0.03% funding, ±0.05% basis -- bisa dioverride per-pair
+        // lewat binance_set_pair_threshold (disimpan di Workers KV).
+        const FUNDING_THRESHOLD = customThreshold?.fundingThreshold ?? 0.0003;
+        const BASIS_THRESHOLD = customThreshold?.basisThreshold ?? 0.0005;
+        const usingCustomThreshold = customThreshold?.fundingThreshold !== undefined || customThreshold?.basisThreshold !== undefined;
+
         const interpretation =
-          rate >= 0.0003
+          rate >= FUNDING_THRESHOLD
             ? "CROWDED LONG (funding cukup tinggi — mayoritas leverage di sisi long, ada risiko long squeeze jika harga berbalik turun)"
-            : rate <= -0.0003
+            : rate <= -FUNDING_THRESHOLD
               ? "CROWDED SHORT (funding negatif signifikan — mayoritas leverage di sisi short, ada risiko short squeeze jika harga berbalik naik)"
               : "NETRAL (funding dalam rentang wajar, tidak ada crowding ekstrem yang jelas)";
 
-        const BASIS_THRESHOLD = 0.0005; // 0.05% — basis wajar biasanya lebih sempit dari ini di pair likuid
         const basisInterpretation =
           basis >= BASIS_THRESHOLD
             ? "PREMIUM TINGGI (mark price jauh di atas index — sentimen long agresif di futures, funding rate biasanya menyusul naik)"
             : basis <= -BASIS_THRESHOLD
               ? "DISCOUNT TINGGI (mark price jauh di bawah index — sentimen short agresif di futures, funding rate biasanya menyusul turun)"
-              : Math.abs(rate) >= 0.0003
+              : Math.abs(rate) >= FUNDING_THRESHOLD
                 ? "BASIS NETRAL TAPI FUNDING EKSTREM (basis belum mengkonfirmasi funding — kemungkinan funding lagging, waspada potensi mean-revert funding ke arah netral)"
                 : "NETRAL (basis dalam rentang wajar, mark price mengikuti index dengan dekat)";
 
@@ -71,7 +83,7 @@ export function registerFundingTools(server: McpServer): void {
           `**Interpretasi Funding**: ${interpretation}`,
           `**Interpretasi Basis**: ${basisInterpretation}`,
           ``,
-          `_Catatan: threshold crowded funding (±0.03%) dan basis (±0.05%) adalah heuristik umum, sesuaikan dengan konteks volatilitas pair yang sedang ditradingkan. Index price Binance adalah rata-rata tertimbang dari beberapa exchange spot — untuk pair kecil/baru listing, salah satu exchange sumber bisa illikuid dan membuat index price sendiri jadi noisy. Data LANGSUNG dari Binance native (premiumIndex)._`,
+          `_Threshold dipakai: funding ±${fmtPct(FUNDING_THRESHOLD, 4)}, basis ±${fmtPct(BASIS_THRESHOLD, 4)}${usingCustomThreshold ? " (CUSTOM, di-set lewat binance_set_pair_threshold)" : " (default global)"}. Index price Binance adalah rata-rata tertimbang dari beberapa exchange spot — untuk pair kecil/baru listing, salah satu exchange sumber bisa illikuid dan membuat index price sendiri jadi noisy. Data LANGSUNG dari Binance native (premiumIndex)._`,
         ].join("\n");
 
         return {
@@ -84,6 +96,9 @@ export function registerFundingTools(server: McpServer): void {
             basis,
             interpretation,
             basisInterpretation,
+            fundingThreshold: FUNDING_THRESHOLD,
+            basisThreshold: BASIS_THRESHOLD,
+            usingCustomThreshold,
           },
         };
       } catch (err) {

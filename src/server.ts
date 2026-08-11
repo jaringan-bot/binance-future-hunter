@@ -8,6 +8,8 @@ import { registerLiquidationTools } from "./tools/liquidation.js";
 import { registerPriceTools } from "./tools/price.js";
 import { registerSpotTools } from "./tools/spot.js";
 import { registerCompositeTools } from "./tools/composite.js";
+import { registerConfigTools } from "./tools/config.js";
+import { registerBasisHistoryTools } from "./tools/basisHistory.js";
 
 export function createServer(): McpServer {
   const server = new McpServer({
@@ -24,6 +26,8 @@ export function createServer(): McpServer {
   registerPriceTools(server);
   registerSpotTools(server);
   registerCompositeTools(server);
+  registerConfigTools(server);
+  registerBasisHistoryTools(server);
 
   return server;
 }

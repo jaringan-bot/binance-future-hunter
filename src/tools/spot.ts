@@ -4,6 +4,7 @@ import * as binanceProxy from "../binanceProxyClient.js";
 import { fmtNum, fmtPrice, fmtPct, fmtTime } from "../format.js";
 import { symbolSchema, KLINE_INTERVAL_ENUM, errorResult, parseTimeParam } from "../shared.js";
 import { computeCvdFromTrades, summarizeKlines } from "../toolHelpers.js";
+import { getPairThreshold } from "./config.js";
 
 export function registerSpotTools(server: McpServer): void {
 
@@ -38,15 +39,19 @@ export function registerSpotTools(server: McpServer): void {
     },
     async ({ symbol }) => {
       try {
-        const [spot, futures] = await Promise.all([
+        const [spot, futures, customThreshold] = await Promise.all([
           binanceProxy.getSpotPrice(symbol),
           binanceProxy.getCurrentFundingRateNative(symbol),
+          getPairThreshold(symbol),
         ]);
         const spotPrice = parseFloat(spot.price);
         const markPrice = parseFloat(futures.markPrice);
         const basis = (markPrice - spotPrice) / spotPrice;
 
-        const BASIS_THRESHOLD = 0.0005; // 0.05% — sama dengan threshold basis di binance_get_funding_rate
+        // Default 0.05% — sama dengan default basis di binance_get_funding_rate,
+        // bisa dioverride per-pair lewat binance_set_pair_threshold.
+        const BASIS_THRESHOLD = customThreshold?.basisThreshold ?? 0.0005;
+        const usingCustomThreshold = customThreshold?.basisThreshold !== undefined;
         const basisInterpretation =
           basis >= BASIS_THRESHOLD
             ? "PREMIUM (futures di atas spot — leverage/demand futures lebih agresif dari demand spot, waspada kalau melebar cepat)"
@@ -63,14 +68,15 @@ export function registerSpotTools(server: McpServer): void {
           ``,
           `**Interpretasi Basis**: ${basisInterpretation}`,
           ``,
-          `_Basis di sini vs harga SPOT BINANCE LANGSUNG, beda dari basis di binance_get_funding_rate yang vs INDEX price ` +
+          `_Threshold basis dipakai: ±${fmtPct(BASIS_THRESHOLD, 4)}${usingCustomThreshold ? " (CUSTOM, di-set lewat binance_set_pair_threshold)" : " (default global)"}. ` +
+            `Basis di sini vs harga SPOT BINANCE LANGSUNG, beda dari basis di binance_get_funding_rate yang vs INDEX price ` +
             `(rata-rata beberapa exchange). Kalau tool ini error "Invalid symbol", pair tersebut FUTURES-ONLY (tidak listed ` +
             `di Binance Spot) — basis futures-vs-spot tidak bisa dihitung untuk pair semacam itu._`,
         ].join("\n");
 
         return {
           content: [{ type: "text", text }],
-          structuredContent: { symbol, spotPrice, markPrice, basis, basisInterpretation },
+          structuredContent: { symbol, spotPrice, markPrice, basis, basisInterpretation, basisThreshold: BASIS_THRESHOLD, usingCustomThreshold },
         };
       } catch (err) {
         return errorResult(err);
