@@ -1,5 +1,14 @@
 # Real-Time Liquidation Stream — Design
 
+> **STATUS: DIBATALKAN (2026-08-11).** Spike test membuktikan `fstream.binance.com`
+> (WS gateway) kena WAF block yang sama seperti `fapi.binance.com` — 403 Forbidden
+> langsung dari IP Cloudflare Worker (dites via throwaway worker, lihat detail di
+> bawah). Proxy Vercel existing (`proxy/api/binance.ts`) cuma Serverless Function
+> request/response, gak bisa nahan WebSocket 24/7. Semua opsi relay yang viable
+> (upgrade Vercel Pro ~$20/bulan, atau tambah service always-on ~$5/bulan di
+> Fly.io/Railway) butuh biaya tambahan — diputuskan untuk tidak lanjut. Dokumen ini
+> dibiarkan sebagai catatan kenapa pendekatan ini gak dipilih, bukan spec aktif.
+
 ## Latar Belakang
 
 `binance_get_liquidation_history` (tool existing) bersifat lagging/historis — data candlestick-based via Coinalyze, mencatat apa yang sudah terjadi per interval waktu. Tidak ada cara menangkap liquidation event detik demi detik saat terjadi. Binance tidak punya REST publik untuk liquidation market-wide (`/fapi/v1/allForceOrders` itu private, akun sendiri saja), jadi satu-satunya sumber real-time market-wide adalah WebSocket stream `!forceOrder@arr`.
