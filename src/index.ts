@@ -44,7 +44,7 @@ export default {
       return withCors(
         new Response(
           JSON.stringify({
-            name: "binance-futures-mcp",
+            name: "whalescope-mcp",
             status: "ok",
             endpoint: "/mcp",
             note: "Daftarkan URL <this-worker-url>/mcp sebagai custom MCP connector.",

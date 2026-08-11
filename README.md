@@ -142,7 +142,7 @@ manual tanpa push baru, buka tab **Actions** di GitHub repo → pilih workflow
 
 Setelah workflow selesai (cek tab Actions), worker akan live di:
 ```
-https://binance-futures-mcp.<subdomain-cloudflare-kamu>.workers.dev
+https://whalescope-mcp.<subdomain-cloudflare-kamu>.workers.dev
 ```
 
 Buka URL tersebut — harus muncul JSON status `"ok"`.
@@ -153,7 +153,7 @@ Ini **tidak** bisa dilakukan lewat GitHub Actions — perlu langkah manual satu
 kali di dashboard Cloudflare:
 
 1. Buka https://dash.cloudflare.com → pilih akun kamu
-2. Buka **Workers & Pages** → pilih worker `binance-futures-mcp`
+2. Buka **Workers & Pages** → pilih worker `whalescope-mcp`
 3. Buka tab **Settings** → **Domains & Routes**
 4. Klik **Add** → **Custom Domain**
 5. Masukkan `whale.jaringan.dev`
@@ -170,7 +170,7 @@ Setelah custom domain aktif, worker bisa diakses di
 1. Buka Claude (claude.ai) → **Settings** → **Connectors**
 2. Pilih **Add custom connector**
 3. Masukkan URL: `https://whale.jaringan.dev/mcp`
-   (atau `https://binance-futures-mcp.<subdomain>.workers.dev/mcp` jika belum
+   (atau `https://whalescope-mcp.<subdomain>.workers.dev/mcp` jika belum
    setup custom domain — perhatikan path `/mcp` di akhir, wajib)
 4. Simpan, lalu aktifkan connector tersebut untuk percakapan yang kamu mau
 

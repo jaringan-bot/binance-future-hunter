@@ -87,7 +87,7 @@ function computeRealizedVolatility(
 
 export function createServer(): McpServer {
   const server = new McpServer({
-    name: "binance-futures-mcp",
+    name: "whalescope-mcp",
     version: "1.0.0",
   });
 
