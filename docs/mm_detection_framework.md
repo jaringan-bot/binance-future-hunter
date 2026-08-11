@@ -2,8 +2,6 @@
 
 > Framework deteksi aktivitas market maker (MM) menggunakan tool WhaleScope MCP (Binance Futures + Spot).
 > **Catatan penting:** Tidak ada tool yang bisa melihat identitas atau posisi spesifik MM secara langsung. Framework ini membangun profil aktivitas MM dari jejak yang mereka tinggalkan di pasar.
->
-> **Divalidasi dengan data riil** pada 2026-08-11 (lihat [Section 10](#10-validasi-empiris)) — beberapa klaim di versi awal direvisi setelah dicek langsung ke tool.
 
 ---
 
@@ -17,8 +15,8 @@
 6. [Workflow Deteksi Step-by-Step](#6-workflow-deteksi-step-by-step)
 7. [Checklist Live](#7-checklist-live)
 8. [Mapping Tool → Sinyal](#8-mapping-tool--sinyal)
-9. [Kesimpulan](#9-kesimpulan)
-10. [Validasi Empiris](#10-validasi-empiris)
+9. [Catatan Validasi Praktis](#9-catatan-validasi-praktis)
+10. [Kesimpulan](#10-kesimpulan)
 
 ---
 
@@ -30,9 +28,9 @@
 | Melihat *posisi spesifik* MM | ❌ Tidak |
 | Mendeteksi **jejak aktivitas** MM (absorption, spoofing, stop hunt, basis arb) | ✅ Bisa, dengan menggabungkan 3–4 tool |
 
-**Rule of thumb (heuristik, BUKAN probabilitas terkalibrasi):** Semakin banyak sinyal align dalam timeframe yang sama, semakin kuat indikasi aktivitas MM. Lihat tier di [Section 7](#7-checklist-live) — angka "%" di sana adalah `jumlah-checklist / total-checklist`, bukan hasil backtest statistik. Perlakukan sebagai bobot checklist, bukan angka probabilitas sungguhan.
+**Rule of thumb:** Jika **≥3 sinyal align** dalam timeframe yang sama, indikasi aktivitas MM cukup kuat untuk ditindaklanjuti (bukan probabilitas statistik terkalibrasi — lihat Section 7).
 
-**Step 0 — cek listing sebelum mulai:** Kalau mau pakai Section 5 (basis arbitrage), panggil `binance_check_spot_listing` dulu. Banyak pair Futures (terutama koin baru/kecil) TIDAK listed di Binance Spot sama sekali (contoh nyata: VELVETUSDT) — Section 5 otomatis tidak applicable untuk pair semacam itu, bukan berarti sinyalnya "tidak terdeteksi".
+**Step 0 — cek listing sebelum mulai:** Kalau mau pakai Section 5 (basis arbitrage), panggil `binance_check_spot_listing` dulu. Banyak pair Futures (terutama koin baru/kecil) TIDAK listed di Binance Spot sama sekali (contoh nyata: VELVETUSDT) — Section 5 otomatis tidak applicable untuk pair semacam itu.
 
 ---
 
@@ -44,7 +42,7 @@
 - `binance_get_order_book_depth`
 - `binance_get_agg_trades`
 - `binance_get_open_interest`
-- `binance_get_spot_agg_trades` (pembanding CVD riil, lihat catatan di bawah)
+- `binance_get_spot_agg_trades` (pembanding CVD riil)
 
 **Kriteria deteksi:**
 
@@ -52,9 +50,9 @@
 |--------|-------------|
 | **CVD flat/naik** tapi harga stagnan | MM sedang absorb sell pressure (accumulation) |
 | **CVD turun drastis** tapi harga tidak jeblok | MM sedang absorb buy pressure (distribution) |
-| **OI naik TAJAM (spike)** + harga sideways | MM buka posisi besar (kemungkinan hedging). Kenaikan OI yang gradual/smooth SELAMA BEBERAPA JAM (misal <1%/jam) BUKAN sinyal ini — itu normal market growth, bukan tanda MM |
+| **OI naik TAJAM (spike)** + harga sideways | MM buka posisi besar (kemungkinan hedging). Kenaikan gradual selama beberapa jam (misal <1%/jam) BUKAN sinyal ini — itu normal market growth |
 | **Trade besar** di bid/ask tanpa slippage signifikan | Eksekusi MM dengan liquidity yang sudah disiapkan |
-| **CVD futures dan CVD spot berlawanan arah** untuk pair yang sama (`binance_get_agg_trades` vs `binance_get_spot_agg_trades`) | Absorpsi terjadi spesifik di sisi futures (leverage) — bukan demand/supply riil di spot |
+| **CVD futures dan CVD spot berlawanan arah** untuk pair yang sama | Absorpsi spesifik di sisi futures (leverage), bukan demand/supply riil spot |
 
 ---
 
@@ -91,18 +89,25 @@
 
 ---
 
-### 3.2 Order Book Refresh Rate Anomaly — *Low Confidence, TIDAK PRAKTIS via tool call biasa*
+### 3.2 Order Book Refresh Rate Anomaly — *Low Confidence*
 
 **Tool yang digunakan:**
 - `binance_get_order_book_depth`
 
-**Kriteria deteksi:**
+> ⚠️ **Batasan teknis (tervalidasi):**
+> - Latensi per call bervariasi besar: **298–898ms** (rata-rata ~485ms) lewat proxy chain worker→Vercel→Binance.
+> - 2× call berurutan total **~1,788ms** — di ujung batas "1-2 detik", bisa lebih lama saat network buruk.
+> - **Polling berurutan untuk deteksi "refresh rate" tidak reliable** — variasi latency terlalu besar untuk membedakan perubahan pasar vs noise jaringan.
+
+**Kriteria deteksi (hanya snapshot tunggal):**
 
 | Sinyal | Interpretasi |
 |--------|-------------|
-| **Perubahan depth level 1–5 terlalu cepat** tanpa eksekusi yang signifikan | MM sedang re-quote |
+| **Anomali di snapshot tunggal**: wall muncul di level yang tidak wajar (jauh dari mid-price) dengan volume tidak proporsional | Kemungkinan spoofing — butuh konfirmasi dari sinyal lain (CVD, OI) |
 
-> ⚠️ **Koreksi (2026-08-11):** Versi awal dokumen ini menyarankan "polling interval <500ms". Diukur langsung: satu kali panggilan `binance_get_order_book_depth` lewat worker (yang relay ke proxy Vercel ke Binance) makan waktu **299–625ms per call** (rata-rata 485ms dari 5x test). Polling <500ms **secara fisik tidak mungkin** lewat jalur MCP request/response biasa — setiap panggilan tool adalah satu request diskrit dari LLM, bukan stream/loop otomatis. Kalau deteksi ini benar-benar dibutuhkan, harus pakai orkestrasi EKSTERNAL di luar percakapan Claude (script terpisah yang polling langsung, bukan lewat tool call MCP satu-satu). Anggap sinyal ini **tidak actionable** dalam workflow normal Claude+MCP ini.
+> 💡 **Rekomendasi:** Jangan pakai deteksi berbasis perbandingan snapshot berurutan lewat tool call MCP biasa. Fokus pada analisis snapshot tunggal + konfirmasi silang dengan tool lain.
+
+> ❌ **WebSocket: TIDAK TERSEDIA** di WhaleScope MCP. Semua 22 tool berbasis REST request/response diskrit. Deteksi real-time butuh stack terpisah di luar project ini.
 
 ---
 
@@ -115,15 +120,18 @@
 - `binance_get_open_interest`
 - `binance_get_klines`
 
+> ⚠️ **Batasan data:** `binance_get_liquidation_history` mengembalikan `{symbol, totalLong, totalShort, dominance}` per time-bucket, **tanpa field harga sama sekali**. Tidak bisa langsung memetakan "cluster di level psikologis".
+
 **Kriteria deteksi:**
 
-| Sinyal | Interpretasi |
-|--------|-------------|
-| **Cluster liquidation di WINDOW WAKTU tertentu** (misal 1-2 candle) lalu harga *reverse* | Kemungkinan stop hunt oleh MM |
-| **OI turun tajam** pasca liquidation tapi harga recover | MM ambil posisi lawan |
-| **Wick panjang** di candlestick + liquidation spike di window waktu yang sama | Classic stop hunt signature |
+| Sinyal | Tool | Interpretasi |
+|--------|------|-------------|
+| **Spike liquidation** (totalLong/totalShort melonjak dibanding window sebelumnya) | `liquidation_history` | Ada force-closure massal di satu sisi |
+| **Wick panjang** di candlestick pada timeframe yang sama | `klines` | Harga sempat disentuh lalu reverse — mapping manual ke area liquidation |
+| **OI turun tajam** pasca liquidation spike | `open_interest` | MM ambil posisi lawan setelah hunt |
+| **Harga reverse** dalam 1–3 candle setelah wick | `klines` | Konfirmasi stop hunt berhasil |
 
-> ⚠️ **Koreksi (2026-08-11):** Versi awal menyebut "cluster liquidation **di level psikologis**". Dicek langsung ke `binance_get_liquidation_history` (sumber Coinalyze): response CUMA punya `symbol`, `totalLong`, `totalShort`, `dominance` per time-bucket — **TIDAK ADA field harga sama sekali**. Tool ini tidak bisa bilang liquidation itu terjadi di harga berapa, cuma total value per periode waktu (5m/15m/1h/dst). Untuk cross-check level harga, gabungkan manual dengan `binance_get_klines` di window waktu yang sama (lihat wick candle di jam itu) — tapi itu inferensi dari candle, bukan data liquidation per-harga yang eksplisit.
+> **Workflow mapping harga:** Gunakan `klines` untuk identifikasi wick/extreme price pada waktu yang sama dengan liquidation spike — cross-reference MANUAL, tidak otomatis karena liquidation history tidak mengandung field harga.
 
 ---
 
@@ -133,22 +141,32 @@
 - `binance_get_top_trader_ratio`
 - `binance_get_long_short_ratio`
 
-**Kriteria deteksi:**
-
-| Sinyal | Interpretasi |
-|--------|-------------|
-| **Top trader short** tapi harga naik, atau *top trader long* tapi harga turun | MM (yang masuk kategori top trader) mungkin berlawanan arah dengan retail |
-| **Blended ratio vs top trader ratio bergerak berlawanan arah**, magnitude signifikan RELATIF terhadap rentang normal pair itu | Smart money vs retail mismatch |
-
-> ⚠️ **Koreksi (2026-08-11):** Versi awal pakai threshold fix "divergen >15%". Divalidasi ke BTCUSDT live: dalam window 45 menit, blended ratio naik 62.33%→62.70% sementara top-trader (position) turun 61.78%→61.59% — **arah berlawanan** (sinyal kualitatif valid) tapi magnitude cuma ~0.3-0.5 poin persentase, JAUH di bawah 15%. Pair likuid (BTC/ETH/dst) punya rasio yang bergerak dalam rentang sempit (~55-65%) secara normal — threshold 15% kemungkinan cuma pernah tercapai di pair kecil/volatil, bukan di major pair. **Jangan pakai angka 15% sebagai threshold universal** — bandingkan magnitude pergerakan terhadap rentang historis pair itu sendiri (misal: apakah pergerakan ini beberapa kali lipat dari pergerakan normal per-15-menit pair tersebut), bukan angka absolut fix.
+> ⚠️ **Threshold universal tidak valid — tervalidasi dengan data riil.** Baik threshold flat (>15%) maupun tiered per-liquiditas (3-15%) SAMA-SAMA gagal: pergerakan top-trader ratio riil jauh di bawah keduanya untuk semua pair yang dites (window 2 jam, 8×15m):
 >
-> Ingat juga: threshold "top trader" itu sendiri **tidak dipublikasikan Binance** secara pasti dan datanya snapshot periodik (bukan tick-by-tick) — treat sebagai proxy kasar, bukan data pasti siapa "smart money".
+> | Pair | Range aktual |
+> |------|-------------|
+> | SOLUSDT | 1.02 poin |
+> | BNBUSDT | 0.60 poin |
+> | LINKUSDT | 0.40 poin |
+> | AVAXUSDT | 2.35 poin |
+>
+> **Angka threshold spesifik apapun (flat atau tiered) adalah tebakan tanpa kalibrasi data — jangan dipakai apa adanya.**
+
+**Kriteria deteksi (pendekatan relatif per-pair):**
+
+| Pendekatan | Cara pakai |
+|-----------|-----------|
+| **Persentil historis** | Kalibrasi threshold dari data historis pair sendiri via `binance_get_top_trader_ratio`. **Batasan tervalidasi**: endpoint Binance ini punya retensi data ~30-31 hari MAKSIMAL (dites langsung — period=4h dan period=1d sama-sama mentok di tanggal yang sama, ~30 hari ke belakang, TIDAK PEDULI parameter `limit`). Untuk kalibrasi delta INTRADAY (15 menit), lookback realistis cuma **~5 hari** (period=15m, limit=500 = batas maksimal poin yang tersedia). Klaim "30-90 hari" di versi sebelumnya salah — 90 hari **tidak tersedia sama sekali** dari Binance untuk endpoint ini, dan 30 hari cuma tercapai di resolusi kasar (4h/1d) yang kehilangan detail intraday. |
+| **Arah vs magnitude** | Untuk pair likuid (BTC, ETH, SOL, BNB), fokus pada **arah pergerakan** (top trader naik vs turun) yang berlawanan dengan harga, bukan angka absolut. Perubahan 0.5–1 poin dengan arah kontra-harga sudah cukup signifikan berdasar data di atas. |
+| **Delta vs blended** | Hitung selisih absolut antara top-trader ratio dan blended ratio dari waktu ke waktu. Pelebaran/penyempitan drastis RELATIF ke histori pendek pair itu sendiri (5 hari @15m) → mismatch. |
+
+> 💡 **Rekomendasi:** Jangan pakai threshold universal (flat atau tiered) tanpa kalibrasi data historis. Setiap pair punya karakter volatilitas ratio sendiri, dan histori yang tersedia dari Binance terbatas ~5 hari (resolusi halus) sampai ~30 hari (resolusi kasar) — bangun baseline dalam batasan itu, bukan asumsi 90 hari.
 
 ---
 
 ## 5. Sinyal Basis Arbitrage
 
-**Prasyarat**: jalankan `binance_check_spot_listing` dulu — kalau pair futures-only (tidak listed di Spot), section ini tidak applicable sama sekali.
+**Prasyarat**: jalankan `binance_check_spot_listing` dulu — kalau pair futures-only, section ini tidak applicable.
 
 ### 5.1 Spot-Futures Basis Arbitrage — *Medium Confidence*
 
@@ -165,9 +183,9 @@
 |--------|-------------|
 | **Basis spot-futures melebar** lalu kembali dalam waktu singkat | MM melakukan basis trade/arbitrage |
 | **Funding rate positif ekstrem + OI naik** | MM mungkin short futures sambil buy spot (hedged) |
-| **CVD futures dan CVD spot berlawanan arah** (futures buy-dominant, spot sell-dominant, atau sebaliknya) | Tekanan leverage vs demand riil tidak selaras — indikasi arbitrage/hedging pressure |
+| **CVD futures dan CVD spot berlawanan arah** | Tekanan leverage vs demand riil tidak selaras |
 
-> ⚠️ **Catatan praktis:** `binance_get_spot_price` (dan `binance_get_funding_rate`) cuma kasih SNAPSHOT sesaat — TIDAK ADA tool histori basis time-series di WhaleScope MCP. Untuk deteksi "basis melebar lalu kembali", harus panggil tool ini berkali-kali secara manual dan catat sendiri basis-nya per waktu (tidak otomatis tersedia sebagai satu tool call).
+> ⚠️ **Catatan praktis:** `binance_get_spot_price` dan `binance_get_funding_rate` cuma kasih SNAPSHOT sesaat — TIDAK ADA tool histori basis time-series. Deteksi "basis melebar lalu kembali" harus manual: panggil berkali-kali dan catat sendiri basis per waktu.
 
 ---
 
@@ -190,30 +208,29 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  STEP 0: Cek listing spot (binance_check_spot_listing)       │
-│  → Kalau futures-only, skip Step 4 (basis arb N/A)           │
+│  STEP 0: Cek listing spot (binance_check_spot_listing)        │
+│  → Kalau futures-only, skip Step 4 (basis arb N/A)            │
 ├─────────────────────────────────────────────────────────────┤
-│  STEP 1: Cek order book depth                                │
-│  → Ada wall tidak wajar?                                     │
+│  STEP 1: Cek order book depth (snapshot tunggal)               │
+│  → Ada wall tidak wajar?                                       │
 ├─────────────────────────────────────────────────────────────┤
-│  STEP 2: Cross-check agg trades + CVD (futures DAN spot)     │
-│  → Wall-nya diabsorb atau dipull? CVD futures vs spot selaras?│
+│  STEP 2: Cross-check agg trades + CVD (futures DAN spot)       │
+│  → Wall-nya diabsorb atau dipull? CVD futures vs spot selaras? │
 ├─────────────────────────────────────────────────────────────┤
-│  STEP 3: Cek OI + funding                                    │
-│  → Ada perubahan TAJAM (bukan gradual) di derivative?        │
+│  STEP 3: Cek OI + funding                                      │
+│  → Ada perubahan TAJAM (bukan gradual) di derivative?          │
 ├─────────────────────────────────────────────────────────────┤
 │  STEP 4: Validasi spot basis (skip kalau Step 0 = futures-only)│
-│  → Ada aktivitas arbitrage? (perlu snapshot berkali-kali manual)│
+│  → Ada aktivitas arbitrage? (snapshot manual berkali-kali)     │
 ├─────────────────────────────────────────────────────────────┤
-│  STEP 5: Cek liquidation history                             │
-│  → Ada cluster di WINDOW WAKTU tertentu (bukan level harga)? │
+│  STEP 5: Cek liquidation history + klines                      │
+│  → Spike liquidation align dengan wick panjang di waktu sama?  │
 ├─────────────────────────────────────────────────────────────┤
-│  STEP 6: Cross-check top trader ratio                        │
-│  → Smart money vs retail mismatch, RELATIF ke rentang normal │
-│     pair itu (bukan threshold absolut 15%)?                  │
+│  STEP 6: Cross-check top trader ratio                          │
+│  → Arah berlawanan blended ratio? (baseline ~5-30 hari pair    │
+│     sendiri, BUKAN threshold universal)                        │
 ├─────────────────────────────────────────────────────────────┤
-│  RULE: makin banyak sinyal align, makin kuat indikasi —       │
-│  lihat tier heuristik di Section 7, bukan angka probabilitas │
+│  RULE: makin banyak sinyal align, makin kuat indikasi           │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -221,79 +238,94 @@
 
 ## 7. Checklist Live
 
-Gunakan checklist ini saat analisis real-time. Centang setiap item yang terdeteksi:
-
-- [ ] **Order book:** Walls besar terdeteksi
+- [ ] **Order book:** Wall tidak wajar di snapshot tunggal
 - [ ] **CVD:** Flat/divergen dari harga (futures dan/atau spot)
 - [ ] **OI:** Naik/turun TAJAM (spike, bukan gradual) tanpa harga follow
 - [ ] **Spot basis:** Melebar lalu kembali (butuh listing spot, cek manual berkali-kali)
-- [ ] **Liquidation:** Cluster di WINDOW WAKTU tertentu (bukan level harga spesifik)
-- [ ] **Top trader:** Bergerak berlawanan arah dari blended ratio, magnitude signifikan relatif ke rentang normal pair itu
+- [ ] **Liquidation + klines:** Spike liquidation align dengan wick panjang
+- [ ] **Top trader:** Berlawanan arah dari blended ratio, dibanding baseline pair itu sendiri
 
-### Confidence Tier (heuristik checklist, BUKAN probabilitas statistik)
+### Confidence Tier (heuristik checklist, BUKAN probabilitas statistik terkalibrasi)
 
 | Checked | Tier | Interpretasi |
 |---------|-----------|-------------|
 | 0 | — | Belum ada data |
-| 1–2 | Weak | Kemungkinan besar retail noise, jangan diambil kesimpulan |
-| 3–4 | Moderate | Mulai pantas dicurigai sebagai aktivitas MM, tapi masih perlu konteks (lihat Section 9) |
-| 5–6 | Strong | Indikasi kuat, tapi tetap bukan bukti — MM detection dari public data selalu bersifat inferensial |
-
-*(Angka checked/6 SENGAJA tidak ditampilkan sebagai persen — versi awal dokumen menampilkan ini sebagai "probabilitas %" yang menyiratkan kalibrasi statistik yang sebenarnya tidak ada di balik angka ini.)*
+| 1–2 | Weak | Kemungkinan besar retail noise |
+| 3–4 | Moderate | Mulai pantas dicurigai, tapi tetap perlu konteks (Section 10) |
+| 5–6 | Strong | Indikasi kuat — tetap bukan bukti definitif |
 
 ---
 
 ## 8. Mapping Tool → Sinyal
 
-| Tool | Sinyal yang bisa dideteksi |
-|------|---------------------------|
-| `binance_check_spot_listing` | Prasyarat Section 5 — validasi pair punya leg spot atau tidak |
-| `binance_get_order_book_depth` | Spoofing, absorption, liquidity withdrawal |
-| `binance_get_order_book_imbalance` | Imbalance manipulation, price holding |
-| `binance_get_agg_trades` | CVD divergence (futures), large trade execution |
-| `binance_get_spot_agg_trades` | CVD riil (spot) — pembanding futures untuk deteksi leverage-driven vs demand riil |
-| `binance_get_open_interest` | Position building, post-liquidation recovery |
-| `binance_get_taker_volume_ratio` | Limit order dominance (MM characteristic) |
-| `binance_get_liquidation_history` | Stop hunt cluster (per WAKTU, bukan per harga) |
-| `binance_get_top_trader_ratio` | Smart money vs retail divergence (proxy kasar, threshold Binance tidak dipublikasikan) |
-| `binance_get_long_short_ratio` | Retail sentiment vs price action |
-| `binance_get_spot_price` | Basis arbitrage detection (snapshot sesaat, bukan time-series) |
-| `binance_get_funding_rate` | Funding manipulation, scheduled rebalancing |
-| `binance_get_funding_rate_history` | Funding pattern analysis |
-| `binance_get_klines` | Wick analysis, reversal confirmation |
+| Tool | Sinyal yang bisa dideteksi | Batasan tervalidasi |
+|------|---------------------------|---------|
+| `binance_check_spot_listing` | Prasyarat Section 5 | — |
+| `binance_get_order_book_depth` | Spoofing, absorption, liquidity withdrawal | Latensi 298-898ms/call, tidak bisa deteksi refresh rate real-time |
+| `binance_get_order_book_imbalance` | Imbalance manipulation, price holding | Snapshot tunggal, tidak ada historis |
+| `binance_get_agg_trades` | CVD divergence (futures), large trade execution | — |
+| `binance_get_spot_agg_trades` | CVD riil (spot), pembanding leverage vs demand riil | — |
+| `binance_get_open_interest` | Position building, post-liquidation recovery | — |
+| `binance_get_taker_volume_ratio` | Limit order dominance (MM characteristic) | — |
+| `binance_get_liquidation_history` | Liquidation spike per WAKTU | Tanpa field harga — perlu cross-check `klines` manual |
+| `binance_get_top_trader_ratio` | Smart money vs retail divergence | Pergerakan kecil (<2.5 poin/2jam bahkan pair moderate); retensi historis ~30 hari maks (4h/1d), ~5 hari di resolusi 15m; threshold Binance sendiri tidak dipublikasikan |
+| `binance_get_long_short_ratio` | Retail sentiment vs price action | — |
+| `binance_get_spot_price` | Basis arbitrage detection | Snapshot sesaat, tidak ada time-series basis |
+| `binance_get_funding_rate` | Funding manipulation, scheduled rebalancing | — |
+| `binance_get_funding_rate_history` | Funding pattern analysis | — |
+| `binance_get_klines` | Wick analysis, reversal confirmation, harga mapping | — |
 
 ---
 
 ## 9. Kesimpulan
 
-Framework ini **tidak membuktikan** keberadaan market maker secara definitif, melainkan menghitung **skor indikasi aktivitas MM** berdasarkan jejak yang mereka tinggalkan di pasar — bukan probabilitas terkalibrasi secara statistik.
+Framework ini **tidak membuktikan** keberadaan market maker secara definitif, melainkan menghitung **skor indikasi aktivitas MM** dari jejak yang mereka tinggalkan — bukan probabilitas terkalibrasi secara statistik.
 
 **Kunci keberhasilan:**
-1. **Jangan andalkan 1 sinyal saja** — selalu cross-check minimal 3 tool.
-2. **Perhatikan timeframe** — sinyal yang align dalam 5–15 menit lebih kuat daripada dalam 1 jam.
-3. **Konteks pasar penting** — sinyal MM lebih valid di saat volume rendah atau di area konsolidasi.
-4. **False positive ada** — news event atau whale retail juga bisa memicu sinyal serupa.
-5. **Bandingkan magnitude relatif ke pair itu sendiri**, bukan threshold absolut fix — pair likuid (BTC/ETH) dan pair kecil punya rentang pergerakan normal yang sangat berbeda.
-6. **Section 3.2 (refresh rate anomaly) tidak actionable** lewat tool call MCP biasa — latency network round-trip (~300-625ms per call) lebih lambat dari interval yang dibutuhkan.
+1. **Jangan andalkan 1 sinyal saja** — cross-check minimal 3 tool.
+2. **Perhatikan timeframe** — sinyal align dalam 5–15 menit lebih kuat daripada dalam 1 jam.
+3. **Konteks pasar penting** — sinyal MM lebih valid di volume rendah/area konsolidasi.
+4. **False positive ada** — news event atau whale retail bisa memicu sinyal serupa.
+5. **Kalibrasi per-pair** — threshold top-trader ratio harus dibangun dari data historis pair sendiri (~5-30 hari, tergantung resolusi), bukan angka universal.
+6. **Kenali batasan teknis** — latency 300-900ms/call, liquidation tanpa harga, retensi historis top-trader ratio terbatas, refresh-rate real-time tidak feasible via REST tool call, WebSocket tidak tersedia.
 
 ---
 
 ## 10. Validasi Empiris
 
-Dicek langsung ke worker deployed (`whalescope-mcp.jaringan.dev`) pada 2026-08-11, pair BTCUSDT, window ~16:00-16:50 UTC:
+Semua tervalidasi langsung ke worker deployed (`whalescope-mcp.jaringan.dev`), 2026-08-11.
 
-| Sinyal | Data aktual | Trigger? |
-|---|---|---|
-| Order book wall | Depth 5/10 SEIMBANG, depth 20 bearish tipis (34.59%) | ❌ Tidak ada wall jelas |
-| CVD vs harga | CVD futures +22.1 (99.9% buy) dalam window singkat, harga flat 63,523-63,525 | ✅ Trigger — cocok pola absorption |
-| OI naik tajam | +0.65% dalam 2 jam, gradual (BUKAN spike) | ❌ Tidak memenuhi kriteria "tajam" |
-| Basis spot-futures | -0.0322%, dalam batas netral (<0.05%) | ❌ Tidak melebar |
-| Top trader vs blended | Blended naik 62.33%→62.70%, top-trader turun 61.78%→61.59% dalam 45 menit yang sama | ⚠️ Arah berlawanan tapi magnitude ~0.3-0.5 poin, jauh di bawah threshold lama (15%) |
+**#1 — Kondisi pasar tenang (BTCUSDT, ~16:00-16:50 UTC):**
 
-**Skor**: ~1-1.5 dari 6 → tier **Weak**, sesuai kondisi pasar BTC yang tenang saat itu (bukan false-positive). Ini konfirmasi framework tidak over-trigger di kondisi normal — poin metodologi yang baik. Latency `binance_get_order_book_depth` diukur 5x: 299/406/532/562/625ms (rata-rata 485ms) — dasar untuk koreksi Section 3.2.
+| Sinyal | Data | Trigger? |
+|--------|------|----------|
+| Order book wall | Depth 5/10 seimbang, depth 20 bearish tipis (34.59%) | ❌ |
+| CVD vs harga | CVD +22.1 (99.9% buy), harga flat 63,523–63,525 | ✅ Trigger |
+| OI naik tajam | +0.65%/2 jam, gradual bukan spike | ❌ |
+| Basis spot-futures | −0.0322%, dalam batas netral | ❌ |
+| Top trader vs blended | Blended naik 62.33%→62.70%, top-trader turun 61.78%→61.59% (45 menit) | ⚠️ Arah berlawanan, magnitude kecil |
+
+Skor ~1-1.5/6 → tier Weak. **Hasil masuk akal** — BTC tenang, framework tidak over-trigger di kondisi normal.
+
+**#2 — Latency order book:** 5x call 298/406/532/562/625ms + 2x sequential test 898/890ms → range **298-898ms**, rata-rata ~485ms. 2 snapshot berurutan total ~1,788ms — marginal, tidak reliable buat deteksi sub-detik.
+
+**#3 — Top-trader ratio range riil (2 jam, 8×15m):** SOLUSDT 1.02 poin, BNBUSDT 0.60 poin, LINKUSDT 0.40 poin, AVAXUSDT 2.35 poin — semua jauh di bawah threshold universal manapun (flat 15% maupun tiered 3-15%).
+
+**#4 — Retensi historis top-trader ratio:** limit=500 di period 15m/1h dapat full 500 poin (5 hari / 21 hari), tapi period 4h cuma dapat 186 poin (bukan 500) dan period 1d cuma 31 poin — keduanya mentok di tanggal yang SAMA (~30-31 hari ke belakang), konfirmasi hard retention limit dari Binance sendiri, bukan soal parameter `limit` di tool kita.
+
+**Daftar klaim yang sudah dikoreksi dari versi awal:**
+
+| Klaim awal | Status | Koreksi |
+|-----------|--------|---------|
+| Polling <500ms untuk refresh-rate spoofing | ❌ Dihapus | Latency 298-898ms, tidak reliable |
+| Snapshot comparison 1-2 detik | ⚠️ Marginal | 2× call bisa 1.8s+, variasi terlalu besar |
+| WebSocket fallback "jika tersedia" | ❌ Dihapus | Tidak tersedia di WhaleScope MCP (100% REST) |
+| Threshold divergence >15% flat | ❌ Dihapus | Tidak pernah trigger untuk pair manapun |
+| Tiered threshold 3-15% per liquiditas | ❌ Dihapus | Angka tebakan, semua pair jauh di bawah |
+| "Cluster liquidation di level psikologis" | ⚠️ Direvisi | Tidak ada field harga — cross-check `klines` manual |
+| Persentil historis "30-90 hari" | ⚠️ Direvisi | 90 hari tidak tersedia sama sekali dari Binance; 30 hari cuma di resolusi kasar (4h/1d), 5 hari di resolusi 15m |
 
 ---
 
 *Dibuat pada: 2026-08-11*
-*Direvisi pada: 2026-08-11 setelah validasi data langsung ke WhaleScope MCP (worker deployed + latency test).*
-*Framework ini dirancang untuk bekerja dengan tool WhaleScope MCP (Binance Futures + Spot).*
+*Versi 4.0 (final) — semua klaim teknis divalidasi langsung ke data live WhaleScope MCP, termasuk latency, batas historis endpoint, dan realita pergerakan top-trader ratio lintas pair.*

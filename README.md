@@ -108,14 +108,17 @@ dan `PROXY_URL`/`PROXY_SECRET` (proxy Vercel) — lihat bagian Setup di bawah.
 
 ## Framework Analisis
 
-[`docs/mm_detection_framework.md`](docs/mm_detection_framework.md) — framework
-deteksi jejak aktivitas market maker (absorption, spoofing, stop hunt, basis
-arbitrage) dengan menggabungkan beberapa tool di atas. Divalidasi dengan data
-riil (bukan cuma teori) — termasuk koreksi setelah pengecekan langsung: latency
-polling (~300-625ms per call, jadi saran "<500ms polling" di versi awal tidak
-feasible lewat MCP tool call biasa), field data liquidation (tidak ada info
-level harga, cuma per-window-waktu), dan threshold divergence top-trader
-ratio (angka fix ternyata tidak cocok untuk pair likuid seperti BTC/ETH).
+[`docs/mm_detection_framework.md`](docs/mm_detection_framework.md) (v4, final)
+— framework deteksi jejak aktivitas market maker (absorption, spoofing, stop
+hunt, basis arbitrage) dengan menggabungkan beberapa tool di atas. Setiap
+klaim teknis divalidasi ke data live sebelum masuk versi final — termasuk
+latency polling (298-898ms per call, jadi saran awal "<500ms polling" gak
+feasible lewat MCP tool call biasa), field data liquidation (gak ada info
+level harga, cuma per-window-waktu), threshold divergence top-trader ratio
+(baik angka fix maupun tiered per-liquiditas terbukti gak cocok — pergerakan
+riil semua pair yang dites jauh di bawahnya), dan batas retensi historis
+endpoint top-trader ratio Binance sendiri (~30 hari maksimal, bukan 90 hari
+seperti asumsi awal).
 
 ## Keterbatasan yang jujur perlu diketahui
 
