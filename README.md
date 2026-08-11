@@ -106,6 +106,17 @@ dan `PROXY_URL`/`PROXY_SECRET` (proxy Vercel) — lihat bagian Setup di bawah.
 | `binance_get_spot_avg_price` | Harga rata-rata bergerak Spot (window beberapa menit, lebih stabil dari last-trade) | Binance native (Spot) |
 | `binance_check_spot_listing` | Cek apakah pair listed di Binance Spot + status trading — dipakai sebelum panggil tool Spot lain untuk pair yang belum pasti | Binance native (Spot) |
 
+## Framework Analisis
+
+[`docs/mm_detection_framework.md`](docs/mm_detection_framework.md) — framework
+deteksi jejak aktivitas market maker (absorption, spoofing, stop hunt, basis
+arbitrage) dengan menggabungkan beberapa tool di atas. Divalidasi dengan data
+riil (bukan cuma teori) — termasuk koreksi setelah pengecekan langsung: latency
+polling (~300-625ms per call, jadi saran "<500ms polling" di versi awal tidak
+feasible lewat MCP tool call biasa), field data liquidation (tidak ada info
+level harga, cuma per-window-waktu), dan threshold divergence top-trader
+ratio (angka fix ternyata tidak cocok untuk pair likuid seperti BTC/ETH).
+
 ## Keterbatasan yang jujur perlu diketahui
 
 - **Long/short ratio (`binance_get_long_short_ratio`) adalah rasio agregat
