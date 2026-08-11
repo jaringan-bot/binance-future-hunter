@@ -1,9 +1,12 @@
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { createServer } from "./server.js";
 import * as coinalyze from "./coinalyzeClient.js";
+import * as binanceProxy from "./binanceProxyClient.js";
 
 interface Env {
   COINALYZE_API_KEY?: string;
+  PROXY_URL?: string;
+  PROXY_SECRET?: string;
 }
 
 // Server ini STATELESS (sessionIdGenerator: undefined): setiap request
@@ -30,6 +33,7 @@ function withCors(response: Response): Response {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     coinalyze.setApiKey(env.COINALYZE_API_KEY);
+    binanceProxy.setProxyConfig(env.PROXY_URL, env.PROXY_SECRET);
     const url = new URL(request.url);
 
     if (request.method === "OPTIONS") {
