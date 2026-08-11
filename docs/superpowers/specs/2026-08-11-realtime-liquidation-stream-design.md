@@ -1,0 +1,91 @@
+# Real-Time Liquidation Stream — Design
+
+## Latar Belakang
+
+`binance_get_liquidation_history` (tool existing) bersifat lagging/historis — data candlestick-based via Coinalyze, mencatat apa yang sudah terjadi per interval waktu. Tidak ada cara menangkap liquidation event detik demi detik saat terjadi. Binance tidak punya REST publik untuk liquidation market-wide (`/fapi/v1/allForceOrders` itu private, akun sendiri saja), jadi satu-satunya sumber real-time market-wide adalah WebSocket stream `!forceOrder@arr`.
+
+## Tujuan
+
+Tool MCP baru yang mengembalikan liquidation event terbaru (near-real-time), sebagai companion dari `binance_get_liquidation_history` yang historis — bukan pengganti.
+
+## Pendekatan yang Dipertimbangkan
+
+| Opsi | Deskripsi | Keputusan |
+|---|---|---|
+| A. WebSocket Hibernation API | DO buka WS outbound ke Binance, pakai `ctx.acceptWebSocket()` — bisa hibernate, hemat billing CPU | **Dipilih** |
+| B. WebSocket biasa (non-hibernating) | DO tetap ke-load di memory selama WS hidup | Ditolak — biaya duration lebih mahal, tidak dapat resilience platform |
+| C. Polling REST berkala | Ganti stream jadi polling endpoint force-order | Ditolak — tidak ada endpoint REST publik market-wide untuk liquidation |
+
+## Arsitektur
+
+Durable Object baru `LiquidationStreamDO`, singleton (1 instance global via `idFromName("global")`). DO membuka WebSocket outbound ke `wss://fstream.binance.com/ws/!forceOrder@arr`, memakai WebSocket Hibernation API. MCP tool baru query DO ini lewat RPC call — bukan lewat WS langsung dari client MCP.
+
+Binding baru di `wrangler.toml`: `durable_objects` binding + `migrations` block (`new_sqlite_classes`). DO menyimpan buffer event di SQLite storage bawaan DO (bukan in-memory) agar buffer survive hibernation.
+
+## Komponen
+
+- **`src/liquidationStreamDO.ts`** (baru) — class `LiquidationStreamDO extends DurableObject`
+  - `constructor` — cek koneksi WS existing (`ctx.getWebSockets()`); kalau kosong, panggil `connect()`
+  - `connect()` — buka `new WebSocket("wss://fstream.binance.com/ws/!forceOrder@arr")`, `ctx.acceptWebSocket(ws, ["binance-forceorder"])`
+  - `webSocketMessage(ws, message)` — parse JSON forceOrder event, normalize `{symbol, side, price, qty, notionalUsd, time}`, INSERT ke tabel SQLite `liquidations`, trim buffer ke max 500 row
+  - `webSocketClose(ws, code, reason)` / `webSocketError(ws, error)` — `ctx.storage.setAlarm(Date.now() + 5000)` untuk reconnect
+  - `alarm()` — cek WS masih ada & OPEN; kalau tidak, `connect()` ulang
+  - `getRecent(symbol?, limit)` — RPC method, query SQLite filtered by symbol (kalau dikasih) + limit, return array event
+
+- **`src/index.ts`** — tambah `LIQUIDATION_DO: DurableObjectNamespace` ke interface `Env`, teruskan env ke `createServer(env)` (perlu refactor signature — saat ini `createServer()` tidak menerima env)
+
+- **`src/server.ts`** — tool baru `binance_get_realtime_liquidations` (param: `symbol` optional, `limit` optional), handler ambil DO stub via `env.LIQUIDATION_DO.idFromName("global")`, panggil `.getRecent(symbol, limit)`
+
+- **`wrangler.toml`** — tambah `[[durable_objects.bindings]]` + `[[migrations]]` block
+
+## Alur Data
+
+```
+Binance !forceOrder@arr (WS push kontinu)
+        │
+        ▼
+LiquidationStreamDO.webSocketMessage()
+  → parse & normalize event
+  → INSERT ke SQLite table `liquidations`
+  → trim: keep last 500 row saja
+        │
+        ▼ (persistent, DO bisa hibernate di antara event)
+
+MCP tool call: binance_get_realtime_liquidations(symbol?, limit)
+        │
+        ▼
+src/index.ts fetch handler
+  → env.LIQUIDATION_DO.idFromName("global")
+  → stub.getRecent(symbol, limit)   [RPC, DO wake kalau lagi hibernate]
+        │
+        ▼
+SELECT ... WHERE symbol = ? (kalau ada) ORDER BY time DESC LIMIT ?
+        │
+        ▼
+Balik ke MCP caller: list event {symbol, side, price, qty, notionalUsd, time}
+```
+
+DO ini satu instance jalan terus-menerus, terpisah dari siklus request MCP (yang stateless per-call). WS connect pertama kali ter-trigger saat DO pertama kali di-spawn (first tool call ke arah dia) — kalau MCP server belum pernah dipanggil sejak deploy, buffer masih kosong sampai WS nyambung dan event pertama masuk.
+
+## Error Handling
+
+- **WS putus** (`webSocketClose`/`webSocketError`) → alarm reconnect 5 detik kemudian. Fixed 5s interval, tidak perlu backoff kompleks — Binance stream jarang reject kalau tidak spam connect.
+- **Malformed/unexpected message** → skip diam-diam (tidak throw, tidak putus koneksi), agar 1 event aneh tidak menjatuhkan seluruh stream.
+- **Buffer kosong** (DO baru pertama kali jalan, belum ada event masuk) → tool return array kosong + note text: "Stream baru mulai, buffer masih kosong. Coba lagi beberapa saat."
+- **DO error/exception di tool call** → propagate sebagai MCP tool error biasa (pola sama semua tool lain sekarang).
+- **Symbol filter tidak match apapun** → return array kosong, bukan error (symbol valid tapi kebetulan belum ada liquidation event masuk untuk dia).
+
+## Testing
+
+Project tidak punya test runner (hanya `typecheck` + manual verify tiap PR, konsisten dengan histori — fix casing sebelumnya ketahuan dari testing manual di Vercel preview). Mengikuti pola yang sama:
+
+- `npm run typecheck` — pastikan type DO, RPC, binding Env beres
+- Manual verify lewat `wrangler dev` lokal: pantau console log tiap event forceOrder masuk, atau cek lewat Cloudflare dashboard Observability (`enabled = true` di wrangler.toml)
+- Manual verify di preview deployment: panggil tool `binance_get_realtime_liquidations` dari MCP client, cek balikan sesuai simbol yang lagi rame (misal BTCUSDT saat volatile)
+- Tidak menambah test framework baru — mengikuti convention project (YAGNI)
+
+## Scope Eksplisit
+
+- **Tidak termasuk**: fitur Order Book Imbalance (OBI) — dibahas terpisah, spec sendiri setelah ini.
+- **Tidak termasuk**: alerting/notifikasi keluar (Slack, webhook) — tool ini murni query buffer via MCP, bukan push notification.
+- **Tidak mengubah**: `binance_get_liquidation_history` (tool existing) tetap ada apa adanya sebagai data historis via Coinalyze.
