@@ -314,8 +314,7 @@ API publik Binance.
   komersial atau pemakaian skala besar sebaiknya dicek dulu terhadap
   [Binance API Terms of Use](https://www.binance.com/en/terms) — di luar
   tanggung jawab project ini.
-- **Belum ada file `LICENSE`** di repo ini per commit terakhir — tanpa itu,
-  status hukum "boleh dipakai ulang" secara default masih abu-abu meskipun
-  repo-nya publik. Kalau niatnya benar-benar open source (orang lain boleh
-  fork/modify/redistribute), disarankan tambah LICENSE eksplisit (misal MIT)
-  — ini keputusan pemilik repo, belum diputuskan di sini.
+- **Lisensi: [MIT](LICENSE).** Bebas dipakai, dimodifikasi, dan
+  didistribusikan ulang (termasuk untuk keperluan komersial), selama notice
+  copyright & lisensi MIT tetap disertakan. Software disediakan "as is",
+  tanpa jaminan apapun — sejalan dengan disclaimer di atas.
