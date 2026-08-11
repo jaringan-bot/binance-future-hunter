@@ -289,3 +289,33 @@ bekerja.
 
 Kemungkinan besar kamu tidak akan pernah kena biaya di kedua platform untuk
 pemakaian personal.
+
+## Disclaimer
+
+**Project ini open source dan publik** — source code, arsitektur, dan
+dokumentasi (termasuk framework analisis di `docs/`) bisa dilihat, di-clone,
+dan dimodifikasi siapa saja lewat repo GitHub ini. Tidak ada data akun
+pribadi yang disimpan atau diproses — semua tool bersifat read-only terhadap
+API publik Binance.
+
+- **Bukan saran finansial.** Semua data dan interpretasi (funding rate, OI,
+  order book, framework deteksi MM, dll) bersifat informational — hasil
+  pengolahan data publik, BUKAN rekomendasi trading. Tidak ada jaminan
+  akurasi, kelengkapan, atau ketepatan waktu data — cek [Keterbatasan yang
+  jujur perlu diketahui](#keterbatasan-yang-jujur-perlu-diketahui) untuk
+  batasan spesifik tiap tool sebelum mengambil keputusan berdasarkan data ini.
+- **Tanggung jawab pengguna.** Siapapun yang deploy, memakai, atau
+  memodifikasi worker ini bertanggung jawab penuh atas hasil dan konsekuensi
+  pemakaiannya sendiri — termasuk keputusan trading yang diambil berdasarkan
+  output tool-tool ini.
+- **Kepatuhan ke Binance API Terms of Use.** Worker ini memanggil endpoint
+  publik Binance (Futures & Spot). Pemakaian personal/non-komersial sejalan
+  dengan ketentuan Binance yang berlaku umum; redistribusi ulang data secara
+  komersial atau pemakaian skala besar sebaiknya dicek dulu terhadap
+  [Binance API Terms of Use](https://www.binance.com/en/terms) — di luar
+  tanggung jawab project ini.
+- **Belum ada file `LICENSE`** di repo ini per commit terakhir — tanpa itu,
+  status hukum "boleh dipakai ulang" secara default masih abu-abu meskipun
+  repo-nya publik. Kalau niatnya benar-benar open source (orang lain boleh
+  fork/modify/redistribute), disarankan tambah LICENSE eksplisit (misal MIT)
+  — ini keputusan pemilik repo, belum diputuskan di sini.
