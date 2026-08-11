@@ -32,9 +32,10 @@ dalam percakapan dengan Claude, tanpa perlu buka dashboard exchange terpisah.
 
 ## Kelebihan
 
-- 22 tools mencakup empat sudut analisis: bias arah pasar, area harga kunci
-  (order book), konfirmasi eksekusi (order flow/aggressor), dan pembanding
-  Futures-vs-Spot (leverage-driven vs demand riil).
+- 23 tools mencakup lima sudut analisis: bias arah pasar, area harga kunci
+  (order book), konfirmasi eksekusi (order flow/aggressor), pembanding
+  Futures-vs-Spot (leverage-driven vs demand riil), dan market-wide scan
+  (funding rate ekstrem lintas semua pair sekaligus).
 - Read-only murni — tidak ada risiko custodial atau trading tak disengaja.
 - Transparan soal keterbatasan tiap tool (lihat bagian di bawah), bukan
   dibungkus seolah semua data sempurna.
@@ -87,6 +88,7 @@ dan `PROXY_URL`/`PROXY_SECRET` (proxy Vercel) — lihat bagian Setup di bawah.
 | `binance_get_funding_rate` | Funding rate terkini + basis (deviasi mark vs index price) | Binance native |
 | `binance_get_funding_rate_history` | Tren funding rate dari waktu ke waktu | Binance native |
 | `binance_get_spot_price` | Harga spot Binance + basis riil vs mark price futures (beda dari basis di atas yang vs index price). Error jelas kalau pair futures-only (tidak listed di Spot) | Binance native (Spot) |
+| `binance_scan_funding_extremes` | Scan funding rate SEMUA pair Futures sekaligus (1 call bulk), kembalikan top pair paling crowded long/short | Binance native |
 | `binance_get_open_interest` | OI snapshot terkini | Binance native |
 | `binance_get_open_interest_history` | Tren OI naik/turun | Binance native |
 | `binance_get_long_short_ratio` | Rasio long vs short agregat (blended, semua trader) + tren | Binance native |

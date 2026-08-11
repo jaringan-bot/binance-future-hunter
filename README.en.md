@@ -32,9 +32,10 @@ conversation with Claude, without needing a separate exchange dashboard.
 
 ## Strengths
 
-- 22 tools covering four analytical angles: directional market bias, key
+- 23 tools covering five analytical angles: directional market bias, key
   price areas (order book), execution confirmation (order flow/aggressor),
-  and Futures-vs-Spot comparison (leverage-driven vs real demand).
+  Futures-vs-Spot comparison (leverage-driven vs real demand), and
+  market-wide scanning (extreme funding rates across every pair at once).
 - Purely read-only — no custodial risk or accidental trading.
 - Transparent about each tool's limitations (see the section below), not
   glossed over as if all data were perfect.
@@ -88,6 +89,7 @@ Setup section below.
 | `binance_get_funding_rate` | Current funding rate + basis (mark vs index price deviation) | Binance native |
 | `binance_get_funding_rate_history` | Funding rate trend over time | Binance native |
 | `binance_get_spot_price` | Binance spot price + real basis vs futures mark price (different from the basis above, which is vs index price). Clear error if the pair is futures-only (not listed on Spot) | Binance native (Spot) |
+| `binance_scan_funding_extremes` | Scans funding rate across ALL Futures pairs at once (1 bulk call), returns the top pairs most crowded long/short | Binance native |
 | `binance_get_open_interest` | Current OI snapshot | Binance native |
 | `binance_get_open_interest_history` | OI trend up/down | Binance native |
 | `binance_get_long_short_ratio` | Aggregate long vs short ratio (blended, all traders) + trend | Binance native |

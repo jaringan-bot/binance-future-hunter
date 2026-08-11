@@ -324,6 +324,105 @@ export function createServer(): McpServer {
   );
 
   // ─────────────────────────────────────────────────────────────
+  // MARKET SCANNER — funding rate paling ekstrem lintas SEMUA pair Futures
+  // sekaligus, 1 call ke premiumIndex tanpa parameter symbol (bukan loop
+  // per-pair). Berguna untuk pertanyaan "pair mana yang paling crowded
+  // long/short sekarang" tanpa perlu tau symbol-nya duluan.
+  // ─────────────────────────────────────────────────────────────
+  server.registerTool(
+    "binance_scan_funding_extremes",
+    {
+      title: "Scan Funding Rate Paling Ekstrem (Semua Pair)",
+      description:
+        "Scan funding rate SEMUA pair Binance Futures sekaligus (1 call ke premiumIndex tanpa symbol, bukan loop " +
+        "per-pair — jauh lebih murah), lalu urutkan dan kembalikan pair paling crowded LONG (funding paling positif) " +
+        "dan paling crowded SHORT (funding paling negatif). Berguna untuk pertanyaan 'pair apa yang funding-nya " +
+        "paling ekstrem sekarang' tanpa perlu tau symbol spesifik duluan — komplemen dari binance_get_funding_rate " +
+        "yang perlu symbol. Threshold crowded sama dengan binance_get_funding_rate (±0.03%).",
+      inputSchema: {
+        quoteFilter: z
+          .string()
+          .optional()
+          .default("USDT")
+          .describe(
+            "Filter pair berdasarkan quote asset di akhir symbol, misal 'USDT' (default, pair USDT-M) atau 'USDC'. Kosongkan string ('') untuk lihat semua pair tanpa filter quote asset.",
+          ),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(50)
+          .default(10)
+          .describe("Jumlah pair teratas per sisi (crowded long / crowded short) yang ditampilkan"),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ quoteFilter, limit }) => {
+      try {
+        const all = await binanceProxy.getBulkFundingRatesNative();
+        const filtered = all
+          .filter((p) => (quoteFilter ? p.symbol.endsWith(quoteFilter) : true))
+          .filter((p) => parseFloat(p.markPrice) > 0)
+          .map((p) => ({
+            symbol: p.symbol,
+            fundingRate: parseFloat(p.lastFundingRate),
+            markPrice: parseFloat(p.markPrice),
+          }))
+          .filter((p) => !Number.isNaN(p.fundingRate));
+
+        if (filtered.length === 0) {
+          return {
+            content: [
+              { type: "text", text: `Tidak ada pair yang cocok dengan filter quote '${quoteFilter}'.` },
+            ],
+          };
+        }
+
+        const crowdedLong = [...filtered].sort((a, b) => b.fundingRate - a.fundingRate).slice(0, limit);
+        const crowdedShort = [...filtered].sort((a, b) => a.fundingRate - b.fundingRate).slice(0, limit);
+
+        const rowsLong = crowdedLong
+          .map((p, i) => `| ${i + 1} | ${p.symbol} | ${fmtPct(p.fundingRate, 4)} | ${fmtPrice(p.markPrice)} |`)
+          .join("\n");
+        const rowsShort = crowdedShort
+          .map((p, i) => `| ${i + 1} | ${p.symbol} | ${fmtPct(p.fundingRate, 4)} | ${fmtPrice(p.markPrice)} |`)
+          .join("\n");
+
+        const text = [
+          `# Scan Funding Rate Ekstrem (${filtered.length} pair dicek${quoteFilter ? `, filter quote: ${quoteFilter}` : ""})`,
+          ``,
+          `## Top ${crowdedLong.length} CROWDED LONG (funding paling positif)`,
+          `| # | Symbol | Funding Rate | Mark Price |`,
+          `|---|---|---|---|`,
+          rowsLong,
+          ``,
+          `## Top ${crowdedShort.length} CROWDED SHORT (funding paling negatif)`,
+          `| # | Symbol | Funding Rate | Mark Price |`,
+          `|---|---|---|---|`,
+          rowsShort,
+          ``,
+          `_Funding rate positif besar = mayoritas leverage di sisi long (risiko long squeeze jika harga berbalik). ` +
+            `Funding rate negatif besar = mayoritas leverage di sisi short (risiko short squeeze). Threshold crowded ` +
+            `heuristik ±0.03%, sama dengan binance_get_funding_rate — sesuaikan dengan konteks volatilitas pair. ` +
+            `Data dari 1 call premiumIndex bulk (semua pair Futures sekaligus), snapshot sesaat._`,
+        ].join("\n");
+
+        return {
+          content: [{ type: "text", text }],
+          structuredContent: {
+            totalPairsScanned: filtered.length,
+            quoteFilter,
+            crowdedLong,
+            crowdedShort,
+          },
+        };
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  // ─────────────────────────────────────────────────────────────
   // OPEN INTEREST
   // ─────────────────────────────────────────────────────────────
   server.registerTool(

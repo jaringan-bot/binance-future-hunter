@@ -332,6 +332,13 @@ export async function getCurrentFundingRateNative(symbol: string): Promise<Premi
   return callProxy<PremiumIndexPoint>("/fapi/v1/premiumIndex", { symbol: symbol.toUpperCase() });
 }
 
+// premiumIndex TANPA parameter symbol balikin SEMUA pair Futures sekaligus
+// (862 pair dites langsung 2026-08-11) -- dipakai buat market scanner,
+// jauh lebih murah daripada loop per-symbol.
+export async function getBulkFundingRatesNative(): Promise<PremiumIndexPoint[]> {
+  return callProxy<PremiumIndexPoint[]>("/fapi/v1/premiumIndex", {});
+}
+
 // ─────────────────────────────────────────────────────────────
 // KLINES / CANDLESTICK (NATIVE) — menggantikan Coinalyze ohlcv-history
 // untuk sumber harga. Format response Binance adalah array-of-array
