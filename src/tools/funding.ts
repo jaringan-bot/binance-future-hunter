@@ -17,21 +17,17 @@ export function registerFundingTools(server: McpServer): void {
     {
       title: "Ambil Funding Rate Terkini",
       description:
-        "Mengambil funding rate TERKINI untuk sebuah pair Binance Futures (LANGSUNG dari Binance native premiumIndex, " +
-        "bukan lewat Coinalyze — source of truth), plus basis (deviasi mark price dari index price) untuk membaca " +
-        "sentimen premium/discount futures vs spot. " +
-        "Funding rate positif besar menandakan long crowded (bias kontrarian: waspada potensi long squeeze). " +
-        "Funding rate negatif besar menandakan short crowded (bias kontrarian: waspada potensi short squeeze). " +
-        "Basis positif besar menandakan futures premium tinggi (sentimen long agresif, funding biasanya menyusul naik); " +
-        "basis negatif besar menandakan futures discount (sentimen short agresif); basis mendekati nol tapi funding " +
-        "masih ekstrem menandakan funding lagging, kemungkinan mean-revert akan terjadi. " +
-        "Gunakan tool ini untuk membaca sentimen leverage pasar saat ini. " +
-        "PERHATIAN: index price Binance adalah rata-rata tertimbang dari beberapa exchange spot — untuk pair kecil " +
-        "atau baru listing, salah satu exchange sumber bisa illikuid dan membuat index price (dan karenanya basis) " +
-        "jadi noisy; interpretasikan dengan hati-hati untuk pair semacam itu. " +
+        "Mengambil funding rate TERKINI untuk sebuah pair Binance Futures (native premiumIndex, source of truth — " +
+        "bukan Coinalyze), plus basis (deviasi mark vs index price) buat baca sentimen premium/discount futures vs spot. " +
+        "Interpretasi kontrarian: funding positif besar = long crowded (waspada long squeeze); negatif besar = short " +
+        "crowded (waspada short squeeze). Basis positif besar = futures premium (sentimen long agresif, funding " +
+        "biasanya menyusul naik); negatif besar = discount (sentimen short agresif); basis netral tapi funding ekstrem " +
+        "= funding lagging, potensi mean-revert. " +
+        "PERHATIAN: index price Binance rata-rata tertimbang beberapa exchange spot — noisy untuk pair kecil/baru " +
+        "listing (salah satu sumber bisa illikuid), interpretasikan hati-hati. " +
         "Threshold crowded default ±0.03% funding / ±0.05% basis bisa dioverride per-pair lewat " +
-        "binance_set_pair_threshold (tersimpan di Workers KV) -- berguna untuk pair volatil/altcoin kecil yang " +
-        "'normal range'-nya beda jauh dari BTC/ETH.",
+        "binance_set_pair_threshold (Workers KV) -- berguna untuk altcoin volatil yang 'normal range'-nya beda jauh " +
+        "dari BTC/ETH.",
       inputSchema: { symbol: symbolSchema },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },

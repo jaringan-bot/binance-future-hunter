@@ -22,18 +22,16 @@ export function registerSpotTools(server: McpServer): void {
     {
       title: "Harga Spot Binance + Basis vs Futures",
       description:
-        "Mengambil harga SPOT Binance (bukan Futures) untuk sebuah pair, plus basis riil terhadap mark price Futures. " +
-        "Basis di sini dihitung vs harga SPOT BINANCE LANGSUNG (bukan index price rata-rata beberapa exchange seperti di " +
-        "binance_get_funding_rate) — lebih akurat untuk membedakan apakah sebuah pergerakan harga didorong leverage " +
-        "(futures premium/discount melebar vs spot) atau demand/supply riil (spot dan futures bergerak selaras). " +
-        "Basis melebar tiba-tiba menandakan futures mulai memimpin/leverage-driven — early warning sebelum funding rate " +
-        "sempat menyusul naik/turun. " +
-        "PENTING: banyak pair di Binance Futures adalah FUTURES-ONLY (terutama koin baru/kecil) dan TIDAK punya listing " +
-        "di Binance Spot — tool ini akan gagal dengan error jelas untuk pair semacam itu (bukan bug, memang tidak ada " +
-        "harga spot Binance untuk dibandingkan). " +
-        "Untuk deteksi basis arbitrage (docs/mm_detection_framework.md Section 5): panggil binance_check_spot_listing dulu " +
-        "kalau belum yakin pair-nya listed di Spot, dan ingat tool ini cuma snapshot sesaat — deteksi 'basis melebar lalu " +
-        "kembali' butuh panggil berkali-kali manual, tidak ada tool histori basis time-series.",
+        "Mengambil harga SPOT Binance (bukan Futures), plus basis riil terhadap mark price Futures — dihitung vs harga " +
+        "SPOT LANGSUNG (bukan index price rata-rata beberapa exchange seperti binance_get_funding_rate), lebih akurat " +
+        "buat bedain leverage-driven (futures premium/discount melebar) vs demand/supply riil (spot-futures selaras). " +
+        "Basis melebar tiba-tiba = futures mulai memimpin/leverage-driven, early warning sebelum funding rate menyusul. " +
+        "PENTING: banyak pair Futures adalah FUTURES-ONLY (koin baru/kecil) TANPA listing Spot — tool gagal dengan " +
+        "error jelas untuk pair semacam itu (bukan bug). " +
+        "Untuk deteksi basis arbitrage (docs/mm_detection_framework.md Section 5): cek binance_check_spot_listing dulu " +
+        "kalau ragu. Ini snapshot sesaat -- untuk histori time-series 'basis melebar lalu kembali', pakai " +
+        "binance_get_basis_history (watchlist tetap BTCUSDT/ETHUSDT/SOLUSDT); pair lain di luar itu masih harus " +
+        "snapshot manual berkali-kali.",
       inputSchema: { symbol: symbolSchema },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -274,15 +272,14 @@ export function registerSpotTools(server: McpServer): void {
     {
       title: "Data Candlestick (Spot)",
       description:
-        "Mengambil data candlestick OHLCV di pasar SPOT Binance untuk sebuah pair pada timeframe tertentu, LANGSUNG dari " +
-        "Binance native. Versi Spot dari binance_get_klines (Futures) — bandingkan bias/volume kedua versi untuk pair yang " +
-        "sama: kalau candle futures jauh lebih volatil/volumenya jauh lebih besar dari spot di jam yang sama, pergerakan " +
-        "itu kemungkinan besar leverage-driven, bukan demand/supply riil. " +
-        "Default (tanpa startTime/endTime) balikin candle TERBARU. Isi startTime untuk narik histori jauh ke belakang " +
-        "(misal buat backtest) — maksimal `limit` candle per panggilan (limit maksimal 1000 untuk Spot, beda dari Futures " +
-        "yang 1500). Untuk rentang lebih dari 1000 candle, panggil berkali-kali sambil geser startTime (pagination manual). " +
+        "Candlestick OHLCV di pasar SPOT Binance per timeframe, native Binance. Versi Spot dari binance_get_klines " +
+        "(Futures) — bandingkan bias/volume kedua versi: kalau candle futures jauh lebih volatil/volumenya jauh lebih " +
+        "besar dari spot di jam yang sama, pergerakan itu kemungkinan leverage-driven, bukan demand/supply riil. " +
+        "Default (tanpa startTime/endTime) balikin candle TERBARU. Isi startTime buat narik histori jauh ke belakang " +
+        "(misal backtest) — maksimal `limit` candle/panggilan (maks 1000 Spot, beda dari Futures 1500). Rentang >1000 " +
+        "candle: panggil berkali-kali sambil geser startTime (pagination manual). " +
         "HEMAT TOKEN: default cuma balikin summary (bias, swing high/low, 15 candle terakhir) — array candle PENUH " +
-        "TIDAK disertakan kecuali `includeCandles: true` diminta eksplisit.",
+        "TIDAK disertakan kecuali `includeCandles: true`.",
       inputSchema: {
         symbol: symbolSchema,
         interval: z

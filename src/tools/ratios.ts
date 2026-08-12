@@ -104,18 +104,16 @@ export function registerRatiosTools(server: McpServer): void {
     {
       title: "Top-Trader Long/Short Ratio (Breakdown Murni)",
       description:
-        "Mengambil rasio long/short KHUSUS TOP TRADER (akun dengan posisi/margin terbesar di Binance Futures), TERPISAH dari " +
-        "retail — data ini LANGSUNG dari Binance (lewat proxy relay, bukan lewat Coinalyze), jadi tidak ter-blend dengan akun kecil. " +
-        "Ini proxy yang lebih dekat ke 'whale positioning' dibanding binance_get_long_short_ratio yang blended. " +
-        "mode='account' = breakdown berdasarkan JUMLAH akun top trader yang long vs short. " +
-        "mode='position' = breakdown berdasarkan SIZE POSISI top trader (mungkin lebih relevan untuk melihat dominasi modal besar, " +
-        "karena satu akun besar dengan posisi masif tetap terhitung 1 akun di mode='account' tapi bobotnya besar di mode='position'). " +
-        "KETERBATASAN: Binance tidak mempublikasikan threshold pasti 'top trader' itu top berapa persen, dan data ini snapshot " +
-        "periodik (bukan real-time tick-by-tick). " +
-        "Untuk deteksi divergence smart-money vs retail (docs/mm_detection_framework.md Section 4.2): JANGAN pakai threshold " +
-        "absolut universal (misal '15%') — tervalidasi data riil, pergerakan pair likuid (BTC/ETH) cuma <2.5 poin per 2 jam. " +
-        "Bandingkan RELATIF ke histori pendek pair itu sendiri (~5-30 hari tergantung resolusi, retensi Binance terbatas), " +
-        "fokus ke ARAH pergerakan yang berlawanan dari binance_get_long_short_ratio, bukan magnitude absolut.",
+        "Rasio long/short KHUSUS TOP TRADER (posisi/margin terbesar di Binance Futures), TERPISAH dari retail — " +
+        "LANGSUNG dari Binance (proxy relay, bukan Coinalyze), gak ter-blend akun kecil. Proxy lebih dekat ke 'whale " +
+        "positioning' dibanding binance_get_long_short_ratio (blended). mode='account' = breakdown JUMLAH akun top " +
+        "trader long vs short. mode='position' = breakdown SIZE POSISI (lebih relevan buat dominasi modal besar — " +
+        "1 akun besar tetap terhitung 1 di mode='account' tapi bobotnya besar di mode='position'). " +
+        "KETERBATASAN: threshold 'top trader' gak dipublikasikan Binance, data snapshot periodik (bukan tick-by-tick). " +
+        "Untuk deteksi divergence smart-money vs retail (docs/mm_detection_framework.md Section 4.2): JANGAN pakai " +
+        "threshold absolut universal (misal '15%') — tervalidasi data riil, pair likuid (BTC/ETH) cuma bergerak " +
+        "<2.5 poin/2 jam. Bandingkan RELATIF ke histori pendek pair sendiri (~5-30 hari tergantung resolusi, retensi " +
+        "Binance terbatas), fokus ARAH pergerakan berlawanan dari binance_get_long_short_ratio, bukan magnitude absolut.",
       inputSchema: {
         symbol: symbolSchema,
         mode: z

@@ -15,17 +15,15 @@ export function registerPriceTools(server: McpServer): void {
     {
       title: "Data Candlestick (Klines)",
       description:
-        "Mengambil data candlestick OHLCV untuk sebuah pair pada timeframe tertentu (LANGSUNG dari Binance native, " +
-        "bukan lewat Coinalyze — source of truth, presisi harga menyesuaikan magnitude pair). " +
-        "Gunakan ini untuk menentukan bias arah (bullish/bearish/sideways) di berbagai timeframe, mencari swing high/low, " +
-        "dan level psikologis untuk estimasi zona SL/TP. " +
-        "Default (tanpa startTime/endTime) balikin candle TERBARU. Isi startTime untuk narik histori jauh ke belakang " +
-        "(misal buat backtest strategi grid) — Binance balikin candle MULAI dari startTime ke depan, maksimal `limit` candle " +
-        "per panggilan (limit maksimal 1500 untuk Futures). Untuk rentang lebih dari 1500 candle, panggil berkali-kali sambil " +
-        "geser startTime ke closeTime candle terakhir dari hasil sebelumnya (pagination manual, tidak otomatis). " +
+        "Candlestick OHLCV untuk sebuah pair per timeframe (native Binance, bukan Coinalyze — source of truth, presisi " +
+        "harga menyesuaikan magnitude pair). Buat nentuin bias arah (bullish/bearish/sideways), cari swing high/low, " +
+        "dan level psikologis buat estimasi zona SL/TP. " +
+        "Default (tanpa startTime/endTime) balikin candle TERBARU. Isi startTime buat narik histori jauh ke belakang " +
+        "(misal backtest grid) — Binance balikin candle MULAI dari startTime ke depan, maksimal `limit` candle/panggilan " +
+        "(maks 1500 Futures). Rentang >1500 candle: panggil berkali-kali sambil geser startTime ke closeTime candle " +
+        "terakhir (pagination manual). " +
         "HEMAT TOKEN: default cuma balikin summary (bias, swing high/low, 15 candle terakhir) — array candle PENUH " +
-        "TIDAK disertakan kecuali `includeCandles: true` diminta eksplisit (penting untuk limit besar/backtest, karena " +
-        "500 candle penuh ≈14.000 token kalau selalu disertakan).",
+        "TIDAK disertakan kecuali `includeCandles: true` (500 candle penuh ≈14.000 token kalau selalu disertakan).",
       inputSchema: {
         symbol: symbolSchema,
         interval: z
