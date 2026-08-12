@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { registerSafeTool } from "../toolWrapper.js";
 import * as binanceProxy from "../binanceProxyClient.js";
 import { fmtNum, fmtPrice, fmtTime } from "../format.js";
 import { symbolSchema, errorResult } from "../shared.js";
@@ -9,7 +10,8 @@ export function registerOrderbookTools(server: McpServer): void {
   // ─────────────────────────────────────────────────────────────
   // ORDER BOOK DEPTH
   // ─────────────────────────────────────────────────────────────
-  server.registerTool(
+  registerSafeTool(
+    server,
     "binance_get_order_book_depth",
     {
       title: "Order Book Depth",
@@ -98,7 +100,8 @@ export function registerOrderbookTools(server: McpServer): void {
   // ─────────────────────────────────────────────────────────────
   // ORDER BOOK IMBALANCE (OBI)
   // ─────────────────────────────────────────────────────────────
-  server.registerTool(
+  registerSafeTool(
+    server,
     "binance_get_order_book_imbalance",
     {
       title: "Order Book Imbalance (OBI)",

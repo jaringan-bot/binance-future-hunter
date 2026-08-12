@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { registerSafeTool } from "../toolWrapper.js";
 import * as binanceProxy from "../binanceProxyClient.js";
 import { fmtNum, fmtPrice, fmtPct, fmtTime } from "../format.js";
 import { symbolSchema, KLINE_INTERVAL_ENUM, errorResult, parseTimeParam } from "../shared.js";
@@ -17,7 +18,8 @@ export function registerSpotTools(server: McpServer): void {
   // listed di Binance Spot (banyak pair futures-only, seperti koin baru,
   // TIDAK punya spot listing — tool ini akan error jelas untuk kasus itu).
   // ─────────────────────────────────────────────────────────────
-  server.registerTool(
+  registerSafeTool(
+    server,
     "binance_get_spot_price",
     {
       title: "Harga Spot Binance + Basis vs Futures",
@@ -93,7 +95,8 @@ export function registerSpotTools(server: McpServer): void {
   // binance_get_agg_trades, binance_get_24hr_ticker) — versi Spot ini
   // sengaja dibuat mirip supaya gampang dibandingkan berdampingan.
   // ─────────────────────────────────────────────────────────────
-  server.registerTool(
+  registerSafeTool(
+    server,
     "binance_get_spot_ticker_24hr",
     {
       title: "Statistik 24 Jam (Spot)",
@@ -144,7 +147,8 @@ export function registerSpotTools(server: McpServer): void {
   );
 
 
-  server.registerTool(
+  registerSafeTool(
+    server,
     "binance_get_spot_book_ticker",
     {
       title: "Best Bid/Ask (Spot)",
@@ -185,7 +189,8 @@ export function registerSpotTools(server: McpServer): void {
   );
 
 
-  server.registerTool(
+  registerSafeTool(
+    server,
     "binance_get_spot_order_book",
     {
       title: "Order Book Depth (Spot)",
@@ -267,7 +272,8 @@ export function registerSpotTools(server: McpServer): void {
   );
 
 
-  server.registerTool(
+  registerSafeTool(
+    server,
     "binance_get_spot_klines",
     {
       title: "Data Candlestick (Spot)",
@@ -359,7 +365,8 @@ export function registerSpotTools(server: McpServer): void {
   );
 
 
-  server.registerTool(
+  registerSafeTool(
+    server,
     "binance_get_spot_agg_trades",
     {
       title: "Aggregate Trades / CVD (Spot)",
@@ -415,7 +422,8 @@ export function registerSpotTools(server: McpServer): void {
   );
 
 
-  server.registerTool(
+  registerSafeTool(
+    server,
     "binance_get_spot_avg_price",
     {
       title: "Harga Rata-Rata Bergerak (Spot)",
@@ -449,7 +457,8 @@ export function registerSpotTools(server: McpServer): void {
   );
 
 
-  server.registerTool(
+  registerSafeTool(
+    server,
     "binance_check_spot_listing",
     {
       title: "Cek Status Listing Spot",

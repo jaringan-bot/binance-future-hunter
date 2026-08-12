@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { registerSafeTool } from "../toolWrapper.js";
 import { fmtPct, fmtTime } from "../format.js";
 import { errorResult } from "../shared.js";
 import { getJson, putJson } from "../kvConfig.js";
@@ -29,12 +30,15 @@ export async function appendBasisSnapshot(symbol: string, point: BasisSnapshot):
   await putJson(key, updated);
 }
 
-async function readBasisHistory(symbol: string): Promise<BasisSnapshot[]> {
+// Diekspor buat dipakai binance_detect_mm_activity (basis arbitrage
+// z-score) -- tetap watchlist-only sama seperti tool binance_get_basis_history.
+export async function readBasisHistory(symbol: string): Promise<BasisSnapshot[]> {
   return (await getJson<BasisSnapshot[]>(`${HISTORY_KEY_PREFIX}${symbol.toUpperCase()}`)) ?? [];
 }
 
 export function registerBasisHistoryTools(server: McpServer): void {
-  server.registerTool(
+  registerSafeTool(
+    server,
     "binance_get_basis_history",
     {
       title: "Histori Basis Futures-vs-Spot (Time-Series)",

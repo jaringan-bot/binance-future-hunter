@@ -32,12 +32,56 @@ import { cachedFetch } from "./cache.js";
 // Path yang TIDAK di-cache sama sekali (ttl=0) -- order book & trade granular
 // butuh freshness ketat, cache di sini bisa bikin sinyal spoofing/absorption
 // jadi bias (lihat docs/mm_detection_framework.md Section 3, snapshot sesaat
-// yang basi = analisis salah). Path lain di-cache TTL pendek lewat cache.ts.
+// yang basi = analisis salah).
+//
+// Path lain di-cache TTL bertingkat berdasarkan seberapa cepat datanya
+// berubah -- sebelumnya semua path non-order-book flat 5 detik, padahal
+// funding rate history/topLongShortRatio dsb baru update per beberapa menit
+// (funding settle tiap 4-8 jam), jadi flat 5s buang-buang round-trip ke
+// proxy tanpa manfaat freshness nyata.
 const NO_CACHE_PATHS = new Set(["/fapi/v1/depth", "/fapi/v1/aggTrades", "/api/v3/depth", "/api/v3/aggTrades"]);
-const DEFAULT_CACHE_TTL_SECONDS = 5;
+
+// Snapshot cepat berubah (harga/mark price/OI terkini) -- tetap short TTL
+// biar deteksi pergerakan sesaat gak ketinggalan jauh.
+const SHORT_CACHE_PATHS = new Set([
+  "/fapi/v1/premiumIndex",
+  "/fapi/v1/openInterest",
+  "/fapi/v1/ticker/24hr",
+  "/api/v3/ticker/price",
+  "/api/v3/ticker/24hr",
+  "/api/v3/ticker/bookTicker",
+]);
+const SHORT_CACHE_TTL_SECONDS = 5;
+
+// Candle & rata-rata bergerak -- berubah per interval, cache seukuran
+// interval terkecil yang wajar (1 menit) masih aman.
+const MEDIUM_CACHE_PATHS = new Set(["/fapi/v1/klines", "/api/v3/klines", "/api/v3/avgPrice"]);
+const MEDIUM_CACHE_TTL_SECONDS = 60;
+
+// Histori funding & rasio futures/data/* -- Binance sendiri baru update
+// data ini per beberapa menit (funding settle tiap 4-8 jam), 5 menit TTL
+// gak bikin data basi buat kebutuhan analisis (bukan HFT).
+const LONG_CACHE_PATHS = new Set([
+  "/fapi/v1/fundingRate",
+  "/futures/data/topLongShortAccountRatio",
+  "/futures/data/topLongShortPositionRatio",
+  "/futures/data/globalLongShortAccountRatio",
+  "/futures/data/openInterestHist",
+  "/futures/data/takerlongshortRatio",
+]);
+const LONG_CACHE_TTL_SECONDS = 300;
+
+// Metadata listing/status pair -- praktis statis, jarang berubah dalam sehari.
+const STATIC_CACHE_PATHS = new Set(["/api/v3/exchangeInfo"]);
+const STATIC_CACHE_TTL_SECONDS = 3600;
 
 function cacheTtlForPath(path: string): number {
-  return NO_CACHE_PATHS.has(path) ? 0 : DEFAULT_CACHE_TTL_SECONDS;
+  if (NO_CACHE_PATHS.has(path)) return 0;
+  if (SHORT_CACHE_PATHS.has(path)) return SHORT_CACHE_TTL_SECONDS;
+  if (MEDIUM_CACHE_PATHS.has(path)) return MEDIUM_CACHE_TTL_SECONDS;
+  if (LONG_CACHE_PATHS.has(path)) return LONG_CACHE_TTL_SECONDS;
+  if (STATIC_CACHE_PATHS.has(path)) return STATIC_CACHE_TTL_SECONDS;
+  return SHORT_CACHE_TTL_SECONDS; // fallback aman kalau ada path baru belum dikategorikan
 }
 
 const PROXY_ALLOWED_PATHS = new Set([
@@ -67,12 +111,26 @@ const PROXY_ALLOWED_PATHS = new Set([
   "/api/v3/exchangeInfo",
 ]);
 
-let proxyUrl: string | undefined;
-let proxySecret: string | undefined;
+interface ProxyEndpoint {
+  url: string;
+  secret: string;
+}
 
-export function setProxyConfig(url: string | undefined, secret: string | undefined) {
-  proxyUrl = url;
-  proxySecret = secret;
+let primaryEndpoint: ProxyEndpoint | undefined;
+let secondaryEndpoint: ProxyEndpoint | undefined;
+
+// secondaryUrl/secondarySecret OPSIONAL -- kalau tidak diset, perilaku
+// persis sama seperti sebelum ada failover (cuma 1 proxy, error langsung
+// dilempar). Backward compatible, tidak breaking buat deployment yang belum
+// setup proxy kedua.
+export function setProxyConfig(
+  url: string | undefined,
+  secret: string | undefined,
+  secondaryUrl?: string,
+  secondarySecret?: string,
+) {
+  primaryEndpoint = url && secret ? { url, secret } : undefined;
+  secondaryEndpoint = secondaryUrl && secondarySecret ? { url: secondaryUrl, secret: secondarySecret } : undefined;
 }
 
 export class BinanceProxyError extends Error {
@@ -86,27 +144,21 @@ export class BinanceProxyError extends Error {
   }
 }
 
-async function callProxy<T>(
-  path: string,
-  params: Record<string, string | number | undefined> = {},
-  market: "futures" | "spot" = "futures",
-): Promise<T> {
-  if (!path.startsWith("/") || !PROXY_ALLOWED_PATHS.has(path)) {
-    throw new BinanceProxyError(
-      `Path '${path}' tidak ada di whitelist proxy. Cek PROXY_ALLOWED_PATHS di binanceProxyClient.ts.`,
-      undefined,
-      path,
-    );
-  }
-  if (!proxyUrl || !proxySecret) {
-    throw new BinanceProxyError(
-      "PROXY_URL atau PROXY_SECRET belum diset di worker. Jalankan `wrangler secret put PROXY_URL` dan `wrangler secret put PROXY_SECRET`.",
-      undefined,
-      path,
-    );
-  }
+// Status yang layak dicoba ulang ke proxy SEKUNDER: 403 (WAF block, kasus
+// utama kenapa proxy ini ada), 429 (rate limit), 5xx (proxy/upstream lagi
+// bermasalah). SENGAJA TIDAK termasuk 400/401/404 -- itu error request
+// (symbol salah, secret salah, path salah) yang bakal gagal identik di
+// proxy manapun, retry ke proxy lain cuma buang latency tanpa peluang
+// berhasil.
+const FAILOVER_STATUS = new Set([403, 429, 500, 502, 503, 504]);
 
-  const url = new URL(`${proxyUrl}/api/binance`);
+async function callProxyEndpoint<T>(
+  endpoint: ProxyEndpoint,
+  path: string,
+  params: Record<string, string | number | undefined>,
+  market: "futures" | "spot",
+): Promise<T> {
+  const url = new URL(`${endpoint.url}/api/binance`);
   url.searchParams.set("path", path);
   if (market !== "futures") url.searchParams.set("market", market);
   for (const [key, value] of Object.entries(params)) {
@@ -119,7 +171,7 @@ async function callProxy<T>(
   try {
     response = await cachedFetch(
       url.toString(),
-      { headers: { "x-proxy-secret": proxySecret, Accept: "application/json" } },
+      { headers: { "x-proxy-secret": endpoint.secret, Accept: "application/json" } },
       cacheTtlForPath(path),
       fetchWithRetry,
     );
@@ -151,6 +203,38 @@ async function callProxy<T>(
       response.status,
       path,
     );
+  }
+}
+
+async function callProxy<T>(
+  path: string,
+  params: Record<string, string | number | undefined> = {},
+  market: "futures" | "spot" = "futures",
+): Promise<T> {
+  if (!path.startsWith("/") || !PROXY_ALLOWED_PATHS.has(path)) {
+    throw new BinanceProxyError(
+      `Path '${path}' tidak ada di whitelist proxy. Cek PROXY_ALLOWED_PATHS di binanceProxyClient.ts.`,
+      undefined,
+      path,
+    );
+  }
+  if (!primaryEndpoint) {
+    throw new BinanceProxyError(
+      "PROXY_URL atau PROXY_SECRET belum diset di worker. Jalankan `wrangler secret put PROXY_URL` dan `wrangler secret put PROXY_SECRET`.",
+      undefined,
+      path,
+    );
+  }
+
+  try {
+    return await callProxyEndpoint<T>(primaryEndpoint, path, params, market);
+  } catch (err) {
+    const status = err instanceof BinanceProxyError ? err.status : undefined;
+    const isFailoverWorthy = status === undefined || FAILOVER_STATUS.has(status);
+    if (!secondaryEndpoint || !isFailoverWorthy) throw err;
+
+    console.log(`[proxy-failover] primary gagal (${status ?? "network error"}), coba secondary untuk ${path}`);
+    return callProxyEndpoint<T>(secondaryEndpoint, path, params, market);
   }
 }
 

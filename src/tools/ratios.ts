@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { registerSafeTool } from "../toolWrapper.js";
 import * as binanceProxy from "../binanceProxyClient.js";
 import { fmtNum, fmtTime, trendDirection } from "../format.js";
 import { symbolSchema, FUTURES_DATA_PERIOD_ENUM, errorResult } from "../shared.js";
@@ -10,7 +11,8 @@ export function registerRatiosTools(server: McpServer): void {
   // ─────────────────────────────────────────────────────────────
   // LONG/SHORT RATIO
   // ─────────────────────────────────────────────────────────────
-  server.registerTool(
+  registerSafeTool(
+    server,
     "binance_get_long_short_ratio",
     {
       title: "Long/Short Ratio",
@@ -99,7 +101,8 @@ export function registerRatiosTools(server: McpServer): void {
   // langsung dari Binance lewat proxy Vercel, BUKAN blended seperti
   // binance_get_long_short_ratio di atas.
   // ─────────────────────────────────────────────────────────────
-  server.registerTool(
+  registerSafeTool(
+    server,
     "binance_get_top_trader_ratio",
     {
       title: "Top-Trader Long/Short Ratio (Breakdown Murni)",

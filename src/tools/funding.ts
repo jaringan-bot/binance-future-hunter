@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { registerSafeTool } from "../toolWrapper.js";
 import * as binanceProxy from "../binanceProxyClient.js";
 import { fmtPrice, fmtPct, fmtTime, trendDirection } from "../format.js";
 import { symbolSchema, PERIOD_ENUM, errorResult } from "../shared.js";
@@ -12,7 +13,8 @@ export function registerFundingTools(server: McpServer): void {
   // FUNDING RATE (Binance native via premiumIndex — funding TERKINI,
   // belum settled, plus mark price & waktu funding berikutnya)
   // ─────────────────────────────────────────────────────────────
-  server.registerTool(
+  registerSafeTool(
+    server,
     "binance_get_funding_rate",
     {
       title: "Ambil Funding Rate Terkini",
@@ -105,7 +107,8 @@ export function registerFundingTools(server: McpServer): void {
   );
 
 
-  server.registerTool(
+  registerSafeTool(
+    server,
     "binance_get_funding_rate_history",
     {
       title: "Histori Funding Rate",
@@ -178,7 +181,8 @@ export function registerFundingTools(server: McpServer): void {
   // per-pair). Berguna untuk pertanyaan "pair mana yang paling crowded
   // long/short sekarang" tanpa perlu tau symbol-nya duluan.
   // ─────────────────────────────────────────────────────────────
-  server.registerTool(
+  registerSafeTool(
+    server,
     "binance_scan_funding_extremes",
     {
       title: "Scan Funding Rate Paling Ekstrem (Semua Pair)",

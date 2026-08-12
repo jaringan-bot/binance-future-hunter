@@ -10,6 +10,9 @@ import { registerSpotTools } from "./tools/spot.js";
 import { registerCompositeTools } from "./tools/composite.js";
 import { registerConfigTools } from "./tools/config.js";
 import { registerBasisHistoryTools } from "./tools/basisHistory.js";
+import { registerMmDetectionTools } from "./tools/detectMmActivity.js";
+import { registerMarketRegimeTools } from "./tools/marketRegime.js";
+import { registerCatalogTools } from "./tools/catalog.js";
 
 export function createServer(): McpServer {
   const server = new McpServer({
@@ -28,6 +31,9 @@ export function createServer(): McpServer {
   registerCompositeTools(server);
   registerConfigTools(server);
   registerBasisHistoryTools(server);
+  registerMmDetectionTools(server);
+  registerMarketRegimeTools(server);
+  registerCatalogTools(server);
 
   return server;
 }

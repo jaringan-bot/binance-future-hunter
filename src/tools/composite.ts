@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { registerSafeTool } from "../toolWrapper.js";
 import * as binanceProxy from "../binanceProxyClient.js";
 import { fmtNum, fmtPrice, fmtPct, trendDirection } from "../format.js";
 import { symbolSchema, errorResult } from "../shared.js";
@@ -26,7 +27,8 @@ export function registerCompositeTools(server: McpServer): void {
   // TETAP bukan pengganti tool individual kalau butuh detail/histori
   // lebih panjang -- ini snapshot ringkas per masing-masing sudut.
   // ─────────────────────────────────────────────────────────────
-  server.registerTool(
+  registerSafeTool(
+    server,
     "binance_analyze_pair",
     {
       title: "Analisis Ringkas Satu Pair (Composite)",
@@ -153,7 +155,8 @@ export function registerCompositeTools(server: McpServer): void {
   );
 
 
-  server.registerTool(
+  registerSafeTool(
+    server,
     "binance_compare_symbols",
     {
       title: "Bandingkan Beberapa Pair (Multi-Symbol)",
