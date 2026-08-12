@@ -8,6 +8,17 @@
 > (upgrade Vercel Pro ~$20/bulan, atau tambah service always-on ~$5/bulan di
 > Fly.io/Railway) butuh biaya tambahan — diputuskan untuk tidak lanjut. Dokumen ini
 > dibiarkan sebagai catatan kenapa pendekatan ini gak dipilih, bukan spec aktif.
+>
+> **Dikonfirmasi ulang independen 2026-08-12** (sesi terpisah, belum baca
+> spec ini dulu): throwaway worker `whalescope-do-ws-test` di-deploy beneran
+> (`wrangler deploy`, bukan cuma `wrangler dev --remote`), buka WS outbound
+> ke `wss://fstream.binance.com/ws/btcusdt@aggTrade` — hasil SAMA, HTTP 403
+> di step upgrade. Catatan tambahan dari sesi ini: `wrangler dev --remote`
+> TIDAK reliable buat tes ini kalau DO class belum pernah di-deploy beneran
+> (gagal duluan dengan error 1101 generik sebelum sempat nyoba WS-nya sama
+> sekali) — kalau mau spike test serupa lagi nanti, langsung `wrangler
+> deploy` throwaway worker, jangan andalkan `dev --remote` doang. Worker
+> throwaway udah dihapus lagi (`wrangler delete`) setelah tes.
 
 ## Latar Belakang
 

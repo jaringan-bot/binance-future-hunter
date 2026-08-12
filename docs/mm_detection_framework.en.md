@@ -19,6 +19,7 @@
 8. [Tool → Signal Mapping](#8-tool--signal-mapping)
 9. [Conclusion](#9-conclusion)
 10. [Empirical Validation](#10-empirical-validation)
+11. [Automated Scoring — binance_detect_mm_activity](#11-automated-scoring--binance_detect_mm_activity)
 
 ---
 
@@ -278,6 +279,8 @@
 | `binance_get_funding_rate` | Funding manipulation, scheduled rebalancing | — |
 | `binance_get_funding_rate_history` | Funding pattern analysis | — |
 | `binance_get_klines` | Wick analysis, reversal confirmation, price mapping | — |
+| `binance_detect_mm_activity` | ALL 6 signals above at once, automated + scored (see Section 11) | Spoofing & stop-hunt are 1-snapshot heuristics, lower confidence than the other 4 signals |
+| `binance_backtest_signal` | Empirically validates `binance_detect_mm_activity`'s historical scores (win rate/avg return) | Forward return computed on-demand from klines, not a simulation of real execution; fixed 10-pair watchlist only |
 
 ---
 
@@ -331,5 +334,64 @@ Score ~1-1.5/6 → Weak tier. **A sensible result** — BTC was calm, the framew
 
 ---
 
+## 11. Automated Scoring — `binance_detect_mm_activity`
+
+Sections 1-8 above are the MANUAL workflow (combine 5-6 tool calls
+yourself, read the tables, count how many signals align).
+`binance_detect_mm_activity` (released 2026-08-12) automates that EXACT
+workflow into 1 tool call: fetch 6 data sources via `Promise.all`, compute
+a score per signal (0-1), sum to a 0-6 total, classify a tier.
+
+**IMPORTANT — this is a DIFFERENT scoring system from the Section 7
+checklist**, don't conflate them:
+
+| | Section 7 (manual) | Section 11 (`binance_detect_mm_activity`) |
+|---|---|---|
+| Granularity | Yes/no checklist (0-6 discrete) | Continuous score per signal (0-1) |
+| Signal count | 6 (order book, CVD, OI, basis, liquidation+klines, top trader) | 6 but DIFFERENT composition (see mapping below) |
+| Tier | Weak(1-2)/Moderate(3-4)/Strong(5-6) | Weak(<2)/Moderate(<3.5)/Strong(<5)/Extreme(≥5) |
+| Liquidation | Separate signal (Section 4.1, needs `binance_get_liquidation_history` + manual `klines`) | NOT used — stop-hunt comes from `klines` alone (see limitations below) |
+
+### Automated signal → manual section mapping
+
+| Signal (`src/tools/detectMmActivity.ts`) | Related section | Formula summary | Confidence |
+|---|---|---|---|
+| `absorption` | 2.1 Order Book Absorption | Dominant CVD buy% (>60%) + flat price (\|Δ\|<0.5%) + sharp OI increase (>3%) → score 0.7-1.0. CVD buy% (>55%) + falling price → 0.5 (weak). Otherwise → 0.1 | **Medium** — uses CVD+OI+price (official Binance data), BUT only a single klines snapshot window, not a spot-CVD cross-check like the manual Section 2.1 |
+| `spoofing` | 3.1 Wall Pull / Spoofing | Spread >0.2% + largest wall >1% of 24h volume → 0.6. Otherwise → 0.1 | **Low** — only 1 order-book snapshot (not the 2 snapshots <3 seconds apart that Section 3.1 calls for; see Section 10 #2, proxy latency of 298-898ms makes that unreliable). A wall-vs-volume heuristic, NOT true spoofing detection |
+| `stopHunt` | 4.1 Liquidation Cluster Reversal | Wick >70% of range + body <20% + reversal candle → 0.8. Wick >60% alone → 0.5. Otherwise → 0.1 | **Low** — from `klines` ALONE (wick+reversal), WITHOUT the `binance_get_liquidation_history` confirmation Section 4.1 calls for (liquidation history has no price field + Coinalyze is rate-limited, see Section 8) |
+| `basisArb` | 5.1 Spot-Futures Basis Arbitrage | If the symbol has D1 history (fixed 10-pair watchlist): basis z-score >2 std dev + funding >0.05% → 0.9. Without history: basis >2x threshold → 0.7 (less accurate, noted in the evidence text), >threshold → 0.5. Otherwise → 0.1 | **Medium-High** for the 10-pair watchlist (has 24h D1 historical context), **Medium** for other pairs (static threshold, no distribution context) |
+| `oiDivergence` | 2.1 (sharp OI increase) + 6.STEP3 | OI up >5% + flat price (\|Δ\|<1%) → 0.8. OI up >3% against price direction → 0.7. Otherwise → 0.1 | **Medium** — official Binance OI data, but only a 1-hour window (2 data points), not a long history |
+| `fundingExtreme` | 5.2 Funding Rate Manipulation | Funding >3x threshold → 1.0, >2x → 0.8, >threshold → 0.6, below → proportional scale | **High** — funding rate straight from Binance (`premiumIndex`), the most reliable of these 6 signals |
+
+**Default thresholds**: funding ±0.03% (0.0003), basis ±0.05% (0.0005) —
+identical to the defaults used by `binance_get_funding_rate`/
+`binance_get_spot_price`, overridable per pair via
+`binance_set_pair_threshold` (Workers KV, also used automatically by
+`binance_detect_mm_activity`).
+
+**What's NOT included from the manual framework**: top-trader divergence
+(Section 4.2) and taker volume divergence (Section 2.2) are NOT separate
+signals in this automated version — out of scope for the original 6-signal
+design (`whalescope_mcp_roadmap.md` Appendix A). A reasonable follow-up if
+more scoring precision is wanted.
+
+### Empirical validation — via `binance_backtest_signal`, no longer manual
+
+Section 10 above (Empirical Validation) was done manually before
+`binance_detect_mm_activity` existed — matching signals one by one against
+real market conditions, a one-time pass. Now, every 5 minutes a Cron
+Trigger snapshots the 6 scores above into D1 (`signal_history`, fixed
+10-pair watchlist) with no manual testing needed —
+`binance_backtest_signal` queries that history, computes the forward
+return N hours after each active signal (score ≥0.6) triggered, and
+aggregates win rate/avg return/max drawdown. This is CONTINUOUS empirical
+validation, not a one-time snapshot like Section 10 — but data collection
+only started on deploy date (2026-08-12), not retroactively, and small
+early sample sizes mean low confidence (see the README's "Honest
+limitations you should know").
+
+---
+
 *Created: 2026-08-11*
 *Version 4.0 (final) — every technical claim validated directly against live WhaleScope MCP data, including latency, endpoint historical limits, and the real-world movement of the top-trader ratio across pairs.*
+*Section 11 added 2026-08-12: documents `binance_detect_mm_activity` (automated scoring) + `binance_backtest_signal` (continuous empirical validation).*
