@@ -130,19 +130,48 @@ SOLUSDT).
 | `binance_get_pair_threshold` | Cek threshold custom yang sudah di-set untuk sebuah pair | Workers KV |
 | `binance_get_basis_history` | Histori basis futures-vs-spot time-series (snapshot Cron tiap 5 menit), watchlist tetap BTCUSDT/ETHUSDT/SOLUSDT — deteksi "basis melebar lalu kembali" tanpa cek manual berkali-kali | Workers KV + Cron Trigger |
 
-## Framework Analisis
+## Framework Analisis: Deteksi Market Maker & Whale
 
-[`docs/mm_detection_framework.md`](docs/mm_detection_framework.md) (v4, final)
-— framework deteksi jejak aktivitas market maker (absorption, spoofing, stop
-hunt, basis arbitrage) dengan menggabungkan beberapa tool di atas. Setiap
-klaim teknis divalidasi ke data live sebelum masuk versi final — termasuk
-latency polling (298-898ms per call, jadi saran awal "<500ms polling" gak
-feasible lewat MCP tool call biasa), field data liquidation (gak ada info
-level harga, cuma per-window-waktu), threshold divergence top-trader ratio
-(baik angka fix maupun tiered per-liquiditas terbukti gak cocok — pergerakan
-riil semua pair yang dites jauh di bawahnya), dan batas retensi historis
-endpoint top-trader ratio Binance sendiri (~30 hari maksimal, bukan 90 hari
-seperti asumsi awal).
+Tidak ada tool yang bisa melihat identitas atau posisi spesifik market
+maker (MM)/whale secara langsung — data Binance yang publik memang tidak
+menyediakan itu. Yang bisa dilakukan (dan itulah fungsi framework ini):
+membaca **jejak aktivitas** mereka dengan menggabungkan beberapa tool di
+atas, lalu menghitung skor indikasi dari pola yang muncul.
+
+**Empat kategori sinyal yang dideteksi:**
+
+| Sinyal | Tool utama | Contoh pola |
+|---|---|---|
+| **Absorption** | order book depth, agg trades (futures & spot), open interest | CVD flat/naik tapi harga stagnan = sell pressure sedang diserap (accumulation); OI spike tajam + harga sideways = posisi besar baru dibuka |
+| **Spoofing** | order book depth, order book imbalance | Wall besar muncul lalu hilang sebelum sempat tereksekusi; spread tiba-tiba melebar lalu normal lagi dalam hitungan detik |
+| **Stop hunt** | liquidation history, open interest, klines | Spike liquidation di satu sisi + wick panjang di candle pada waktu yang sama + harga reverse dalam 1-3 candle sesudahnya |
+| **Basis arbitrage** | spot price, funding rate, open interest | Basis spot-futures melebar lalu kembali cepat; funding ekstrem + OI naik (indikasi hedge short futures / long spot) |
+
+**Rule of thumb:** kalau **≥3 sinyal align** dalam timeframe yang sama,
+indikasi aktivitas MM cukup kuat untuk ditindaklanjuti — ini heuristik
+checklist (lihat tier confidence di dokumen lengkap), **bukan** probabilitas
+yang terkalibrasi secara statistik.
+
+Dokumen lengkap: [`docs/mm_detection_framework.md`](docs/mm_detection_framework.md)
+(v4, final) — berisi kriteria detail tiap sinyal, workflow step-by-step,
+checklist live, dan mapping tool → sinyal.
+
+### Hasil Validasi Empiris
+
+Setiap klaim teknis di framework ini divalidasi langsung ke worker deployed
+(bukan asumsi) sebelum masuk versi final. Beberapa temuan yang mengoreksi
+asumsi awal:
+
+| Klaim awal | Hasil validasi |
+|---|---|
+| Polling <500ms buat deteksi refresh-rate spoofing | ❌ Latency riil 298-898ms/call (rata-rata ~485ms) lewat proxy chain worker→Vercel→Binance — tidak reliable buat itu |
+| Threshold divergence top-trader ratio universal (flat >15% atau tiered 3-15%) | ❌ Tidak pernah trigger — pergerakan riil 4 pair yang dites (SOLUSDT, BNBUSDT, LINKUSDT, AVAXUSDT) dalam window 2 jam cuma 0.40-2.35 poin, jauh di bawah threshold manapun |
+| Retensi historis top-trader ratio "30-90 hari" | ⚠️ Dikoreksi — 90 hari tidak tersedia sama sekali dari Binance; 30 hari cuma di resolusi kasar (4h/1d), resolusi 15 menit cuma ~5 hari ke belakang |
+| Liquidation history bisa dipetakan ke level harga | ❌ Field `binance_get_liquidation_history` cuma `{totalLong, totalShort, dominance}` per window waktu, tanpa harga sama sekali — perlu cross-check manual ke `klines` |
+| Kondisi pasar tenang (BTCUSDT) tidak over-trigger | ✅ Terkonfirmasi — skor ~1-1.5/6 (tier Weak) saat pasar sideways, framework tidak salah alarm di kondisi normal |
+
+Detail penuh (termasuk raw data test per klaim): Section 10,
+[`docs/mm_detection_framework.md`](docs/mm_detection_framework.md#10-validasi-empiris).
 
 ## Keterbatasan yang jujur perlu diketahui
 
@@ -286,6 +315,28 @@ Setelah custom domain aktif, worker bisa diakses di
    setup custom domain — perhatikan path `/mcp` di akhir, wajib)
 4. Simpan, lalu aktifkan connector tersebut untuk percakapan yang kamu mau
 
+### Contoh Penggunaan
+
+Setelah connector aktif, tinggal minta lewat percakapan biasa — Claude yang
+menentukan tool mana yang dipanggil (dan berapa kali) berdasarkan pertanyaan:
+
+- *"Funding rate BTCUSDT sekarang gimana, ada indikasi crowded?"* →
+  `binance_get_funding_rate`
+- *"Pair apa yang funding-nya paling ekstrem sekarang di seluruh market?"* →
+  `binance_scan_funding_extremes`
+- *"Cek overview lengkap ETHUSDT — funding, OI, order book, bias harga"* →
+  `binance_analyze_pair` (composite, 1 call ganti 6 tool terpisah)
+- *"Ada tanda-tanda aktivitas market maker di SOLUSDT belakangan ini?"* →
+  kombinasi beberapa tool (order book, agg trades, OI, liquidation, klines)
+  mengikuti [Framework Analisis](#framework-analisis-deteksi-market-maker--whale)
+  di atas — sebutkan pair-nya, Claude yang menjalankan workflow deteksinya
+- *"Bandingin funding rate BTC, ETH, SOL, sama BNB"* →
+  `binance_compare_symbols`
+
+Karena semua tool read-only, aman dicoba tanya apapun soal data pasar tanpa
+risiko memicu order/trading — worker ini tidak punya kemampuan itu sama
+sekali.
+
 ## Uji coba manual sebelum daftar ke Claude (disarankan)
 
 Tidak ada test suite otomatis di repo ini — `npm run typecheck` adalah satu-
@@ -318,7 +369,23 @@ proxy Vercel bekerja. Untuk jalur Coinalyze, ganti `name` ke
 `binance_get_liquidation_history` — kalau itu juga valid, jalur Coinalyze
 bekerja.
 
-## Audit Efisiensi Token
+## Audit & Hasil
+
+### Efisiensi Token
+
+Response tool MCP masuk langsung ke context window Claude — beda dari REST
+API biasa di mana ukuran response relatif "gratis". Repo ini pernah punya
+beberapa tool yang boros token tanpa disadari; sudah diperbaiki dan
+diverifikasi ke worker live (2026-08-12):
+
+| Temuan | Sebelum | Sesudah |
+|---|---|---|
+| `binance_get_klines`/`spot_klines` — `structuredContent.candles` selalu ikut full array | ~14.400 token di `limit=500` (57,7KB), sampai ~43.000 token di limit maksimal 1500 | Opt-in lewat parameter `includeCandles` (default `false`) — default cuma summary (bias, swing high/low, 15 candle terakhir) |
+| 6 tool histori (OI history, long/short ratio, top trader ratio, funding rate history, taker volume ratio, liquidation history) — tabel teks tanpa batas baris | 20-29KB (~5.000-7.250 token) per call di `limit=500` | Truncate ke 15 baris terakhir di teks — summary (avg/tren/dominance) tetap dihitung dari SEMUA data yang di-fetch, bukan cuma yang ditampilkan |
+| 5 deskripsi tool terpanjang (funding_rate, top_trader_ratio, spot_price, klines, spot_klines) | 16.869 karakter total | 15.671 karakter (~7%, ~300 token dihemat di one-time tool-list load per sesi) |
+| `binance_scan_funding_extremes` — `structuredContent.crowdedLong/crowdedShort` duplikat array yang sudah ada di tabel teks | ~2,9KB di `limit=50` (maks) | Cuma `topSymbolLong`/`topSymbolShort` (1 simbol paling ekstrem tiap sisi) — tabel lengkap tetap di teks |
+
+Verifikasi ulang kapan saja:
 
 ```bash
 npm run token-audit
@@ -333,6 +400,31 @@ format response terhadap konsumsi token. Estimasi token pakai heuristik
 chars/4 (gak ada tokenizer resmi Claude yang di-publish sebagai package),
 jadi angkanya approximate, berguna buat perbandingan relatif (sebelum vs
 sesudah perubahan), bukan angka token exact.
+
+### Keamanan
+
+- **Validasi input simbol pair.** `symbolSchema` (dipakai semua tool yang
+  butuh parameter `symbol`) dibatasi maksimal 20 karakter dan hanya
+  menerima `[A-Z0-9_]`. Sebelumnya tidak ada batasan — karena simbol dipakai
+  langsung sebagai bagian key Workers KV (`threshold:${symbol}`,
+  `basis_history:${symbol}`), input tanpa batas panjang/karakter berisiko
+  melebihi limit 512-byte key KV atau menyisipkan karakter (titik dua,
+  newline) yang mengacaukan konstruksi key. Batas 20 karakter divalidasi ke
+  data riil (simbol terpanjang di Binance Futures saat ini 17 karakter),
+  dan regex sengaja mengizinkan underscore supaya kontrak dated/quarterly
+  (contoh `BTCUSDT_260925`) tetap valid.
+- **Read-only terhadap akun.** Tidak ada tool yang melakukan order/trading
+  atau mengakses data akun pribadi — satu-satunya tool yang menulis state
+  (`binance_set_pair_threshold`) cuma menyimpan preferensi threshold di
+  Workers KV milik worker sendiri.
+- **Kredensial selalu lewat Wrangler secret**, tidak pernah di-hardcode atau
+  masuk `wrangler.toml`/git — lihat peringatan eksplisit di bagian
+  [Setup Proxy Vercel](#setup-proxy-vercel-wajib-sekali-saja) soal cara
+  aman set secret.
+- Repo ini di-scan manual untuk memastikan tidak ada API key, secret, atau
+  kredensial nyata yang ter-commit — hanya placeholder/contoh (misal URL
+  proxy `whale-pearl.vercel.app` di dokumentasi setup adalah nama contoh,
+  bukan endpoint nyata).
 
 ## Biaya
 
