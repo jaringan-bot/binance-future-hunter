@@ -89,12 +89,13 @@ dan `PROXY_URL`/`PROXY_SECRET` (proxy Vercel) — lihat bagian Setup di bawah.
 
 **Caching & state, tanpa kredensial tambahan.** Response upstream (funding
 rate, klines, OI, dll — kecuali order book & aggregate trades yang butuh
-freshness ketat) di-cache singkat (5 detik) lewat Cache API bawaan
-Cloudflare Workers, tidak perlu setup apapun. Threshold custom per-pair dan
-histori basis time-series tersimpan di Workers KV (binding `CONFIG_KV`,
-sudah termasuk di `wrangler.toml` repo ini) — snapshot basis diisi otomatis
-oleh Cron Trigger tiap 5 menit untuk watchlist tetap (BTCUSDT, ETHUSDT,
-SOLUSDT).
+freshness ketat) di-cache bertingkat (5 detik-1 jam tergantung endpoint)
+lewat Cache API bawaan Cloudflare Workers, tidak perlu setup apapun.
+Threshold custom per-pair tersimpan di Workers KV (binding `CONFIG_KV`).
+Time-series (basis+funding+OI, dan 6 skor sinyal `binance_detect_mm_activity`)
+tersimpan di D1 (binding `DB`) — diisi otomatis oleh Cron Trigger tiap 5
+menit untuk watchlist tetap 10 pair (BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT,
+XRPUSDT, DOGEUSDT, ADAUSDT, AVAXUSDT, LINKUSDT, LTCUSDT).
 
 ## Yang disediakan
 
@@ -128,9 +129,10 @@ SOLUSDT).
 | `binance_compare_symbols` | Bandingkan 1 metrik (funding rate, %change 24h, OI, top trader ratio, taker ratio) across 2-10 pair sekaligus, diurutkan dari paling ekstrem | Binance native |
 | `binance_set_pair_threshold` | Set threshold funding/basis custom per-pair (override default ±0.03%/±0.05%), tersimpan di Workers KV | Workers KV |
 | `binance_get_pair_threshold` | Cek threshold custom yang sudah di-set untuk sebuah pair | Workers KV |
-| `binance_get_basis_history` | Histori basis futures-vs-spot time-series (snapshot Cron tiap 5 menit), watchlist tetap BTCUSDT/ETHUSDT/SOLUSDT — deteksi "basis melebar lalu kembali" tanpa cek manual berkali-kali | Workers KV + Cron Trigger |
+| `binance_get_basis_history` | Histori basis+funding+OI time-series (snapshot Cron tiap 5 menit ke D1), watchlist tetap 10 pair — deteksi "basis melebar lalu kembali" tanpa cek manual berkali-kali | D1 + Cron Trigger |
 | `binance_detect_mm_activity` | Skor + tier (Weak/Moderate/Strong/Extreme) dari 6 sinyal MM/whale sekaligus (absorption, spoofing heuristic, stop-hunt heuristic, basis arbitrage, OI divergence, funding extreme) — ganti 5-6 tool call manual. **Skor spoofing & stop-hunt cuma heuristik 1-snapshot**, lihat [Keterbatasan](#keterbatasan-yang-jujur-perlu-diketahui) | Binance native |
 | `binance_market_regime` | Klasifikasi kondisi pasar: TRENDING_UP/DOWN, RANGING, BREAKOUT, ACCUMULATION, DISTRIBUTION — pakai ADX(14), tren OI, CVD, spike volatilitas/volume | Binance native |
+| `binance_backtest_signal` | Validasi empiris sinyal `binance_detect_mm_activity`: win rate/avg return/max drawdown dari histori sinyal D1 (watchlist tetap), forward return dihitung on-demand dari klines historis | D1 + Binance native |
 | `binance_get_tool_catalog` | Daftar semua tool + kategori/token-cost/use-case, filter per kategori — cek ini dulu sebelum manggil banyak tool individual | Statis |
 
 ## Framework Analisis: Deteksi Market Maker & Whale
@@ -204,8 +206,24 @@ Detail penuh (termasuk raw data test per klaim): Section 10,
   di tool yang sama — dicatat juga di evidence text tiap response.
 - **`binance_market_regime`: spike volatilitas/volume dihitung relatif ke
   window fetch yang sama** (10 candle terakhir vs 10 sebelumnya), bukan
-  baseline historis jangka panjang — belum ada penyimpanan time-series
-  general per pair (cuma `binance_get_basis_history` yang watchlist-only).
+  baseline historis jangka panjang.
+- **Time-series D1 (`market_snapshots`, `signal_history`) HANYA untuk
+  watchlist tetap 10 pair** — pair lain di luar itu tidak pernah di-snapshot
+  cron sama sekali, `binance_get_basis_history` dan `binance_backtest_signal`
+  cuma bisa dipanggil untuk 10 pair itu.
+- **Belum ada pruning/retention buat row D1** — row nambah terus tanpa batas
+  seiring waktu (di 10 pair x ~6.048 row/hari gabungan kedua tabel, D1 free
+  tier 5 juta write/hari & 5GB storage masih longgar untuk waktu yang lama,
+  tapi ini bukan solusi permanen).
+- **Migrasi KV→D1 (basis history) TIDAK backfill data lama** — histori basis
+  yang sempat tersimpan di Workers KV sebelum migrasi ini hilang, window 24
+  jam baru keisi ulang natural beberapa jam setelah deploy.
+- **`binance_backtest_signal`: forward return DIHITUNG ON-DEMAND dari klines
+  historis** (close candle 1h terdekat ke waktu target), BUKAN simulasi
+  eksekusi order riil — slippage/fee/partial fill tidak dihitung. Sample
+  size kecil (di bawah ~20 sinyal) berarti confidence rendah, jangan
+  simpulkan sinyal "reliable" dari sedikit data historis (baru mulai
+  terkumpul dari kapan fitur ini deploy, bukan retroaktif).
 
 ## Setup Coinalyze API Key (wajib, sekali saja)
 
@@ -278,9 +296,31 @@ npx wrangler kv namespace create WHALESCOPE_CONFIG
 
 Copy `id` yang muncul ke `[[kv_namespaces]]` di `wrangler.toml`, ganti value
 `id` yang lama (binding-nya biarkan tetap `CONFIG_KV`, kode worker rujuk
-nama binding itu, bukan id). Tanpa ini, `binance_set_pair_threshold`,
-`binance_get_pair_threshold`, dan `binance_get_basis_history` akan gagal
-dengan error jelas ("CONFIG_KV belum ke-bind di worker").
+nama binding itu, bukan id). Tanpa ini, `binance_set_pair_threshold` dan
+`binance_get_pair_threshold` akan gagal dengan error jelas ("CONFIG_KV
+belum ke-bind di worker").
+
+## Setup Workers D1 (wajib, sekali saja — kalau fork/deploy repo ini sendiri)
+
+Sama seperti KV di atas, `database_id` D1 di `wrangler.toml` repo ini
+terikat ke akun Cloudflare yang bikin. Kalau fork/deploy ke akun sendiri:
+
+```bash
+npx wrangler d1 create whalescope-mcp-db
+```
+
+Copy `database_id` yang muncul ke `[[d1_databases]]` di `wrangler.toml`
+(binding biarkan tetap `DB`), lalu jalankan migration:
+
+```bash
+npx wrangler d1 migrations apply whalescope-mcp-db --remote
+```
+
+Tanpa ini, `binance_get_basis_history` dan `binance_backtest_signal` akan
+gagal dengan error jelas ("D1 database (binding DB) belum ke-bind di
+worker"), dan Cron Trigger snapshot basis+sinyal MM (tiap 5 menit) akan
+gagal silent tiap tick (ke-log ke Workers Logs, tidak menggagalkan endpoint
+`/mcp` lain).
 
 ## Setup Deploy Otomatis (GitHub Actions → Cloudflare Workers)
 

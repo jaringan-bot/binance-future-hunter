@@ -5,6 +5,24 @@ import { z } from "zod";
 import * as coinalyze from "./coinalyzeClient.js";
 import * as binanceProxy from "./binanceProxyClient.js";
 
+// Watchlist yang di-snapshot Cron Trigger tiap 5 menit ke D1 (basis+funding+OI
+// di market_snapshots, 6 skor sinyal MM di signal_history -- lihat scheduled()
+// handler di src/index.ts + migrations/0001_init.sql). 10 pair paling
+// likuid/sering dianalisis; D1 (5 juta write/hari) jauh di atas limit lama
+// Workers KV (1.000 write/hari) yang tadinya batasin watchlist ke 3 pair.
+export const SNAPSHOT_WATCHLIST = [
+  "BTCUSDT",
+  "ETHUSDT",
+  "SOLUSDT",
+  "BNBUSDT",
+  "XRPUSDT",
+  "DOGEUSDT",
+  "ADAUSDT",
+  "AVAXUSDT",
+  "LINKUSDT",
+  "LTCUSDT",
+] as const;
+
 export const PERIOD_ENUM = [
   "5m",
   "15m",
