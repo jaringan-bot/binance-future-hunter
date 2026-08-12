@@ -9,6 +9,22 @@ candlesticks, CVD) as tools callable by Claude. All data served is
 **public, read-only** — no order placement/trading, no access to private
 account data.
 
+## Quick Deploy
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/osindo-dev/whalescope-mcp)
+
+This button clones the repo and creates a Worker in your own Cloudflare
+account, including **auto-provisioning a new KV namespace & D1 database**
+(Cloudflare generates fresh `id`/`database_id` values for your account, no
+manual creation needed). **Not fully zero-touch** — to be honest about
+what's still manual: you STILL need to set secrets afterward (Cloudflare
+can't guess values from external services) — see `.dev.vars.example` in
+this repo for the full list, or
+[Vercel Proxy setup](#setup-vercel-proxy-required-one-time) below.
+`PROXY_URL`/`PROXY_SECRET` are REQUIRED (33 of 34 tools need them), the
+Coinalyze API key is **OPTIONAL** (only 1 tool) — skip it if you don't need
+liquidation history.
+
 ## Purpose
 
 Provide a picture of Binance Futures market positioning — not just price,
@@ -58,8 +74,9 @@ conversation with Claude, without needing a separate exchange dashboard.
 - **One tool still goes through a third-party aggregator** (Coinalyze, for
   liquidation history only) — see the
   [Limitations](#honest-limitations-you-should-know) section for details.
-- **Initial setup needs a few credentials** (Coinalyze API key + Vercel
-  proxy) — not plug-and-play, there's a one-time manual configuration step.
+- **Initial setup needs a Vercel proxy** (required) — not plug-and-play,
+  there's a one-time manual configuration step. Coinalyze API key is
+  OPTIONAL (only 1 of 34 tools), doesn't block initial setup if skipped.
 - **Coinalyze free-tier rate limit** (40 requests/minute per API key) could
   become a bottleneck under very heavy use.
 - No on-chain wallet data, and no data from exchanges other than Binance
@@ -85,8 +102,9 @@ conversation with Claude, without needing a separate exchange dashboard.
   underlying data (the original source is still Binance), and its API is
   itself hosted on Cloudflare, so it doesn't hit the same block.
 
-As a consequence, this worker needs **two sets of credentials**:
-`COINALYZE_API_KEY` and `PROXY_URL`/`PROXY_SECRET` (Vercel proxy) — see the
+As a consequence, this worker needs `PROXY_URL`/`PROXY_SECRET` (Vercel
+proxy, required for the 33 Binance-native tools) and, optionally,
+`COINALYZE_API_KEY` (only for `binance_get_liquidation_history`) — see the
 Setup section below.
 
 **Caching & state, no extra credentials needed.** Upstream responses
@@ -258,20 +276,6 @@ Full detail (including raw test data per claim): Section 10,
   category `"uncategorized"`, still visible (never silently omitted) but
   not neatly categorized yet.
 
-## Setup: Coinalyze API Key (required, one-time)
-
-1. Sign up for free at https://coinalyze.net
-2. Grab the API key from your account page
-3. Set it as a worker secret (not in `wrangler.toml`, not hardcoded):
-   ```bash
-   npx wrangler secret put COINALYZE_API_KEY
-   ```
-   (paste the API key when prompted)
-
-Without this secret, `binance_get_liquidation_history` (the only tool
-sourced from Coinalyze, see the table above) will fail with a clear error
-message ("COINALYZE_API_KEY belum diset").
-
 ## Setup: Vercel Proxy (required, one-time)
 
 Tools labeled "Binance native" in the table above need a relay proxy on
@@ -357,6 +361,24 @@ will fail with a clear error ("D1 database (binding DB) belum ke-bind di
 worker"), and the basis+MM-signal Cron Trigger (every 5 min) will fail
 silently each tick (logged to Workers Logs, doesn't break the `/mcp`
 endpoint).
+
+## Setup: Coinalyze API Key (OPTIONAL — only 1 of 34 tools)
+
+Unlike the 3 setup steps above, this is NOT a prerequisite for the server
+to work. The worker deploys and the other 33 tools work fine without
+it -- only `binance_get_liquidation_history` needs it.
+
+1. Sign up for free at https://coinalyze.net
+2. Grab the API key from your account page
+3. Set it as a worker secret (not in `wrangler.toml`, not hardcoded):
+   ```bash
+   npx wrangler secret put COINALYZE_API_KEY
+   ```
+   (paste the API key when prompted)
+
+Without this secret, only `binance_get_liquidation_history` fails with a
+clear error ("COINALYZE_API_KEY belum diset") -- no other tool is
+affected. Skip this section if you don't need liquidation history.
 
 ## Setup: Automated Deploy (GitHub Actions → Cloudflare Workers)
 
