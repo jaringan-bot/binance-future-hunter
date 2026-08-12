@@ -5,7 +5,7 @@
 // array PARALEL (universe[i] <-> assetCtxs[i], index sama = asset sama).
 import { fetchWithRetry } from "./retry.js";
 import { cachedFetch } from "./cache.js";
-import type { CrossExchangeFundingRate } from "./bybitClient.js";
+import type { CrossExchangeMarketData } from "./bybitClient.js";
 
 const HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info";
 const CACHE_TTL_SECONDS = 5;
@@ -18,11 +18,13 @@ interface HyperliquidUniverseAsset {
 interface HyperliquidAssetCtx {
   funding: string;
   markPx: string;
+  openInterest: string;
+  prevDayPx: string;
 }
 
 type HyperliquidMetaAndAssetCtxs = [{ universe: HyperliquidUniverseAsset[] }, HyperliquidAssetCtx[]];
 
-export async function getHyperliquidFundingRate(baseAsset: string): Promise<CrossExchangeFundingRate> {
+export async function getHyperliquidMarketData(baseAsset: string): Promise<CrossExchangeMarketData> {
   const response = await cachedFetch(
     HYPERLIQUID_INFO_URL,
     {
@@ -49,5 +51,14 @@ export async function getHyperliquidFundingRate(baseAsset: string): Promise<Cros
     throw new Error(`Hyperliquid tidak balikin assetCtx untuk index asset ${baseAsset} (response berubah?).`);
   }
 
-  return { fundingRate: parseFloat(ctx.funding), lastPrice: parseFloat(ctx.markPx) };
+  const markPx = parseFloat(ctx.markPx);
+  const prevDayPx = parseFloat(ctx.prevDayPx);
+  const change24hPct = prevDayPx !== 0 ? (markPx - prevDayPx) / prevDayPx : 0;
+
+  return {
+    fundingRate: parseFloat(ctx.funding),
+    lastPrice: markPx,
+    openInterest: parseFloat(ctx.openInterest),
+    change24hPct,
+  };
 }

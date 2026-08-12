@@ -141,8 +141,8 @@ setup needed for those 3 exchanges.
 | `binance_detect_mm_activity` | Score + tier (Weak/Moderate/Strong/Extreme) from 6 MM/whale signals at once (absorption, spoofing heuristic, stop-hunt heuristic, basis arbitrage, OI divergence, funding extreme) — replaces 5-6 manual tool calls. **Spoofing & stop-hunt scores are 1-snapshot heuristics only**, see [Honest limitations](#honest-limitations-you-should-know) | Binance native |
 | `binance_market_regime` | Classifies current market condition: TRENDING_UP/DOWN, RANGING, BREAKOUT, ACCUMULATION, DISTRIBUTION — uses ADX(14), OI trend, CVD, volatility/volume spike ratio | Binance native |
 | `binance_backtest_signal` | Empirically validates `binance_detect_mm_activity` signals: win rate/avg return/max drawdown from D1 signal history (fixed watchlist), forward return computed on-demand from historical klines | D1 + Binance native |
-| `whalescope_compare_funding_across_exchanges` | Compares funding rate + last price for one pair across Binance/Bybit/OKX/Hyperliquid, flags divergence — cross-confirms MM detection signals across venues. The only tool that is NOT Binance-only | Binance native + Bybit + OKX + Hyperliquid |
-| `binance_get_tool_catalog` | Lists all tools with category/token-cost/use-case, filterable by category — check this before calling many individual tools | Static |
+| `whalescope_compare_funding_across_exchanges` | Compares funding rate, last price, open interest, and 24h change for one pair across Binance/Bybit/OKX/Hyperliquid, flags divergence — cross-confirms MM detection signals across venues. The only tool that is NOT Binance-only | Binance native + Bybit + OKX + Hyperliquid |
+| `binance_get_tool_catalog` | Lists all tools with category/token-cost/use-case, filterable by category — check this before calling many individual tools. Name+description are auto-pulled from the tool registry (always accurate); category/token-cost stay manual | Semi-automatic |
 
 ## Analysis Framework: Market Maker & Whale Detection
 
@@ -237,12 +237,26 @@ Full detail (including raw test data per claim): Section 10,
   confidence — don't conclude a signal is "reliable" from little historical
   data (data only starts accumulating from when this feature was deployed,
   not retroactively).
-- **`whalescope_compare_funding_across_exchanges`: funding rate + last
-  price only**, NOT OI/24h change (those fields aren't consistent across
-  the 4 exchanges, deliberately out of scope). Binance→other-exchange
-  symbol mapping is best-effort (strips the USDT suffix) — a pair not
-  listed on Bybit/OKX/Hyperliquid shows as "failed" on that row instead of
-  failing the whole tool call.
+- **`whalescope_compare_funding_across_exchanges`: Open Interest hasn't
+  been cross-validated against live data** across the 4 exchanges (SHOULD
+  be base-asset denominated on all of them, including OKX which uses the
+  `oiCcy` field, but no direct check has been done yet — double-check if
+  the numbers look off). Binance→other-exchange symbol mapping is
+  best-effort (strips the USDT suffix) — a pair not listed on
+  Bybit/OKX/Hyperliquid shows as "failed" on that row instead of failing
+  the whole tool call.
+- **The Binance-proxy rate-limit self-throttle is best-effort, NOT a hard
+  global limiter** — an in-memory per-isolate counter
+  (`src/rateLimiter.ts`), effective as long as the same isolate handles
+  consecutive requests, but this worker is stateless per-request so it's
+  not a hard cross-isolate guarantee. Threshold is 200 requests/minute,
+  count-based (not weight-based per endpoint like Binance's actual limit).
+- **`binance_get_tool_catalog` is semi-automatic** — name+description are
+  ALWAYS accurate (pulled from the tool registry, never stale or missed).
+  But category/token-cost/dependencies stay manual (`CATALOG_METADATA` in
+  `src/tools/catalog.ts`) — a new tool not yet curated shows up with
+  category `"uncategorized"`, still visible (never silently omitted) but
+  not neatly categorized yet.
 
 ## Setup: Coinalyze API Key (required, one-time)
 

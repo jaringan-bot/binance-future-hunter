@@ -1,27 +1,29 @@
 // Client Bybit public API -- TIDAK butuh proxy relay (beda dari Binance),
 // sudah dites langsung dari edge Cloudflare (wrangler dev --remote): 200 OK,
-// gak ada WAF/geo-block. Funding rate + last price ada di SATU call yang
-// sama (v5 tickers), gak perlu 2 request kayak OKX.
+// gak ada WAF/geo-block. Funding rate + last price + OI + 24h change ada
+// di SATU call yang sama (v5 tickers), gak perlu request terpisah kayak OKX.
 import { fetchWithRetry } from "./retry.js";
 import { cachedFetch } from "./cache.js";
 
 const BYBIT_TICKERS_URL = "https://api.bybit.com/v5/market/tickers";
 const CACHE_TTL_SECONDS = 5; // sama kayak funding rate Binance -- snapshot cepat berubah
 
-export interface CrossExchangeFundingRate {
+export interface CrossExchangeMarketData {
   fundingRate: number;
   lastPrice: number;
+  openInterest: number;
+  change24hPct: number; // desimal, misal 0.0123 = 1.23%
 }
 
 interface BybitTickerResponse {
   retCode: number;
   retMsg: string;
   result: {
-    list: { symbol: string; lastPrice: string; fundingRate?: string }[];
+    list: { symbol: string; lastPrice: string; fundingRate?: string; openInterest?: string; price24hPcnt?: string }[];
   };
 }
 
-export async function getBybitFundingRate(symbol: string): Promise<CrossExchangeFundingRate> {
+export async function getBybitMarketData(symbol: string): Promise<CrossExchangeMarketData> {
   const url = `${BYBIT_TICKERS_URL}?category=linear&symbol=${encodeURIComponent(symbol)}`;
   const response = await cachedFetch(url, { headers: { Accept: "application/json" } }, CACHE_TTL_SECONDS, fetchWithRetry);
 
@@ -38,9 +40,14 @@ export async function getBybitFundingRate(symbol: string): Promise<CrossExchange
   if (!ticker) {
     throw new Error(`Symbol ${symbol} tidak ditemukan di Bybit linear perpetual.`);
   }
-  if (ticker.fundingRate === undefined) {
-    throw new Error(`Bybit tidak balikin fundingRate untuk ${symbol} (response berubah?).`);
+  if (ticker.fundingRate === undefined || ticker.openInterest === undefined || ticker.price24hPcnt === undefined) {
+    throw new Error(`Bybit tidak balikin fundingRate/openInterest/price24hPcnt lengkap untuk ${symbol} (response berubah?).`);
   }
 
-  return { fundingRate: parseFloat(ticker.fundingRate), lastPrice: parseFloat(ticker.lastPrice) };
+  return {
+    fundingRate: parseFloat(ticker.fundingRate),
+    lastPrice: parseFloat(ticker.lastPrice),
+    openInterest: parseFloat(ticker.openInterest),
+    change24hPct: parseFloat(ticker.price24hPcnt),
+  };
 }

@@ -28,6 +28,7 @@
 
 import { fetchWithRetry } from "./retry.js";
 import { cachedFetch } from "./cache.js";
+import { checkAndRecordRequest } from "./rateLimiter.js";
 
 // Path yang TIDAK di-cache sama sekali (ttl=0) -- order book & trade granular
 // butuh freshness ketat, cache di sini bisa bikin sinyal spoofing/absorption
@@ -225,6 +226,10 @@ async function callProxy<T>(
       path,
     );
   }
+
+  // Self-throttle SEBELUM nembak network -- lihat rateLimiter.ts buat detail
+  // & keterbatasannya (best-effort per-isolate, bukan hard global limiter).
+  checkAndRecordRequest();
 
   try {
     return await callProxyEndpoint<T>(primaryEndpoint, path, params, market);

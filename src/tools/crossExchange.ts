@@ -1,28 +1,24 @@
-// whalescope_compare_funding_across_exchanges — bandingkan funding rate +
-// last price satu pair across Binance, Bybit, OKX, Hyperliquid dalam SATU
-// tool call. Beda dari semua tool binance_* lain (yang emang Binance-only
-// by design) -- ini satu-satunya tool cross-exchange di repo ini.
+// whalescope_compare_funding_across_exchanges — bandingkan funding rate,
+// last price, open interest, dan 24h change satu pair across Binance,
+// Bybit, OKX, Hyperliquid dalam SATU tool call. Beda dari semua tool
+// binance_* lain (yang emang Binance-only by design) -- ini satu-satunya
+// tool cross-exchange di repo ini.
 //
-// KENAPA CUMA funding rate + last price (bukan OI/24h change juga): field
-// itu paling standar & paling gampang dibandingkan apple-to-apple antar 4
-// exchange, dan itu yang paling ngedrive use-case utama (deteksi arbitrase
-// funding + cross-confirm sinyal binance_detect_mm_activity). OI/24h change
-// field-nya gak seragam (OKX butuh endpoint terpisah lagi), sengaja
-// ditunda -- follow-up gampang kalau versi funding-only ini kepake.
-//
-// KENAPA GAK BUTUH PROXY (beda dari Binance): sudah dites langsung dari
-// edge Cloudflare (wrangler dev --remote, 2026-08-12) -- Bybit, OKX,
-// Hyperliquid semua 200 OK, gak ada WAF/geo-block kayak Binance.
+// KENAPA GAK BUTUH PROXY buat 3 exchange lain (beda dari Binance): sudah
+// dites langsung dari edge Cloudflare (wrangler dev --remote, 2026-08-12)
+// -- Bybit, OKX, Hyperliquid semua 200 OK, gak ada WAF/geo-block kayak
+// Binance.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as binanceProxy from "../binanceProxyClient.js";
-import { getBybitFundingRate } from "../bybitClient.js";
-import { getOkxFundingRate } from "../okxClient.js";
-import { getHyperliquidFundingRate } from "../hyperliquidClient.js";
+import { getBybitMarketData } from "../bybitClient.js";
+import { getOkxMarketData } from "../okxClient.js";
+import { getHyperliquidMarketData } from "../hyperliquidClient.js";
+import type { CrossExchangeMarketData } from "../bybitClient.js";
 import { toExchangeSymbol } from "../symbolMap.js";
 import { symbolSchema, errorResult } from "../shared.js";
 import { registerSafeTool } from "../toolWrapper.js";
 import { ToolResponseBuilder } from "../responseBuilder.js";
-import { fmtPct, fmtPrice } from "../format.js";
+import { fmtPct, fmtPrice, fmtNum } from "../format.js";
 
 export interface FundingRateEntry {
   exchange: string;
@@ -48,6 +44,20 @@ export function computeFundingDivergence(entries: FundingRateEntry[]): Divergenc
   return { maxDivergence: highest.fundingRate - lowest.fundingRate, highest, lowest };
 }
 
+async function getBinanceMarketData(symbol: string): Promise<CrossExchangeMarketData> {
+  const [funding, oi, ticker24hr] = await Promise.all([
+    binanceProxy.getCurrentFundingRateNative(symbol),
+    binanceProxy.getOpenInterestNative(symbol),
+    binanceProxy.getTicker24hrNative(symbol),
+  ]);
+  return {
+    fundingRate: parseFloat(funding.lastFundingRate),
+    lastPrice: parseFloat(funding.markPrice),
+    openInterest: parseFloat(oi.openInterest),
+    change24hPct: parseFloat(ticker24hr.priceChangePercent) / 100,
+  };
+}
+
 export function registerCrossExchangeTools(server: McpServer): void {
   registerSafeTool(
     server,
@@ -55,13 +65,13 @@ export function registerCrossExchangeTools(server: McpServer): void {
     {
       title: "Bandingkan Funding Rate Antar Exchange (Binance/Bybit/OKX/Hyperliquid)",
       description:
-        "Bandingkan funding rate + last price satu pair across Binance, Bybit, OKX, dan Hyperliquid dalam SATU " +
-        "tool call -- deteksi divergensi funding (indikasi arbitrase atau sentimen beda antar platform) dan " +
-        "cross-confirm sinyal binance_detect_mm_activity (sinyal kuat di Binance doang vs muncul di semua " +
-        "exchange = confidence beda). Symbol pakai format Binance (BTCUSDT), otomatis di-mapping ke format " +
-        "masing-masing exchange -- kalau pair gak listed di exchange tertentu (umum buat altcoin kecil), baris " +
-        "itu ditandai gagal/gak tersedia TANPA gagalin exchange lain. HANYA funding rate + last price (bukan " +
-        "OI/24h change -- field itu gak seragam antar exchange, di luar scope tool ini).",
+        "Bandingkan funding rate, last price, open interest, dan 24h change satu pair across Binance, Bybit, OKX, " +
+        "dan Hyperliquid dalam SATU tool call -- deteksi divergensi funding (indikasi arbitrase atau sentimen " +
+        "beda antar platform), lihat DI MANA leverage paling menumpuk (OI per exchange), dan cross-confirm sinyal " +
+        "binance_detect_mm_activity (sinyal kuat di Binance doang vs muncul di semua exchange = confidence beda). " +
+        "Symbol pakai format Binance (BTCUSDT), otomatis di-mapping ke format masing-masing exchange -- kalau pair " +
+        "gak listed di exchange tertentu (umum buat altcoin kecil), baris itu ditandai gagal/gak tersedia TANPA " +
+        "gagalin exchange lain.",
       inputSchema: { symbol: symbolSchema },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -72,21 +82,19 @@ export function registerCrossExchangeTools(server: McpServer): void {
         const hlSymbol = toExchangeSymbol(symbol, "hyperliquid");
 
         const [binanceRes, bybitRes, okxRes, hlRes] = await Promise.allSettled([
-          binanceProxy
-            .getCurrentFundingRateNative(symbol)
-            .then((f) => ({ fundingRate: parseFloat(f.lastFundingRate), lastPrice: parseFloat(f.markPrice) })),
+          getBinanceMarketData(symbol),
           bybitSymbol
-            ? getBybitFundingRate(bybitSymbol)
+            ? getBybitMarketData(bybitSymbol)
             : Promise.reject(new Error("Gagal di-mapping ke format symbol Bybit.")),
           okxSymbol
-            ? getOkxFundingRate(okxSymbol)
+            ? getOkxMarketData(okxSymbol)
             : Promise.reject(new Error("Symbol tidak berakhiran USDT -- gak bisa di-mapping ke format OKX.")),
           hlSymbol
-            ? getHyperliquidFundingRate(hlSymbol)
+            ? getHyperliquidMarketData(hlSymbol)
             : Promise.reject(new Error("Symbol tidak berakhiran USDT -- gak bisa di-mapping ke format Hyperliquid.")),
         ]);
 
-        const rows: { exchange: string; result: PromiseSettledResult<{ fundingRate: number; lastPrice: number }> }[] = [
+        const rows: { exchange: string; result: PromiseSettledResult<CrossExchangeMarketData> }[] = [
           { exchange: "Binance", result: binanceRes },
           { exchange: "Bybit", result: bybitRes },
           { exchange: "OKX", result: okxRes },
@@ -95,26 +103,36 @@ export function registerCrossExchangeTools(server: McpServer): void {
 
         const successEntries: FundingRateEntry[] = [];
         const tableRows: string[][] = [];
+        const structuredResults: (CrossExchangeMarketData & { exchange: string })[] = [];
 
         for (const { exchange, result } of rows) {
           if (result.status === "fulfilled") {
-            successEntries.push({ exchange, fundingRate: result.value.fundingRate });
-            tableRows.push([exchange, fmtPct(result.value.fundingRate, 4), fmtPrice(result.value.lastPrice), "ok"]);
+            const data = result.value;
+            successEntries.push({ exchange, fundingRate: data.fundingRate });
+            structuredResults.push({ exchange, ...data });
+            tableRows.push([
+              exchange,
+              fmtPct(data.fundingRate, 4),
+              fmtPrice(data.lastPrice),
+              fmtNum(data.openInterest, 2),
+              `${data.change24hPct >= 0 ? "+" : ""}${(data.change24hPct * 100).toFixed(2)}%`,
+              "ok",
+            ]);
           } else {
             const message = result.reason instanceof Error ? result.reason.message : String(result.reason);
-            tableRows.push([exchange, "-", "-", `gagal: ${message}`]);
+            tableRows.push([exchange, "-", "-", "-", "-", `gagal: ${message}`]);
           }
         }
 
         const divergence = computeFundingDivergence(successEntries);
 
         const builder = new ToolResponseBuilder()
-          .header(`Funding Rate Cross-Exchange — ${symbol}`)
-          .table(["Exchange", "Funding Rate", "Last Price", "Status"], tableRows);
+          .header(`Cross-Exchange — ${symbol}`)
+          .table(["Exchange", "Funding Rate", "Last Price", "Open Interest", "24h Change", "Status"], tableRows);
 
         if (successEntries.length >= 2 && divergence.highest && divergence.lowest) {
           builder
-            .subheader("Divergensi")
+            .subheader("Divergensi Funding")
             .row(
               "Range",
               `${fmtPct(divergence.lowest.fundingRate, 4)} (${divergence.lowest.exchange}) s/d ${fmtPct(divergence.highest.fundingRate, 4)} (${divergence.highest.exchange})`,
@@ -126,10 +144,10 @@ export function registerCrossExchangeTools(server: McpServer): void {
 
         builder
           .note(
-            "Cuma funding rate + last price (bukan OI/24h change). Bybit/OKX/Hyperliquid diakses LANGSUNG tanpa proxy (sudah dites gak kena WAF/geo-block); Binance tetap lewat proxy Vercel seperti tool lain.",
+            "Open Interest dalam base-asset (BTC dst, bukan notional USD) di keempat exchange -- SEHARUSNYA apple-to-apple, tapi belum divalidasi silang ke data live (OKX pakai field oiCcy, bukan oi/kontrak, biar sepadan sama 3 exchange lain -- cek ulang kalau angkanya kelihatan janggal). Bybit/OKX/Hyperliquid diakses LANGSUNG tanpa proxy (sudah dites gak kena WAF/geo-block); Binance tetap lewat proxy Vercel seperti tool lain.",
           )
           .struct("symbol", symbol)
-          .struct("results", successEntries)
+          .struct("results", structuredResults)
           .struct("divergence", divergence);
 
         return builder.build();

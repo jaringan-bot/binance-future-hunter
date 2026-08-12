@@ -1,10 +1,10 @@
 // Client OKX public API -- TIDAK butuh proxy relay, sudah dites langsung
 // dari edge Cloudflare: 200 OK, gak ada WAF/geo-block. OKX pisah funding
-// rate dan ticker (last price) di 2 endpoint beda -- Bybit/Hyperliquid
-// dapat keduanya dalam 1 call.
+// rate, ticker (last price + 24h change), dan open interest di 3 endpoint
+// beda -- Bybit/Hyperliquid dapat semuanya dalam 1 call.
 import { fetchWithRetry } from "./retry.js";
 import { cachedFetch } from "./cache.js";
-import type { CrossExchangeFundingRate } from "./bybitClient.js";
+import type { CrossExchangeMarketData } from "./bybitClient.js";
 
 const CACHE_TTL_SECONDS = 5;
 
@@ -22,6 +22,13 @@ interface OkxFundingRateData {
 interface OkxTickerData {
   instId: string;
   last: string;
+  open24h: string;
+}
+
+interface OkxOpenInterestData {
+  instId: string;
+  oi: string; // dalam CONTRACT, beda skala dari base-asset -- lihat oiCcy
+  oiCcy: string; // dalam base-asset (BTC dst) -- sepadan sama satuan Binance/Bybit/Hyperliquid
 }
 
 async function okxGet<T>(url: string): Promise<T[]> {
@@ -36,17 +43,28 @@ async function okxGet<T>(url: string): Promise<T[]> {
   return data.data;
 }
 
-export async function getOkxFundingRate(instId: string): Promise<CrossExchangeFundingRate> {
-  const [fundingList, tickerList] = await Promise.all([
+export async function getOkxMarketData(instId: string): Promise<CrossExchangeMarketData> {
+  const [fundingList, tickerList, oiList] = await Promise.all([
     okxGet<OkxFundingRateData>(`https://www.okx.com/api/v5/public/funding-rate?instId=${encodeURIComponent(instId)}`),
     okxGet<OkxTickerData>(`https://www.okx.com/api/v5/market/ticker?instId=${encodeURIComponent(instId)}`),
+    okxGet<OkxOpenInterestData>(`https://www.okx.com/api/v5/public/open-interest?instId=${encodeURIComponent(instId)}`),
   ]);
 
   const funding = fundingList[0];
   const ticker = tickerList[0];
-  if (!funding || !ticker) {
-    throw new Error(`Instrument ${instId} tidak ditemukan di OKX.`);
+  const oi = oiList[0];
+  if (!funding || !ticker || !oi) {
+    throw new Error(`Instrument ${instId} tidak ditemukan di OKX (funding/ticker/OI tidak lengkap).`);
   }
 
-  return { fundingRate: parseFloat(funding.fundingRate), lastPrice: parseFloat(ticker.last) };
+  const last = parseFloat(ticker.last);
+  const open24h = parseFloat(ticker.open24h);
+  const change24hPct = open24h !== 0 ? (last - open24h) / open24h : 0;
+
+  return {
+    fundingRate: parseFloat(funding.fundingRate),
+    lastPrice: last,
+    openInterest: parseFloat(oi.oiCcy), // base-asset, bukan oi (contract) -- sepadan sama exchange lain
+    change24hPct,
+  };
 }
