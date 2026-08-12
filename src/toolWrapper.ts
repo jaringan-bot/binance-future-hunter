@@ -9,6 +9,29 @@ import type { McpServer, ToolCallback, RegisteredTool } from "@modelcontextproto
 import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 
+// Registry auto-tercatat tiap kali registerSafeTool dipanggil -- dipakai
+// binance_get_tool_catalog (catalog.ts) supaya nama+description tool
+// SELALU sinkron otomatis, gak perlu update manual tiap nambah/hapus tool.
+// Di-reset tiap awal createServer() (server.ts) -- karena createServer()
+// jalan ulang tiap request (worker stateless per-request), registry
+// otomatis kebentuk lengkap lagi sebelum tool manapun dipanggil dalam
+// request yang sama.
+export interface ToolRegistryEntry {
+  name: string;
+  title?: string;
+  description?: string;
+}
+
+let registry: ToolRegistryEntry[] = [];
+
+export function resetToolRegistry(): void {
+  registry = [];
+}
+
+export function getToolRegistry(): ToolRegistryEntry[] {
+  return registry;
+}
+
 interface SafeToolConfig<
   OutputArgs extends ZodRawShapeCompat | AnySchema,
   InputArgs extends undefined | ZodRawShapeCompat | AnySchema,
@@ -30,6 +53,8 @@ export function registerSafeTool<
   config: SafeToolConfig<OutputArgs, InputArgs>,
   cb: ToolCallback<InputArgs>,
 ): RegisteredTool {
+  registry.push({ name, title: config.title, description: config.description });
+
   const wrapped = (async (...args: Parameters<ToolCallback<InputArgs>>) => {
     const start = Date.now();
     const firstArg = args[0] as Record<string, unknown> | undefined;

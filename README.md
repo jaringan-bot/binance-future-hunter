@@ -138,8 +138,8 @@ kredensial atau setup tambahan buat 3 exchange itu.
 | `binance_detect_mm_activity` | Skor + tier (Weak/Moderate/Strong/Extreme) dari 6 sinyal MM/whale sekaligus (absorption, spoofing heuristic, stop-hunt heuristic, basis arbitrage, OI divergence, funding extreme) — ganti 5-6 tool call manual. **Skor spoofing & stop-hunt cuma heuristik 1-snapshot**, lihat [Keterbatasan](#keterbatasan-yang-jujur-perlu-diketahui) | Binance native |
 | `binance_market_regime` | Klasifikasi kondisi pasar: TRENDING_UP/DOWN, RANGING, BREAKOUT, ACCUMULATION, DISTRIBUTION — pakai ADX(14), tren OI, CVD, spike volatilitas/volume | Binance native |
 | `binance_backtest_signal` | Validasi empiris sinyal `binance_detect_mm_activity`: win rate/avg return/max drawdown dari histori sinyal D1 (watchlist tetap), forward return dihitung on-demand dari klines historis | D1 + Binance native |
-| `whalescope_compare_funding_across_exchanges` | Bandingkan funding rate + last price 1 pair across Binance/Bybit/OKX/Hyperliquid, deteksi divergensi — cross-confirm sinyal MM detection antar exchange. Satu-satunya tool yang BUKAN Binance-only | Binance native + Bybit + OKX + Hyperliquid |
-| `binance_get_tool_catalog` | Daftar semua tool + kategori/token-cost/use-case, filter per kategori — cek ini dulu sebelum manggil banyak tool individual | Statis |
+| `whalescope_compare_funding_across_exchanges` | Bandingkan funding rate, last price, open interest, 24h change 1 pair across Binance/Bybit/OKX/Hyperliquid, deteksi divergensi — cross-confirm sinyal MM detection antar exchange. Satu-satunya tool yang BUKAN Binance-only | Binance native + Bybit + OKX + Hyperliquid |
+| `binance_get_tool_catalog` | Daftar semua tool + kategori/token-cost/use-case, filter per kategori — cek ini dulu sebelum manggil banyak tool individual. Nama+description auto dari tool registry (selalu akurat), kategori/token-cost tetap manual | Semi-otomatis |
 
 ## Framework Analisis: Deteksi Market Maker & Whale
 
@@ -230,11 +230,25 @@ Detail penuh (termasuk raw data test per klaim): Section 10,
   size kecil (di bawah ~20 sinyal) berarti confidence rendah, jangan
   simpulkan sinyal "reliable" dari sedikit data historis (baru mulai
   terkumpul dari kapan fitur ini deploy, bukan retroaktif).
-- **`whalescope_compare_funding_across_exchanges`: cuma funding rate + last
-  price**, BUKAN OI/24h change (field itu gak seragam antar 4 exchange,
-  sengaja di luar scope). Symbol mapping Binance→exchange lain best-effort
-  (strip suffix USDT) — pair kecil yang gak listed di Bybit/OKX/Hyperliquid
-  bakal muncul "gagal" di baris itu, bukan bikin tool call gagal total.
+- **`whalescope_compare_funding_across_exchanges`: Open Interest belum
+  divalidasi silang ke data live** antar 4 exchange (SEHARUSNYA base-asset
+  di semua exchange termasuk OKX yang pakai field `oiCcy`, tapi belum ada
+  pengecekan langsung — cek ulang kalau angkanya kelihatan janggal). Symbol
+  mapping Binance→exchange lain best-effort (strip suffix USDT) — pair
+  kecil yang gak listed di Bybit/OKX/Hyperliquid bakal muncul "gagal" di
+  baris itu, bukan bikin tool call gagal total.
+- **Rate limit self-throttle ke proxy Binance itu best-effort, BUKAN hard
+  global limiter** — counter in-memory per-isolate (`src/rateLimiter.ts`),
+  efektif SELAMA isolate yang sama dipakai ulang buat request beruntun,
+  TAPI worker ini stateless per-request jadi bukan jaminan keras
+  cross-isolate. Threshold 200 request/menit, count-based (bukan
+  weight-based per-endpoint kayak limit asli Binance).
+- **`binance_get_tool_catalog` SEMI-otomatis** — nama+description SELALU
+  akurat (ditarik dari tool registry, gak pernah basi/ketinggalan). Tapi
+  category/token-cost/dependencies TETAP manual (`CATALOG_METADATA` di
+  `src/tools/catalog.ts`) — tool baru yang belum di-curated bakal muncul
+  dengan category `"uncategorized"`, tetap kelihatan (gak ke-omit diam-diam)
+  tapi belum ter-kategorisasi rapi.
 
 ## Setup Coinalyze API Key (wajib, sekali saja)
 
