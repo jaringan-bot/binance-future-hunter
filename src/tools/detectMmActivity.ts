@@ -10,15 +10,20 @@
 //   (Coinalyze) rate-limited + gak granular harga. Jadi dua skor ini
 //   heuristik dari 1 snapshot order book / klines aja, BUKAN true detection
 //   -- ini didokumentasikan eksplisit di description tool & evidence text.
-// - Basis arbitrage pakai z-score kalau symbol ada di histori
-//   (BASIS_HISTORY_WATCHLIST, dari basisHistory.ts), fallback ke threshold
-//   sederhana untuk pair lain (histori basis cuma ada buat watchlist tetap).
+// - Basis arbitrage pakai z-score kalau symbol ada di watchlist (SNAPSHOT_WATCHLIST,
+//   shared.ts) yang punya histori di D1 (market_snapshots), fallback ke
+//   threshold sederhana untuk pair lain.
+//
+// computeMmSignals() diekstrak jadi fungsi terpisah (bukan cuma logic inline
+// di handler tool) supaya bisa dipakai ULANG oleh Cron signal-snapshot
+// (src/index.ts scheduled()) buat isi signal_history di D1 -- dipakai
+// binance_backtest_signal. Satu sumber logic, dua pemanggil.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as binanceProxy from "../binanceProxyClient.js";
-import { symbolSchema, errorResult } from "../shared.js";
+import { symbolSchema, errorResult, SNAPSHOT_WATCHLIST } from "../shared.js";
 import { computeCvdFromTrades, summarizeKlines } from "../toolHelpers.js";
 import { getPairThreshold } from "./config.js";
-import { BASIS_HISTORY_WATCHLIST, readBasisHistory } from "./basisHistory.js";
+import { queryMarketSnapshots } from "../d1Client.js";
 import { registerSafeTool } from "../toolWrapper.js";
 import { ToolResponseBuilder } from "../responseBuilder.js";
 import { fmtPct, fmtNum } from "../format.js";
@@ -165,6 +170,97 @@ export function classifyTier(totalScore: number): MmTier {
   return "Extreme";
 }
 
+export interface MmSignals {
+  absorption: SignalScore;
+  spoofing: SignalScore;
+  stopHunt: SignalScore;
+  basisArb: SignalScore;
+  oiDivergence: SignalScore;
+  fundingExtreme: SignalScore;
+}
+
+export async function computeMmSignals(symbol: string): Promise<MmSignals> {
+  const [orderBook, aggTrades, ticker24hr, oiCurrent, oiHist, funding, klines, threshold] = await Promise.all([
+    binanceProxy.getOrderBookDepth(symbol, 20),
+    binanceProxy.getAggTrades(symbol, 100),
+    binanceProxy.getTicker24hrNative(symbol),
+    binanceProxy.getOpenInterestNative(symbol),
+    binanceProxy.getOpenInterestHistNative(symbol, "1h", 2),
+    binanceProxy.getCurrentFundingRateNative(symbol),
+    binanceProxy.getKlinesNative(symbol, "1h", 20),
+    getPairThreshold(symbol),
+  ]);
+
+  // Basis: butuh harga spot, TANPA harga spot skor basis fallback ke
+  // "tidak tersedia" (0.1) dan dicatat di evidence -- banyak pair
+  // futures-only gak listed di Spot sama sekali.
+  let spotPrice: number | null = null;
+  try {
+    const spot = await binanceProxy.getSpotPrice(symbol);
+    spotPrice = parseFloat(spot.price);
+  } catch {
+    spotPrice = null;
+  }
+
+  const cvd = computeCvdFromTrades(aggTrades);
+  const { changePct: priceChangePct, candles } = summarizeKlines(klines);
+  const lastCandle = candles[candles.length - 1];
+  const prevCandle = candles[candles.length - 2];
+
+  const oiCurrentVal = parseFloat(oiCurrent.openInterest);
+  const oiPrevVal = parseFloat(oiHist[0]?.sumOpenInterest ?? String(oiCurrentVal));
+  const oiChangePct = oiPrevVal !== 0 ? ((oiCurrentVal - oiPrevVal) / oiPrevVal) * 100 : 0;
+
+  const markPrice = parseFloat(funding.markPrice);
+  const fundingRate = parseFloat(funding.lastFundingRate);
+  const basis = spotPrice !== null && spotPrice !== 0 ? (markPrice - spotPrice) / spotPrice : 0;
+
+  let basisZScore: number | undefined;
+  if (spotPrice !== null && (SNAPSHOT_WATCHLIST as readonly string[]).includes(symbol)) {
+    const history = await queryMarketSnapshots(symbol, 24);
+    const values = history.map((p) => p.basis).filter((v): v is number => v !== null);
+    if (values.length >= 10) {
+      const mean = values.reduce((a, b) => a + b, 0) / values.length;
+      const variance = values.reduce((a, b) => a + (b - mean) ** 2, 0) / values.length;
+      const std = Math.sqrt(variance);
+      basisZScore = std > 0 ? (basis - mean) / std : 0;
+    }
+  }
+
+  const bestBidQty = orderBook.bids[0] ? parseFloat(orderBook.bids[0][1]) : 0;
+  const bestAskQty = orderBook.asks[0] ? parseFloat(orderBook.asks[0][1]) : 0;
+  const bestBidPrice = orderBook.bids[0] ? parseFloat(orderBook.bids[0][0]) : 0;
+  const bestAskPrice = orderBook.asks[0] ? parseFloat(orderBook.asks[0][0]) : 0;
+  const spreadPct = bestBidPrice > 0 ? ((bestAskPrice - bestBidPrice) / bestBidPrice) * 100 : 0;
+  const volume24h = parseFloat(ticker24hr.volume);
+
+  return {
+    absorption: calculateAbsorptionScore({ cvdBuyPct: cvd.buyPct, priceChangePct, oiChangePct }),
+    spoofing: calculateSpoofingScore({ bestBidQty, bestAskQty, spreadPct, volume24h }),
+    stopHunt: lastCandle && prevCandle
+      ? calculateStopHuntScore({
+          high: lastCandle.high,
+          low: lastCandle.low,
+          open: lastCandle.open,
+          close: lastCandle.close,
+          prevOpen: prevCandle.open,
+          prevClose: prevCandle.close,
+        })
+      : { score: 0.1, evidence: "Candle tidak cukup untuk analisis stop-hunt." },
+    basisArb: calculateBasisArbScore({
+      basis,
+      fundingRate,
+      threshold: threshold?.basisThreshold ?? DEFAULT_BASIS_THRESHOLD,
+      basisZScore,
+    }),
+    oiDivergence: calculateOiDivergenceScore({ oiChangePct, priceChangePct }),
+    fundingExtreme: calculateFundingExtremeScore({
+      fundingRate,
+      threshold: threshold?.fundingThreshold ?? DEFAULT_FUNDING_THRESHOLD,
+    }),
+  };
+}
+
 export function registerMmDetectionTools(server: McpServer): void {
   registerSafeTool(
     server,
@@ -178,93 +274,15 @@ export function registerMmDetectionTools(server: McpServer): void {
         "diverifikasi manual. PENTING: skor spoofing & stop-hunt di sini heuristik dari 1 snapshot order " +
         "book/klines (BUKAN true detection -- butuh 2 snapshot order book <3 detik dan data liquidation " +
         "granular-harga yang belum tersedia di proxy ini), jadi confidence dua sinyal itu lebih rendah dari 4 " +
-        "sinyal lain. Basis arbitrage pakai z-score histori kalau symbol BTCUSDT/ETHUSDT/SOLUSDT (ada basis " +
-        "history), fallback threshold sederhana untuk pair lain.",
+        "sinyal lain. Basis arbitrage pakai z-score histori kalau symbol ada di watchlist tetap (ada histori di " +
+        "D1), fallback threshold sederhana untuk pair lain. Snapshot sinyal yang sama juga disimpan tiap 5 menit " +
+        "ke D1 untuk watchlist -- lihat binance_backtest_signal buat validasi empiris historis.",
       inputSchema: { symbol: symbolSchema },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ symbol }) => {
       try {
-        const [orderBook, aggTrades, ticker24hr, oiCurrent, oiHist, funding, klines, threshold] = await Promise.all([
-          binanceProxy.getOrderBookDepth(symbol, 20),
-          binanceProxy.getAggTrades(symbol, 100),
-          binanceProxy.getTicker24hrNative(symbol),
-          binanceProxy.getOpenInterestNative(symbol),
-          binanceProxy.getOpenInterestHistNative(symbol, "1h", 2),
-          binanceProxy.getCurrentFundingRateNative(symbol),
-          binanceProxy.getKlinesNative(symbol, "1h", 20),
-          getPairThreshold(symbol),
-        ]);
-
-        // Basis: butuh harga spot, TANPA harga spot skor basis fallback ke
-        // "tidak tersedia" (0.1) dan dicatat di evidence -- banyak pair
-        // futures-only gak listed di Spot sama sekali.
-        let spotPrice: number | null = null;
-        try {
-          const spot = await binanceProxy.getSpotPrice(symbol);
-          spotPrice = parseFloat(spot.price);
-        } catch {
-          spotPrice = null;
-        }
-
-        const cvd = computeCvdFromTrades(aggTrades);
-        const { changePct: priceChangePct, candles } = summarizeKlines(klines);
-        const lastCandle = candles[candles.length - 1];
-        const prevCandle = candles[candles.length - 2];
-
-        const oiCurrentVal = parseFloat(oiCurrent.openInterest);
-        const oiPrevVal = parseFloat(oiHist[0]?.sumOpenInterest ?? String(oiCurrentVal));
-        const oiChangePct = oiPrevVal !== 0 ? ((oiCurrentVal - oiPrevVal) / oiPrevVal) * 100 : 0;
-
-        const markPrice = parseFloat(funding.markPrice);
-        const fundingRate = parseFloat(funding.lastFundingRate);
-        const basis = spotPrice !== null && spotPrice !== 0 ? (markPrice - spotPrice) / spotPrice : 0;
-
-        let basisZScore: number | undefined;
-        if (spotPrice !== null && (BASIS_HISTORY_WATCHLIST as readonly string[]).includes(symbol)) {
-          const history = await readBasisHistory(symbol);
-          if (history.length >= 10) {
-            const values = history.map((p) => p.basis);
-            const mean = values.reduce((a, b) => a + b, 0) / values.length;
-            const variance = values.reduce((a, b) => a + (b - mean) ** 2, 0) / values.length;
-            const std = Math.sqrt(variance);
-            basisZScore = std > 0 ? (basis - mean) / std : 0;
-          }
-        }
-
-        const bestBidQty = orderBook.bids[0] ? parseFloat(orderBook.bids[0][1]) : 0;
-        const bestAskQty = orderBook.asks[0] ? parseFloat(orderBook.asks[0][1]) : 0;
-        const bestBidPrice = orderBook.bids[0] ? parseFloat(orderBook.bids[0][0]) : 0;
-        const bestAskPrice = orderBook.asks[0] ? parseFloat(orderBook.asks[0][0]) : 0;
-        const spreadPct = bestBidPrice > 0 ? ((bestAskPrice - bestBidPrice) / bestBidPrice) * 100 : 0;
-        const volume24h = parseFloat(ticker24hr.volume);
-
-        const signals = {
-          absorption: calculateAbsorptionScore({ cvdBuyPct: cvd.buyPct, priceChangePct, oiChangePct }),
-          spoofing: calculateSpoofingScore({ bestBidQty, bestAskQty, spreadPct, volume24h }),
-          stopHunt: lastCandle && prevCandle
-            ? calculateStopHuntScore({
-                high: lastCandle.high,
-                low: lastCandle.low,
-                open: lastCandle.open,
-                close: lastCandle.close,
-                prevOpen: prevCandle.open,
-                prevClose: prevCandle.close,
-              })
-            : { score: 0.1, evidence: "Candle tidak cukup untuk analisis stop-hunt." },
-          basisArb: calculateBasisArbScore({
-            basis,
-            fundingRate,
-            threshold: threshold?.basisThreshold ?? DEFAULT_BASIS_THRESHOLD,
-            basisZScore,
-          }),
-          oiDivergence: calculateOiDivergenceScore({ oiChangePct, priceChangePct }),
-          fundingExtreme: calculateFundingExtremeScore({
-            fundingRate,
-            threshold: threshold?.fundingThreshold ?? DEFAULT_FUNDING_THRESHOLD,
-          }),
-        };
-
+        const signals = await computeMmSignals(symbol);
         const totalScore = Object.values(signals).reduce((sum, s) => sum + s.score, 0);
         const tier = classifyTier(totalScore);
         const activeSignals = Object.entries(signals)

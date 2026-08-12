@@ -91,12 +91,14 @@ Setup section below.
 
 **Caching & state, no extra credentials needed.** Upstream responses
 (funding rate, klines, OI, etc. — except order book & aggregate trades,
-which need strict freshness) are cached briefly (5 seconds) via Cloudflare
-Workers' built-in Cache API, no setup required. Per-pair custom thresholds
-and basis time-series history are stored in Workers KV (binding
-`CONFIG_KV`, already included in this repo's `wrangler.toml`) — basis
-snapshots are filled in automatically by a Cron Trigger every 5 minutes for
-a fixed watchlist (BTCUSDT, ETHUSDT, SOLUSDT).
+which need strict freshness) are cached in tiers (5 seconds to 1 hour
+depending on the endpoint) via Cloudflare Workers' built-in Cache API, no
+setup required. Per-pair custom thresholds are stored in Workers KV
+(binding `CONFIG_KV`). Time-series data (basis+funding+OI, and
+`binance_detect_mm_activity`'s 6 signal scores) is stored in D1 (binding
+`DB`) — filled in automatically by a Cron Trigger every 5 minutes for a
+fixed 10-pair watchlist (BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT,
+DOGEUSDT, ADAUSDT, AVAXUSDT, LINKUSDT, LTCUSDT).
 
 ## What's provided
 
@@ -130,9 +132,10 @@ a fixed watchlist (BTCUSDT, ETHUSDT, SOLUSDT).
 | `binance_compare_symbols` | Compare one metric (funding rate, 24h % change, OI, top-trader ratio, taker ratio) across 2-10 pairs at once, sorted from most extreme | Binance native |
 | `binance_set_pair_threshold` | Set a custom funding/basis threshold per pair (overrides the ±0.03%/±0.05% default), stored in Workers KV | Workers KV |
 | `binance_get_pair_threshold` | Check the custom threshold already set for a pair | Workers KV |
-| `binance_get_basis_history` | Time-series futures-vs-spot basis history (Cron snapshot every 5 min), fixed watchlist BTCUSDT/ETHUSDT/SOLUSDT — detects "basis widens then reverts" without manual repeated checks | Workers KV + Cron Trigger |
+| `binance_get_basis_history` | Time-series basis+funding+OI history (Cron snapshot every 5 min to D1), fixed 10-pair watchlist — detects "basis widens then reverts" without manual repeated checks | D1 + Cron Trigger |
 | `binance_detect_mm_activity` | Score + tier (Weak/Moderate/Strong/Extreme) from 6 MM/whale signals at once (absorption, spoofing heuristic, stop-hunt heuristic, basis arbitrage, OI divergence, funding extreme) — replaces 5-6 manual tool calls. **Spoofing & stop-hunt scores are 1-snapshot heuristics only**, see [Honest limitations](#honest-limitations-you-should-know) | Binance native |
 | `binance_market_regime` | Classifies current market condition: TRENDING_UP/DOWN, RANGING, BREAKOUT, ACCUMULATION, DISTRIBUTION — uses ADX(14), OI trend, CVD, volatility/volume spike ratio | Binance native |
+| `binance_backtest_signal` | Empirically validates `binance_detect_mm_activity` signals: win rate/avg return/max drawdown from D1 signal history (fixed watchlist), forward return computed on-demand from historical klines | D1 + Binance native |
 | `binance_get_tool_catalog` | Lists all tools with category/token-cost/use-case, filterable by category — check this before calling many individual tools | Static |
 
 ## Analysis Framework: Market Maker & Whale Detection
@@ -209,9 +212,25 @@ Full detail (including raw test data per claim): Section 10,
   noted in the evidence text of every response.
 - **`binance_market_regime`: volatility/volume spike ratios are computed
   relative to the same fetch window** (last 10 candles vs the prior 10),
-  not a long-term historical baseline — there's no general per-pair
-  time-series storage yet (only `binance_get_basis_history`, which is
-  watchlist-only).
+  not a long-term historical baseline.
+- **D1 time-series (`market_snapshots`, `signal_history`) covers ONLY the
+  fixed 10-pair watchlist** — pairs outside it are never snapshotted by the
+  cron, so `binance_get_basis_history` and `binance_backtest_signal` only
+  work for those 10 pairs.
+- **No pruning/retention for D1 rows yet** — rows grow unbounded over time
+  (at 10 pairs, roughly ~6,048 combined rows/day across both tables; D1's
+  free tier of 5M writes/day and 5GB storage has plenty of headroom for a
+  long while, but this isn't a permanent solution).
+- **The KV→D1 basis-history migration does NOT backfill old data** — basis
+  history that was stored in Workers KV before this migration is gone; the
+  24-hour window refills naturally a few hours after deploy.
+- **`binance_backtest_signal`: forward returns are computed ON-DEMAND from
+  historical klines** (nearest 1h candle close to the target time), NOT a
+  simulation of real order execution — slippage/fees/partial fills aren't
+  accounted for. Small sample sizes (under ~20 signals) mean low
+  confidence — don't conclude a signal is "reliable" from little historical
+  data (data only starts accumulating from when this feature was deployed,
+  not retroactively).
 
 ## Setup: Coinalyze API Key (required, one-time)
 
@@ -287,9 +306,31 @@ npx wrangler kv namespace create WHALESCOPE_CONFIG
 Copy the resulting `id` into `[[kv_namespaces]]` in `wrangler.toml`,
 replacing the old `id` value (leave the binding name as `CONFIG_KV` — the
 worker code refers to that binding name, not the id). Without this,
-`binance_set_pair_threshold`, `binance_get_pair_threshold`, and
-`binance_get_basis_history` will fail with a clear error ("CONFIG_KV belum
-ke-bind di worker").
+`binance_set_pair_threshold` and `binance_get_pair_threshold` will fail
+with a clear error ("CONFIG_KV belum ke-bind di worker").
+
+## Setup: Workers D1 (required, one-time — if you fork/deploy this repo yourself)
+
+Same as KV above, the D1 `database_id` in this repo's `wrangler.toml` is
+tied to the Cloudflare account that created it. If you fork/deploy to your
+own account:
+
+```bash
+npx wrangler d1 create whalescope-mcp-db
+```
+
+Copy the resulting `database_id` into `[[d1_databases]]` in
+`wrangler.toml` (leave the binding as `DB`), then run the migration:
+
+```bash
+npx wrangler d1 migrations apply whalescope-mcp-db --remote
+```
+
+Without this, `binance_get_basis_history` and `binance_backtest_signal`
+will fail with a clear error ("D1 database (binding DB) belum ke-bind di
+worker"), and the basis+MM-signal Cron Trigger (every 5 min) will fail
+silently each tick (logged to Workers Logs, doesn't break the `/mcp`
+endpoint).
 
 ## Setup: Automated Deploy (GitHub Actions → Cloudflare Workers)
 

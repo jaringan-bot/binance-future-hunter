@@ -20,6 +20,7 @@ const CATEGORY_ENUM = [
   "composite",
   "config",
   "history",
+  "backtest",
   "meta",
 ] as const;
 type Category = (typeof CATEGORY_ENUM)[number];
@@ -63,7 +64,8 @@ const CATALOG: CatalogEntry[] = [
   { name: "binance_market_regime", category: "composite", tokenCost: "medium", useCase: "Klasifikasi TRENDING/RANGING/BREAKOUT/ACCUMULATION/DISTRIBUTION", dependencies: ["technical", "oi", "trades"] },
   { name: "binance_set_pair_threshold", category: "config", tokenCost: "low", useCase: "Set threshold funding/basis custom per pair", dependencies: [] },
   { name: "binance_get_pair_threshold", category: "config", tokenCost: "low", useCase: "Cek threshold custom yang sudah di-set", dependencies: [] },
-  { name: "binance_get_basis_history", category: "history", tokenCost: "medium", useCase: "Histori basis futures-vs-spot dari snapshot cron 5 menit (watchlist BTC/ETH/SOL saja)", dependencies: [] },
+  { name: "binance_get_basis_history", category: "history", tokenCost: "medium", useCase: "Histori basis+funding+OI dari snapshot cron 5 menit ke D1 (watchlist tetap 10 pair saja)", dependencies: [] },
+  { name: "binance_backtest_signal", category: "backtest", tokenCost: "high", useCase: "Validasi empiris sinyal MM detection: win rate/avg return/max drawdown dari histori sinyal D1 + forward return on-demand", dependencies: ["history", "technical"] },
   { name: "binance_get_tool_catalog", category: "meta", tokenCost: "low", useCase: "Daftar semua tool + kategori/use-case (tool ini sendiri)", dependencies: [] },
 ];
 

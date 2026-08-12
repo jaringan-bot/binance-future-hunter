@@ -3,7 +3,9 @@ import { createServer } from "./server.js";
 import * as coinalyze from "./coinalyzeClient.js";
 import * as binanceProxy from "./binanceProxyClient.js";
 import * as kvConfig from "./kvConfig.js";
-import { appendBasisSnapshot, BASIS_HISTORY_WATCHLIST } from "./tools/basisHistory.js";
+import * as d1Client from "./d1Client.js";
+import { SNAPSHOT_WATCHLIST } from "./shared.js";
+import { computeMmSignals } from "./tools/detectMmActivity.js";
 
 interface Env {
   COINALYZE_API_KEY?: string;
@@ -15,6 +17,7 @@ interface Env {
   PROXY_URL_2?: string;
   PROXY_SECRET_2?: string;
   CONFIG_KV?: KVNamespace;
+  DB?: D1Database;
 }
 
 // Server ini STATELESS (sessionIdGenerator: undefined): setiap request
@@ -43,6 +46,7 @@ export default {
     coinalyze.setApiKey(env.COINALYZE_API_KEY);
     binanceProxy.setProxyConfig(env.PROXY_URL, env.PROXY_SECRET, env.PROXY_URL_2, env.PROXY_SECRET_2);
     kvConfig.setKvNamespace(env.CONFIG_KV);
+    d1Client.setD1Database(env.DB);
     const url = new URL(request.url);
 
     if (request.method === "OPTIONS") {
@@ -97,29 +101,58 @@ export default {
   },
 
   // Cron Trigger (lihat [triggers] di wrangler.toml, jalan tiap 5 menit) --
-  // snapshot basis futures-vs-spot buat watchlist tetap (BASIS_HISTORY_WATCHLIST),
-  // disimpan ke Workers KV lewat appendBasisSnapshot(). Dibaca kembali oleh
-  // tool binance_get_basis_history. Satu symbol gagal snapshot TIDAK
-  // menggagalkan symbol lain (try/catch per-symbol).
+  // dua hal per symbol di SNAPSHOT_WATCHLIST (shared.ts, 10 pair), disimpan
+  // ke D1: (1) market snapshot (basis futures-vs-spot + funding + OI, dibaca
+  // binance_get_basis_history), (2) 6 skor sinyal MM lewat computeMmSignals()
+  // (dibaca binance_backtest_signal). Satu symbol gagal TIDAK menggagalkan
+  // symbol lain (try/catch per-symbol, dan basis-snapshot terpisah dari
+  // signal-snapshot supaya satu gagal gak gugurin yang lain).
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     coinalyze.setApiKey(env.COINALYZE_API_KEY);
     binanceProxy.setProxyConfig(env.PROXY_URL, env.PROXY_SECRET, env.PROXY_URL_2, env.PROXY_SECRET_2);
     kvConfig.setKvNamespace(env.CONFIG_KV);
+    d1Client.setD1Database(env.DB);
 
     ctx.waitUntil(
       Promise.all(
-        BASIS_HISTORY_WATCHLIST.map(async (symbol) => {
+        SNAPSHOT_WATCHLIST.map(async (symbol) => {
+          const timestamp = Date.now();
+
           try {
-            const [spot, futures] = await Promise.all([
+            const [spot, futures, oi] = await Promise.all([
               binanceProxy.getSpotPrice(symbol),
               binanceProxy.getCurrentFundingRateNative(symbol),
+              binanceProxy.getOpenInterestNative(symbol),
             ]);
             const spotPrice = parseFloat(spot.price);
             const markPrice = parseFloat(futures.markPrice);
             const basis = (markPrice - spotPrice) / spotPrice;
-            await appendBasisSnapshot(symbol, { timestamp: Date.now(), spotPrice, markPrice, basis });
+            await d1Client.insertMarketSnapshot({
+              symbol,
+              timestamp,
+              spotPrice,
+              markPrice,
+              basis,
+              fundingRate: parseFloat(futures.lastFundingRate),
+              openInterest: parseFloat(oi.openInterest),
+            });
           } catch (err) {
-            console.error(`[cron] gagal snapshot basis ${symbol}:`, (err as Error)?.message ?? String(err));
+            console.error(`[cron] gagal market snapshot ${symbol}:`, (err as Error)?.message ?? String(err));
+          }
+
+          try {
+            const signals = await computeMmSignals(symbol);
+            await d1Client.insertSignalSnapshots(
+              Object.entries(signals).map(([signalType, s]) => ({
+                symbol,
+                timestamp,
+                signalType,
+                score: s.score,
+                evidence: s.evidence,
+              })),
+            );
+          } catch (err) {
+            console.error(`[cron] gagal signal snapshot ${symbol}:`, (err as Error)?.message ?? String(err));
           }
         }),
       ),
