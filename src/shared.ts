@@ -49,9 +49,19 @@ export const FUTURES_DATA_PERIOD_ENUM = [
   "1d",
 ] as const;
 
+// Batasan divalidasi ke data riil (exchangeInfo Binance Futures, 2026-08-12):
+// simbol terpanjang saat ini 17 char (CSOPSKHYNIX2LUSDT), jadi max 20 masih
+// ada headroom. Regex sengaja izinin underscore -- kontrak quarterly/dated
+// (misal BTCUSDT_260925) pakai underscore, bukan cuma alfanumerik murni.
+// Tanpa batas ini, symbol dipakai langsung sebagai bagian KV key
+// (`threshold:${symbol}`, `basis_history:${symbol}`) -- string sangat
+// panjang bisa lewat limit key KV (512 byte) tanpa pesan error yang jelas.
 export const symbolSchema = z
   .string()
   .toUpperCase()
+  .min(1, "Symbol tidak boleh kosong")
+  .max(20, "Symbol Binance Futures maksimal 20 karakter (simbol terpanjang saat ini 17 karakter)")
+  .regex(/^[A-Z0-9_]+$/, "Symbol cuma boleh huruf, angka, dan underscore (contoh: BTCUSDT, BTCUSDT_260925)")
   .describe(
     "Simbol pair Binance Futures, contoh: BTCUSDT, ETHUSDT. Harus pair perpetual yang terdaftar di Binance USDS-M Futures.",
   );
