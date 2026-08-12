@@ -126,40 +126,6 @@ function rangeFor(intervalKey: string, limit: number): { from: number; to: numbe
   return { from, to };
 }
 
-export interface FundingRateValue {
-  symbol: string;
-  value: number;
-  update: number;
-}
-
-export interface OpenInterestValue {
-  symbol: string;
-  value: number;
-  update: number;
-}
-
-export interface OhlcBar {
-  t: number;
-  o: number;
-  h: number;
-  l: number;
-  c: number;
-}
-
-export interface OhlcvBar extends OhlcBar {
-  v: number;
-  bv: number;
-  tx: number;
-  btx: number;
-}
-
-export interface LongShortBar {
-  t: number;
-  r: number;
-  l: number;
-  s: number;
-}
-
 export interface LiquidationBar {
   t: number;
   l: number;
@@ -169,79 +135,6 @@ export interface LiquidationBar {
 interface HistorySeries<T> {
   symbol: string;
   history: T[];
-}
-
-export async function getCurrentFundingRate(symbol: string): Promise<FundingRateValue> {
-  const sym = toCoinalyzeSymbol(symbol);
-  const data = await callCoinalyze<FundingRateValue[]>("/funding-rate", { symbols: sym });
-  if (data.length === 0) {
-    throw new CoinalyzeApiError(`Tidak ada data funding rate untuk ${symbol}.`, undefined, "/funding-rate");
-  }
-  return data[0];
-}
-
-export async function getFundingRateHistory(
-  symbol: string,
-  intervalKey: string,
-  limit: number,
-): Promise<OhlcBar[]> {
-  const sym = toCoinalyzeSymbol(symbol);
-  const interval = INTERVAL_MAP[intervalKey] ?? "1hour";
-  const { from, to } = rangeFor(intervalKey, limit);
-  const data = await callCoinalyze<HistorySeries<OhlcBar>[]>("/funding-rate-history", {
-    symbols: sym,
-    interval,
-    from,
-    to,
-  });
-  return data[0]?.history ?? [];
-}
-
-export async function getCurrentOpenInterest(symbol: string): Promise<OpenInterestValue> {
-  const sym = toCoinalyzeSymbol(symbol);
-  const data = await callCoinalyze<OpenInterestValue[]>("/open-interest", {
-    symbols: sym,
-    convert_to_usd: "false",
-  });
-  if (data.length === 0) {
-    throw new CoinalyzeApiError(`Tidak ada data open interest untuk ${symbol}.`, undefined, "/open-interest");
-  }
-  return data[0];
-}
-
-export async function getOpenInterestHistory(
-  symbol: string,
-  intervalKey: string,
-  limit: number,
-): Promise<OhlcBar[]> {
-  const sym = toCoinalyzeSymbol(symbol);
-  const interval = INTERVAL_MAP[intervalKey] ?? "1hour";
-  const { from, to } = rangeFor(intervalKey, limit);
-  const data = await callCoinalyze<HistorySeries<OhlcBar>[]>("/open-interest-history", {
-    symbols: sym,
-    interval,
-    from,
-    to,
-    convert_to_usd: "false",
-  });
-  return data[0]?.history ?? [];
-}
-
-export async function getLongShortRatioHistory(
-  symbol: string,
-  intervalKey: string,
-  limit: number,
-): Promise<LongShortBar[]> {
-  const sym = toCoinalyzeSymbol(symbol);
-  const interval = INTERVAL_MAP[intervalKey] ?? "1hour";
-  const { from, to } = rangeFor(intervalKey, limit);
-  const data = await callCoinalyze<HistorySeries<LongShortBar>[]>("/long-short-ratio-history", {
-    symbols: sym,
-    interval,
-    from,
-    to,
-  });
-  return data[0]?.history ?? [];
 }
 
 export async function getLiquidationHistory(
@@ -258,23 +151,6 @@ export async function getLiquidationHistory(
     from,
     to,
     convert_to_usd: "false",
-  });
-  return data[0]?.history ?? [];
-}
-
-export async function getOhlcvHistory(
-  symbol: string,
-  intervalKey: string,
-  limit: number,
-): Promise<OhlcvBar[]> {
-  const sym = toCoinalyzeSymbol(symbol);
-  const interval = INTERVAL_MAP[intervalKey] ?? "1hour";
-  const { from, to } = rangeFor(intervalKey, limit);
-  const data = await callCoinalyze<HistorySeries<OhlcvBar>[]>("/ohlcv-history", {
-    symbols: sym,
-    interval,
-    from,
-    to,
   });
   return data[0]?.history ?? [];
 }
