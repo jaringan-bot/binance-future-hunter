@@ -318,6 +318,22 @@ proxy Vercel bekerja. Untuk jalur Coinalyze, ganti `name` ke
 `binance_get_liquidation_history` — kalau itu juga valid, jalur Coinalyze
 bekerja.
 
+## Audit Efisiensi Token
+
+```bash
+npm run token-audit
+```
+
+Manggil worker deployed langsung, ukur ukuran skema tool, ukuran response
+lintas skala `limit`, dan "Information Density Ratio" (data vs boilerplate)
+buat beberapa tool representatif, plus simulasi 1 percakapan multi-turn
+realistis. Bukan bagian `npm test`/CI (hit worker live + Binance/Coinalyze
+via itu) — dipakai manual pas mau cek dampak perubahan tool description/
+format response terhadap konsumsi token. Estimasi token pakai heuristik
+chars/4 (gak ada tokenizer resmi Claude yang di-publish sebagai package),
+jadi angkanya approximate, berguna buat perbandingan relatif (sebelum vs
+sesudah perubahan), bukan angka token exact.
+
 ## Biaya
 
 - Cloudflare Workers: free tier 100.000 request/hari — untuk pemakaian

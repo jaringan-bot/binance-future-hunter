@@ -331,6 +331,22 @@ proxy path works. For the Coinalyze path, change `name` to
 `binance_get_liquidation_history` — if that also returns valid data, the
 Coinalyze path works.
 
+## Token Efficiency Audit
+
+```bash
+npm run token-audit
+```
+
+Calls the deployed worker directly, measures tool schema size, response
+size across `limit` scales, and an "Information Density Ratio" (data vs.
+boilerplate) for a few representative tools, plus a simulated realistic
+multi-turn conversation. Not part of `npm test`/CI (hits the live worker +
+Binance/Coinalyze through it) — used manually to check the token impact of
+tool description or response format changes. Token estimation uses a
+chars/4 heuristic (no publicly published Claude tokenizer package exists),
+so the numbers are approximate — useful for relative comparison
+(before vs. after a change), not exact token counts.
+
 ## Cost
 
 - Cloudflare Workers: free tier of 100,000 requests/day — far more than
