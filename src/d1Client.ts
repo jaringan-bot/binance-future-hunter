@@ -123,3 +123,80 @@ export async function querySignalHistory(
     evidence: r.evidence,
   }));
 }
+
+// request_log -- dasar buat endpoint owner-only GET /admin/usage
+// (src/index.ts). BUKAN dibaca oleh MCP tool manapun (privasi: jangan
+// bocorin IP visitor lain ke sembarang caller MCP).
+export interface RequestLogRow {
+  timestamp: number;
+  ip: string | null;
+  country: string | null;
+  colo: string | null;
+  userAgent: string | null;
+}
+
+interface RawRequestLogRow {
+  timestamp: number;
+  ip: string | null;
+  country: string | null;
+  colo: string | null;
+  user_agent: string | null;
+}
+
+export async function insertRequestLog(row: RequestLogRow): Promise<void> {
+  await requireDb()
+    .prepare("INSERT INTO request_log (timestamp, ip, country, colo, user_agent) VALUES (?, ?, ?, ?, ?)")
+    .bind(row.timestamp, row.ip, row.country, row.colo, row.userAgent)
+    .run();
+}
+
+export interface RequestLogSummary {
+  windowHours: number;
+  totalRequests: number;
+  distinctIps: number;
+  topIps: { ip: string | null; country: string | null; count: number }[];
+  recent: RequestLogRow[];
+}
+
+export async function queryRequestLogSummary(hours: number): Promise<RequestLogSummary> {
+  const cutoff = Date.now() - hours * 3600 * 1000;
+  const database = requireDb();
+
+  const [totals, topIps, recent] = await Promise.all([
+    database
+      .prepare("SELECT COUNT(*) AS total, COUNT(DISTINCT ip) AS distinctIps FROM request_log WHERE timestamp >= ?")
+      .bind(cutoff)
+      .first<{ total: number; distinctIps: number }>(),
+    database
+      .prepare(
+        "SELECT ip, country, COUNT(*) AS count FROM request_log WHERE timestamp >= ? GROUP BY ip ORDER BY count DESC LIMIT 20",
+      )
+      .bind(cutoff)
+      .all<{ ip: string | null; country: string | null; count: number }>(),
+    database
+      .prepare("SELECT * FROM request_log WHERE timestamp >= ? ORDER BY timestamp DESC LIMIT 20")
+      .bind(cutoff)
+      .all<RawRequestLogRow>(),
+  ]);
+
+  return {
+    windowHours: hours,
+    totalRequests: totals?.total ?? 0,
+    distinctIps: totals?.distinctIps ?? 0,
+    topIps: topIps.results,
+    recent: recent.results.map((r) => ({
+      timestamp: r.timestamp,
+      ip: r.ip,
+      country: r.country,
+      colo: r.colo,
+      userAgent: r.user_agent,
+    })),
+  };
+}
+
+// Dipanggil dari scheduled() (index.ts) tiap tick -- request_log bisa
+// growth gak terduga kalau ada traffic asing (beda dari market_snapshots/
+// signal_history yang row-nya kekontrol ketat, watchlist 10 pair tetap).
+export async function pruneOldRequestLogs(cutoffMs: number): Promise<void> {
+  await requireDb().prepare("DELETE FROM request_log WHERE timestamp < ?").bind(cutoffMs).run();
+}

@@ -369,6 +369,32 @@ pesan error jelas ("COINALYZE_API_KEY belum diset") — tool lain gak
 kepengaruh sama sekali. Skip section ini kalau gak butuh liquidation
 history.
 
+## Admin: Usage Log (OPSIONAL)
+
+Worker publik gampang ditemuin (terdaftar di [MCP Server Registry](https://registry.modelcontextprotocol.io/))
+— jadi ada endpoint kecil buat liat siapa aja yang connect. **Ini BUKAN
+MCP tool** (sengaja HTTP endpoint terpisah, gak pernah muncul di
+`tools/list`) — kalau dibikin tool biasa, SIAPA AJA yang connect ke server
+ini bisa liat IP visitor lain, kontradiksi sama tujuannya.
+
+1. Set secret (tanpa ini, endpoint SELALU balik 403 — fitur nonaktif by
+   default, aman):
+   ```bash
+   npx wrangler secret put ADMIN_SECRET
+   ```
+2. Akses:
+   ```bash
+   curl "https://<worker-url>/admin/usage?key=<ADMIN_SECRET>&hours=24"
+   ```
+   Balikin JSON: total request, jumlah IP unik, top 20 IP (+ negara,
+   count), 20 request terakhir mentah. Default window 24 jam, bisa
+   diubah lewat `hours`.
+
+Data disimpan di D1 (`request_log`), di-prune otomatis tiap Cron tick
+buat row lebih dari 30 hari (tabel ini gak dibatasi watchlist tetap kayak
+`market_snapshots`/`signal_history`, jadi bisa growth kalau ada traffic
+asing beneran).
+
 ## Setup Deploy Otomatis (GitHub Actions → Cloudflare Workers)
 
 Repo ini sudah punya workflow di `.github/workflows/deploy.yml` yang otomatis

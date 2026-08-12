@@ -380,6 +380,32 @@ Without this secret, only `binance_get_liquidation_history` fails with a
 clear error ("COINALYZE_API_KEY belum diset") -- no other tool is
 affected. Skip this section if you don't need liquidation history.
 
+## Admin: Usage Log (OPTIONAL)
+
+A public worker is easy to find (listed on the [MCP Server Registry](https://registry.modelcontextprotocol.io/))
+-- so there's a small endpoint to see who's connecting. **This is NOT an
+MCP tool** (deliberately a separate HTTP endpoint, never shows up in
+`tools/list`) -- if it were a regular tool, ANYONE connected to this
+server could see other visitors' IPs, which defeats the purpose.
+
+1. Set the secret (without it, the endpoint always returns 403 -- the
+   feature is off by default, safe):
+   ```bash
+   npx wrangler secret put ADMIN_SECRET
+   ```
+2. Access it:
+   ```bash
+   curl "https://<worker-url>/admin/usage?key=<ADMIN_SECRET>&hours=24"
+   ```
+   Returns JSON: total requests, distinct IP count, top 20 IPs (with
+   country + count), and the last 20 raw requests. Default window is 24
+   hours, adjustable via `hours`.
+
+Data is stored in D1 (`request_log`), auto-pruned every Cron tick for
+rows older than 30 days (unlike `market_snapshots`/`signal_history`,
+this table isn't bounded by the fixed watchlist, so it can grow if there's
+real outside traffic).
+
 ## Setup: Automated Deploy (GitHub Actions → Cloudflare Workers)
 
 This repo already has a workflow at `.github/workflows/deploy.yml` that
