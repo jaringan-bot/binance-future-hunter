@@ -3,6 +3,7 @@ import { z } from "zod";
 import * as coinalyze from "../coinalyzeClient.js";
 import { fmtNum, fmtTime } from "../format.js";
 import { symbolSchema, PERIOD_ENUM, errorResult } from "../shared.js";
+import { truncateRows } from "../toolHelpers.js";
 
 export function registerLiquidationTools(server: McpServer): void {
 
@@ -55,7 +56,8 @@ export function registerLiquidationTools(server: McpServer): void {
                 ? "SHORT DOMINAN (tekanan naik baru saja terjadi)"
                 : "SEIMBANG";
 
-        const rows = bars
+        const { shown, totalCount, truncated } = truncateRows(bars);
+        const rows = shown
           .map((b) => `| ${fmtTime(b.t * 1000)} | ${fmtNum(b.l, 2)} | ${fmtNum(b.s, 2)} |`)
           .join("\n");
 
@@ -66,6 +68,7 @@ export function registerLiquidationTools(server: McpServer): void {
           `**Total Short Liquidated**: ${fmtNum(totalShort, 2)}`,
           `**Dominasi window ini**: ${dominance}`,
           ``,
+          truncated ? `_Menampilkan ${shown.length} terakhir dari ${totalCount} total (total long/short & dominasi di atas dihitung dari semua ${totalCount})._` : ``,
           `| Waktu | Long Liquidated | Short Liquidated |`,
           `|---|---|---|`,
           rows,

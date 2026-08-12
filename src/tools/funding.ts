@@ -4,6 +4,7 @@ import * as binanceProxy from "../binanceProxyClient.js";
 import { fmtPrice, fmtPct, fmtTime, trendDirection } from "../format.js";
 import { symbolSchema, PERIOD_ENUM, errorResult } from "../shared.js";
 import { getPairThreshold } from "./config.js";
+import { truncateRows } from "../toolHelpers.js";
 
 export function registerFundingTools(server: McpServer): void {
 
@@ -145,16 +146,18 @@ export function registerFundingTools(server: McpServer): void {
           };
         }
         const rates = points.map((p) => parseFloat(p.fundingRate));
-        const rows = points
-          .map((p, i) => `| ${fmtTime(p.fundingTime)} | ${fmtPct(rates[i], 4)} |`)
-          .join("\n");
-
         const avg = rates.reduce((a, b) => a + b, 0) / rates.length;
         const direction = trendDirection(rates);
+
+        const { shown, totalCount, truncated } = truncateRows(points);
+        const rows = shown
+          .map((p) => `| ${fmtTime(p.fundingTime)} | ${fmtPct(parseFloat(p.fundingRate), 4)} |`)
+          .join("\n");
 
         const text = [
           `# Histori Funding Rate — ${symbol} (${points.length} data terakhir)`,
           ``,
+          truncated ? `_Menampilkan ${shown.length} terakhir dari ${totalCount} total (rata-rata & tren di bawah dihitung dari semua ${totalCount})._` : ``,
           `| Waktu Settlement | Funding Rate |`,
           `|---|---|`,
           rows,

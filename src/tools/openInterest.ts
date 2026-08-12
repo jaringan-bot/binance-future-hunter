@@ -3,6 +3,7 @@ import { z } from "zod";
 import * as binanceProxy from "../binanceProxyClient.js";
 import { fmtNum, fmtTime, trendDirection } from "../format.js";
 import { symbolSchema, FUTURES_DATA_PERIOD_ENUM, errorResult } from "../shared.js";
+import { truncateRows } from "../toolHelpers.js";
 
 export function registerOpenInterestTools(server: McpServer): void {
 
@@ -84,8 +85,9 @@ export function registerOpenInterestTools(server: McpServer): void {
         const last = values[values.length - 1];
         const changePct = first !== 0 ? ((last - first) / first) * 100 : 0;
 
-        const rows = bars
-          .map((b, i) => `| ${fmtTime(b.timestamp)} | ${fmtNum(values[i], 2)} |`)
+        const { shown, totalCount, truncated } = truncateRows(bars);
+        const rows = shown
+          .map((b) => `| ${fmtTime(b.timestamp)} | ${fmtNum(parseFloat(b.sumOpenInterest), 2)} |`)
           .join("\n");
 
         const text = [
@@ -93,6 +95,7 @@ export function registerOpenInterestTools(server: McpServer): void {
           ``,
           `**Tren keseluruhan window**: OI ${direction} (${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}% dari awal ke akhir window)`,
           ``,
+          truncated ? `_Menampilkan ${shown.length} terakhir dari ${totalCount} total (tren di atas dihitung dari semua ${totalCount})._` : ``,
           `| Waktu | Open Interest |`,
           `|---|---|`,
           rows,

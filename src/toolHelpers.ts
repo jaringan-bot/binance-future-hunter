@@ -29,6 +29,26 @@ export function computeCvdFromTrades(trades: AggTrade[]): CvdSummary {
   return { buyVolume, sellVolume, totalVolume, buyPct, cvd };
 }
 
+// Dipakai tool histori (open interest, long/short ratio, top trader ratio,
+// funding rate history, taker volume ratio, liquidation history) buat batasi
+// jumlah baris yang di-print ke teks -- tanpa ini, panggilan limit besar
+// (misal 500 buat kalibrasi baseline ala docs/mm_detection_framework.md
+// Section 4.2) bisa nge-dump puluhan KB tabel ke context Claude. Summary
+// stats (avg/tren/dominance) tetap harus dihitung dari SEMUA data yang
+// di-fetch (bukan cuma `shown`), cuma tampilan tabel yang dipotong.
+export interface TruncatedRows<T> {
+  shown: T[];
+  totalCount: number;
+  truncated: boolean;
+}
+
+export function truncateRows<T>(rows: T[], max = 15): TruncatedRows<T> {
+  const totalCount = rows.length;
+  const truncated = totalCount > max;
+  const shown = truncated ? rows.slice(-max) : rows;
+  return { shown, totalCount, truncated };
+}
+
 export type PriceBias = "BULLISH" | "BEARISH" | "SIDEWAYS";
 
 export function classifyPriceBias(changePct: number): PriceBias {

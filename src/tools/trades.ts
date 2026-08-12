@@ -3,7 +3,7 @@ import { z } from "zod";
 import * as binanceProxy from "../binanceProxyClient.js";
 import { fmtNum, fmtPrice, fmtTime } from "../format.js";
 import { symbolSchema, FUTURES_DATA_PERIOD_ENUM, errorResult } from "../shared.js";
-import { computeCvdFromTrades } from "../toolHelpers.js";
+import { computeCvdFromTrades, truncateRows } from "../toolHelpers.js";
 
 export function registerTradesTools(server: McpServer): void {
 
@@ -97,8 +97,9 @@ export function registerTradesTools(server: McpServer): void {
         const ratio = ratios[ratios.length - 1];
         const bias = ratio > 1.05 ? "BUY dominan" : ratio < 0.95 ? "SELL dominan" : "seimbang";
 
-        const rows = points
-          .map((p, i) => `| ${fmtTime(p.timestamp)} | ${fmtNum(ratios[i], 4)} |`)
+        const { shown, totalCount, truncated } = truncateRows(points);
+        const rows = shown
+          .map((p) => `| ${fmtTime(p.timestamp)} | ${fmtNum(parseFloat(p.buySellRatio), 4)} |`)
           .join("\n");
 
         const text = [
@@ -107,6 +108,7 @@ export function registerTradesTools(server: McpServer): void {
           `**Rasio terkini**: ${fmtNum(ratio, 4)} → tekanan ${bias}`,
           `(ratio > 1 = volume buy lebih besar dari sell, < 1 = sebaliknya)`,
           ``,
+          truncated ? `_Menampilkan ${shown.length} terakhir dari ${totalCount} total._` : ``,
           `| Waktu | Buy/Sell Ratio |`,
           `|---|---|`,
           rows,

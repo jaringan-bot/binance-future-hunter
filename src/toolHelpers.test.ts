@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { computeCvdFromTrades, classifyPriceBias, summarizeKlines } from "./toolHelpers.js";
+import { computeCvdFromTrades, classifyPriceBias, summarizeKlines, truncateRows } from "./toolHelpers.js";
 import type { AggTrade, KlineTuple } from "./binanceProxyClient.js";
 
 function trade(q: string, m: boolean): AggTrade {
@@ -85,5 +85,35 @@ describe("summarizeKlines", () => {
   it("maps candle fields (openTime/open/high/low/close/volume) as numbers", () => {
     const result = summarizeKlines([kline("100", "105", "98", "102", "42.5")]);
     expect(result.candles[0]).toEqual({ openTime: 0, open: 100, high: 105, low: 98, close: 102, volume: 42.5 });
+  });
+});
+
+describe("truncateRows", () => {
+  it("returns everything untruncated when under the limit", () => {
+    const result = truncateRows([1, 2, 3], 15);
+    expect(result).toEqual({ shown: [1, 2, 3], totalCount: 3, truncated: false });
+  });
+
+  it("keeps only the LAST `max` rows when over the limit", () => {
+    const rows = Array.from({ length: 500 }, (_, i) => i);
+    const result = truncateRows(rows, 15);
+    expect(result.shown).toHaveLength(15);
+    expect(result.shown[0]).toBe(485);
+    expect(result.shown[14]).toBe(499);
+    expect(result.totalCount).toBe(500);
+    expect(result.truncated).toBe(true);
+  });
+
+  it("treats exactly-at-limit as not truncated", () => {
+    const rows = Array.from({ length: 15 }, (_, i) => i);
+    const result = truncateRows(rows, 15);
+    expect(result.truncated).toBe(false);
+    expect(result.shown).toHaveLength(15);
+  });
+
+  it("defaults max to 15", () => {
+    const rows = Array.from({ length: 20 }, (_, i) => i);
+    const result = truncateRows(rows);
+    expect(result.shown).toHaveLength(15);
   });
 });

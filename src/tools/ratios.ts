@@ -3,6 +3,7 @@ import { z } from "zod";
 import * as binanceProxy from "../binanceProxyClient.js";
 import { fmtNum, fmtTime, trendDirection } from "../format.js";
 import { symbolSchema, FUTURES_DATA_PERIOD_ENUM, errorResult } from "../shared.js";
+import { truncateRows } from "../toolHelpers.js";
 
 export function registerRatiosTools(server: McpServer): void {
 
@@ -53,10 +54,11 @@ export function registerRatiosTools(server: McpServer): void {
         const bias = latestLongPct > 55 ? "LONG" : latestLongPct < 45 ? "SHORT" : "NETRAL";
         const direction = trendDirection(ratios);
 
-        const rows = points
+        const { shown, totalCount, truncated } = truncateRows(points);
+        const rows = shown
           .map(
-            (p, i) =>
-              `| ${fmtTime(p.timestamp)} | ${longPcts[i].toFixed(2)}% | ${shortPcts[i].toFixed(2)}% | ${fmtNum(ratios[i], 4)} |`,
+            (p) =>
+              `| ${fmtTime(p.timestamp)} | ${(parseFloat(p.longAccount) * 100).toFixed(2)}% | ${(parseFloat(p.shortAccount) * 100).toFixed(2)}% | ${fmtNum(parseFloat(p.longShortRatio), 4)} |`,
           )
           .join("\n");
 
@@ -67,7 +69,7 @@ export function registerRatiosTools(server: McpServer): void {
           `- **Long**: ${latestLongPct.toFixed(1)}% / **Short**: ${latestShortPct.toFixed(1)}% → ratio ${fmtNum(latestRatio, 4)} → bias ${bias}`,
           `**Tren**: ${direction}`,
           ``,
-          `## Histori`,
+          `## Histori${truncated ? ` (${shown.length} terakhir dari ${totalCount} total; tren di atas dihitung dari semua ${totalCount})` : ""}`,
           `| Waktu | Long % | Short % | Ratio |`,
           `|---|---|---|---|`,
           rows,
@@ -150,7 +152,8 @@ export function registerRatiosTools(server: McpServer): void {
         const bias = longPct > 55 ? "LONG" : longPct < 45 ? "SHORT" : "NETRAL";
         const direction = trendDirection(points.map((p) => parseFloat(p.longShortRatio)));
 
-        const rows = points
+        const { shown, totalCount, truncated } = truncateRows(points);
+        const rows = shown
           .map(
             (p) =>
               `| ${fmtTime(p.timestamp)} | ${(parseFloat(p.longAccount) * 100).toFixed(2)}% | ${(parseFloat(p.shortAccount) * 100).toFixed(2)}% | ${fmtNum(parseFloat(p.longShortRatio), 4)} |`,
@@ -166,7 +169,7 @@ export function registerRatiosTools(server: McpServer): void {
           `- **Long**: ${longPct.toFixed(2)}% / **Short**: ${shortPct.toFixed(2)}% → ratio ${fmtNum(ratio, 4)} → bias ${bias}`,
           `**Tren**: ${direction}`,
           ``,
-          `## Histori`,
+          `## Histori${truncated ? ` (${shown.length} terakhir dari ${totalCount} total; tren di atas dihitung dari semua ${totalCount})` : ""}`,
           `| Waktu | Long % | Short % | Ratio |`,
           `|---|---|---|---|`,
           rows,
