@@ -6,6 +6,7 @@ import * as kvConfig from "./kvConfig.js";
 import * as d1Client from "./d1Client.js";
 import { SNAPSHOT_WATCHLIST } from "./shared.js";
 import { computeMmSignals } from "./tools/detectMmActivity.js";
+import { isAuthorized } from "./adminUsage.js";
 
 interface Env {
   COINALYZE_API_KEY?: string;
@@ -18,7 +19,13 @@ interface Env {
   PROXY_SECRET_2?: string;
   CONFIG_KV?: KVNamespace;
   DB?: D1Database;
+  // OPSIONAL -- kalau di-set, aktifin GET /admin/usage (ringkasan siapa
+  // yang connect ke worker ini, lihat README "Admin: Usage Log"). Tanpa
+  // ini, endpoint itu SELALU 403 (fitur nonaktif by default, aman).
+  ADMIN_SECRET?: string;
 }
+
+const REQUEST_LOG_RETENTION_MS = 30 * 24 * 3600 * 1000; // 30 hari
 
 // Server ini STATELESS (sessionIdGenerator: undefined): setiap request
 // membuat instance server + transport baru. Ini pola resmi yang
@@ -42,7 +49,7 @@ function withCors(response: Response): Response {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     coinalyze.setApiKey(env.COINALYZE_API_KEY);
     binanceProxy.setProxyConfig(env.PROXY_URL, env.PROXY_SECRET, env.PROXY_URL_2, env.PROXY_SECRET_2);
     kvConfig.setKvNamespace(env.CONFIG_KV);
@@ -67,11 +74,48 @@ export default {
       );
     }
 
+    // Owner-only, BUKAN MCP tool -- sengaja endpoint HTTP terpisah, gak
+    // pernah nongol di tools/list, biar visitor lain (siapa aja yang bisa
+    // connect ke /mcp) gak bisa liat log visitor lain. 403 generic kalau
+    // gagal auth -- gak bocorin apakah ADMIN_SECRET ke-set atau kosong.
+    if (url.pathname === "/admin/usage" && request.method === "GET") {
+      if (!isAuthorized(url.searchParams.get("key"), env.ADMIN_SECRET)) {
+        return withCors(new Response("Forbidden", { status: 403 }));
+      }
+      try {
+        const hours = Number(url.searchParams.get("hours")) || 24;
+        const summary = await d1Client.queryRequestLogSummary(hours);
+        return withCors(
+          new Response(JSON.stringify(summary, null, 2), { headers: { "Content-Type": "application/json" } }),
+        );
+      } catch (err) {
+        return withCors(
+          new Response(`Gagal query usage log: ${(err as Error)?.message ?? String(err)}`, { status: 500 }),
+        );
+      }
+    }
+
     if (url.pathname !== "/mcp") {
       return withCors(
         new Response("Not found. Gunakan endpoint /mcp untuk koneksi MCP.", { status: 404 }),
       );
     }
+
+    // Fire-and-forget -- JANGAN nge-block/gagalin request MCP asli kalau
+    // logging gagal (misal D1 belum ke-bind di deployment yang belum
+    // migrasi). Cuma buat visibility "siapa yang connect", bukan bagian
+    // kritikal dari fungsi server.
+    ctx.waitUntil(
+      d1Client
+        .insertRequestLog({
+          timestamp: Date.now(),
+          ip: request.headers.get("cf-connecting-ip"),
+          country: (request.cf as IncomingRequestCfProperties | undefined)?.country ?? null,
+          colo: (request.cf as IncomingRequestCfProperties | undefined)?.colo ?? null,
+          userAgent: request.headers.get("user-agent"),
+        })
+        .catch((err) => console.error("[request-log] gagal insert:", (err as Error)?.message ?? String(err))),
+    );
 
     try {
       // Stateless: instance server & transport baru per-request.
@@ -156,6 +200,15 @@ export default {
           }
         }),
       ),
+    );
+
+    // Prune request_log >30 hari -- tabel ini (beda dari market_snapshots/
+    // signal_history) bisa growth gak terduga kalau ada traffic asing,
+    // gak dibatasi watchlist tetap kayak 2 tabel lain.
+    ctx.waitUntil(
+      d1Client
+        .pruneOldRequestLogs(Date.now() - REQUEST_LOG_RETENTION_MS)
+        .catch((err) => console.error("[cron] gagal prune request_log:", (err as Error)?.message ?? String(err))),
     );
   },
 };
