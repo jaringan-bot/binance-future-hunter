@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { registerSafeTool } from "../toolWrapper.js";
 import { symbolSchema, errorResult } from "../shared.js";
 import { getJson, putJson } from "../kvConfig.js";
 
@@ -28,7 +29,8 @@ function fmtThresholdPct(v: number | undefined): string {
 }
 
 export function registerConfigTools(server: McpServer): void {
-  server.registerTool(
+  registerSafeTool(
+    server,
     "binance_set_pair_threshold",
     {
       title: "Set Threshold Custom per Pair",
@@ -75,7 +77,8 @@ export function registerConfigTools(server: McpServer): void {
     },
   );
 
-  server.registerTool(
+  registerSafeTool(
+    server,
     "binance_get_pair_threshold",
     {
       title: "Cek Threshold Custom per Pair",

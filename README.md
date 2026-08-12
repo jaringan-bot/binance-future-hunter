@@ -129,6 +129,9 @@ SOLUSDT).
 | `binance_set_pair_threshold` | Set threshold funding/basis custom per-pair (override default ±0.03%/±0.05%), tersimpan di Workers KV | Workers KV |
 | `binance_get_pair_threshold` | Cek threshold custom yang sudah di-set untuk sebuah pair | Workers KV |
 | `binance_get_basis_history` | Histori basis futures-vs-spot time-series (snapshot Cron tiap 5 menit), watchlist tetap BTCUSDT/ETHUSDT/SOLUSDT — deteksi "basis melebar lalu kembali" tanpa cek manual berkali-kali | Workers KV + Cron Trigger |
+| `binance_detect_mm_activity` | Skor + tier (Weak/Moderate/Strong/Extreme) dari 6 sinyal MM/whale sekaligus (absorption, spoofing heuristic, stop-hunt heuristic, basis arbitrage, OI divergence, funding extreme) — ganti 5-6 tool call manual. **Skor spoofing & stop-hunt cuma heuristik 1-snapshot**, lihat [Keterbatasan](#keterbatasan-yang-jujur-perlu-diketahui) | Binance native |
+| `binance_market_regime` | Klasifikasi kondisi pasar: TRENDING_UP/DOWN, RANGING, BREAKOUT, ACCUMULATION, DISTRIBUTION — pakai ADX(14), tren OI, CVD, spike volatilitas/volume | Binance native |
+| `binance_get_tool_catalog` | Daftar semua tool + kategori/token-cost/use-case, filter per kategori — cek ini dulu sebelum manggil banyak tool individual | Statis |
 
 ## Framework Analisis: Deteksi Market Maker & Whale
 
@@ -193,6 +196,16 @@ Detail penuh (termasuk raw data test per klaim): Section 10,
 - Tidak ada data wallet on-chain.
 - Coinalyze free tier: rate limit 40 request/menit per API key — sekarang
   cuma berlaku untuk `binance_get_liquidation_history`.
+- **`binance_detect_mm_activity`: skor spoofing & stop-hunt cuma heuristik
+  1-snapshot**, BUKAN true detection. Desain aslinya butuh 2 snapshot order
+  book dalam <3 detik (proxy ini latency-nya ~485ms, belum reliable untuk
+  itu) dan data liquidation granular-harga (Coinalyze rate-limited & tidak
+  ada field harga). Confidence 2 sinyal itu lebih rendah dari 4 sinyal lain
+  di tool yang sama — dicatat juga di evidence text tiap response.
+- **`binance_market_regime`: spike volatilitas/volume dihitung relatif ke
+  window fetch yang sama** (10 candle terakhir vs 10 sebelumnya), bukan
+  baseline historis jangka panjang — belum ada penyimpanan time-series
+  general per pair (cuma `binance_get_basis_history` yang watchlist-only).
 
 ## Setup Coinalyze API Key (wajib, sekali saja)
 
@@ -233,6 +246,25 @@ error yang jelas ("PROXY_URL atau PROXY_SECRET belum diset di worker").
 `wrangler secret list` hanya boleh membocorkan nama secret, tidak pernah
 value — kesalahan ini membuat value asli bocor lewat command yang seharusnya
 aman.
+
+### Proxy sekunder / failover (opsional)
+
+Kalau proxy primary kena WAF block/rate-limit/5xx, worker otomatis coba
+proxy sekunder — TAPI cuma kalau dikonfigurasi. Tanpa ini, perilaku persis
+sama seperti sebelumnya (1 proxy, error langsung dilempar kalau gagal).
+
+1. Deploy instance Vercel KEDUA dari folder `proxy/` yang sama (region
+   beda kalau mau, misal Hong Kong vs Singapore) dengan `PROXY_SECRET`
+   sendiri (boleh beda dari primary).
+2. Set dua secret tambahan:
+   ```bash
+   npx wrangler secret put PROXY_URL_2
+   npx wrangler secret put PROXY_SECRET_2
+   ```
+
+Failover cuma jalan untuk error yang berkaitan sama kesehatan proxy (403
+WAF block, 429 rate limit, 5xx) — bukan buat error request (400/401/404)
+yang bakal gagal identik di proxy manapun.
 
 ## Setup Workers KV (wajib, sekali saja — kalau fork/deploy repo ini sendiri)
 

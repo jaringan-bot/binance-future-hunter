@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { registerSafeTool } from "../toolWrapper.js";
 import * as binanceProxy from "../binanceProxyClient.js";
 import { fmtNum, fmtPrice, fmtTime } from "../format.js";
 import { symbolSchema, KLINE_INTERVAL_ENUM, errorResult, parseTimeParam, computeRealizedVolatility } from "../shared.js";
@@ -10,7 +11,8 @@ export function registerPriceTools(server: McpServer): void {
   // ─────────────────────────────────────────────────────────────
   // KLINES / PRICE ACTION untuk bias per-timeframe (Binance native)
   // ─────────────────────────────────────────────────────────────
-  server.registerTool(
+  registerSafeTool(
+    server,
     "binance_get_klines",
     {
       title: "Data Candlestick (Klines)",
@@ -104,7 +106,8 @@ export function registerPriceTools(server: McpServer): void {
   );
 
 
-  server.registerTool(
+  registerSafeTool(
+    server,
     "binance_get_multi_timeframe_bias",
     {
       title: "Bias Multi-Timeframe Sekaligus",
@@ -169,7 +172,8 @@ export function registerPriceTools(server: McpServer): void {
   );
 
 
-  server.registerTool(
+  registerSafeTool(
+    server,
     "binance_get_realized_volatility",
     {
       title: "Realized Volatility (Historis)",
@@ -230,7 +234,8 @@ export function registerPriceTools(server: McpServer): void {
   );
 
 
-  server.registerTool(
+  registerSafeTool(
+    server,
     "binance_get_24hr_ticker",
     {
       title: "Statistik 24 Jam",

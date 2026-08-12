@@ -103,3 +103,82 @@ export function summarizeKlines(raw: KlineTuple[]): KlinesSummary {
     swingLow: lows.length ? Math.min(...lows) : 0,
   };
 }
+
+export interface AdxResult {
+  adx: number;
+  plusDI: number;
+  minusDI: number;
+}
+
+// ADX (Average Directional Index) standar Wilder, dipakai binance_market_regime
+// buat bedain kondisi TRENDING (ADX>25) vs RANGING (ADX<20). Butuh minimal
+// 2*period+1 candle buat smoothing Wilder yang stabil (bukan cuma period+1) --
+// dengan data kurang dari itu, ADX/DI awal masih bias ke rata-rata sederhana
+// pertama, belum full Wilder-smoothed.
+export function calculateADX(candles: KlineCandle[], period = 14): AdxResult {
+  if (candles.length < period + 1) return { adx: 0, plusDI: 0, minusDI: 0 };
+
+  const trueRanges: number[] = [];
+  const plusDMs: number[] = [];
+  const minusDMs: number[] = [];
+
+  for (let i = 1; i < candles.length; i++) {
+    const curr = candles[i];
+    const prev = candles[i - 1];
+    const tr = Math.max(
+      curr.high - curr.low,
+      Math.abs(curr.high - prev.close),
+      Math.abs(curr.low - prev.close),
+    );
+    trueRanges.push(tr);
+
+    const upMove = curr.high - prev.high;
+    const downMove = prev.low - curr.low;
+    plusDMs.push(upMove > downMove && upMove > 0 ? upMove : 0);
+    minusDMs.push(downMove > upMove && downMove > 0 ? downMove : 0);
+  }
+
+  // Wilder smoothing: seed = sum period pertama, lalu prev - prev/period + current.
+  function wilderSmooth(values: number[]): number[] {
+    const smoothed: number[] = [];
+    let sum = 0;
+    for (let i = 0; i < period; i++) sum += values[i];
+    smoothed.push(sum);
+    for (let i = period; i < values.length; i++) {
+      sum = sum - sum / period + values[i];
+      smoothed.push(sum);
+    }
+    return smoothed;
+  }
+
+  const smoothedTR = wilderSmooth(trueRanges);
+  const smoothedPlusDM = wilderSmooth(plusDMs);
+  const smoothedMinusDM = wilderSmooth(minusDMs);
+
+  const dxValues: number[] = [];
+  const plusDIs: number[] = [];
+  const minusDIs: number[] = [];
+  for (let i = 0; i < smoothedTR.length; i++) {
+    const tr = smoothedTR[i];
+    const plusDI = tr === 0 ? 0 : (smoothedPlusDM[i] / tr) * 100;
+    const minusDI = tr === 0 ? 0 : (smoothedMinusDM[i] / tr) * 100;
+    plusDIs.push(plusDI);
+    minusDIs.push(minusDI);
+    const diSum = plusDI + minusDI;
+    dxValues.push(diSum === 0 ? 0 : (Math.abs(plusDI - minusDI) / diSum) * 100);
+  }
+
+  if (dxValues.length < period) {
+    // Belum cukup DX buat smoothing ADX penuh -- balikin rata-rata DX yang ada
+    // sebagai estimasi kasar, lebih baik daripada 0 (yang keliru dibaca "flat").
+    const avgDx = dxValues.reduce((a, b) => a + b, 0) / (dxValues.length || 1);
+    return { adx: avgDx, plusDI: plusDIs[plusDIs.length - 1] ?? 0, minusDI: minusDIs[minusDIs.length - 1] ?? 0 };
+  }
+
+  let adx = dxValues.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  for (let i = period; i < dxValues.length; i++) {
+    adx = (adx * (period - 1) + dxValues[i]) / period;
+  }
+
+  return { adx, plusDI: plusDIs[plusDIs.length - 1] ?? 0, minusDI: minusDIs[minusDIs.length - 1] ?? 0 };
+}

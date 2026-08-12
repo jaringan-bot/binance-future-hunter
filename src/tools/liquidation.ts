@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { registerSafeTool } from "../toolWrapper.js";
 import * as coinalyze from "../coinalyzeClient.js";
 import { fmtNum, fmtTime } from "../format.js";
 import { symbolSchema, PERIOD_ENUM, errorResult } from "../shared.js";
@@ -10,7 +11,8 @@ export function registerLiquidationTools(server: McpServer): void {
   // ─────────────────────────────────────────────────────────────
   // LIQUIDATION HISTORY
   // ─────────────────────────────────────────────────────────────
-  server.registerTool(
+  registerSafeTool(
+    server,
     "binance_get_liquidation_history",
     {
       title: "Histori Liquidation",

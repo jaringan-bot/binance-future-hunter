@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { registerSafeTool } from "../toolWrapper.js";
 import * as binanceProxy from "../binanceProxyClient.js";
 import { fmtNum, fmtPrice, fmtTime } from "../format.js";
 import { symbolSchema, FUTURES_DATA_PERIOD_ENUM, errorResult } from "../shared.js";
@@ -10,7 +11,8 @@ export function registerTradesTools(server: McpServer): void {
   // ─────────────────────────────────────────────────────────────
   // AGGREGATE TRADES / CVD GRANULAR
   // ─────────────────────────────────────────────────────────────
-  server.registerTool(
+  registerSafeTool(
+    server,
     "binance_get_agg_trades",
     {
       title: "Aggregate Trades (untuk CVD Granular)",
@@ -69,7 +71,8 @@ export function registerTradesTools(server: McpServer): void {
   );
 
 
-  server.registerTool(
+  registerSafeTool(
+    server,
     "binance_get_taker_volume_ratio",
     {
       title: "Taker Buy/Sell Volume Ratio",

@@ -9,6 +9,11 @@ interface Env {
   COINALYZE_API_KEY?: string;
   PROXY_URL?: string;
   PROXY_SECRET?: string;
+  // Proxy sekunder OPSIONAL -- kalau diset, binanceProxyClient otomatis
+  // failover ke sini pas primary kena WAF block/rate-limit/5xx. Deploy ke
+  // instance Vercel region lain, lihat proxy/README.md.
+  PROXY_URL_2?: string;
+  PROXY_SECRET_2?: string;
   CONFIG_KV?: KVNamespace;
 }
 
@@ -36,7 +41,7 @@ function withCors(response: Response): Response {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     coinalyze.setApiKey(env.COINALYZE_API_KEY);
-    binanceProxy.setProxyConfig(env.PROXY_URL, env.PROXY_SECRET);
+    binanceProxy.setProxyConfig(env.PROXY_URL, env.PROXY_SECRET, env.PROXY_URL_2, env.PROXY_SECRET_2);
     kvConfig.setKvNamespace(env.CONFIG_KV);
     const url = new URL(request.url);
 
@@ -98,7 +103,7 @@ export default {
   // menggagalkan symbol lain (try/catch per-symbol).
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     coinalyze.setApiKey(env.COINALYZE_API_KEY);
-    binanceProxy.setProxyConfig(env.PROXY_URL, env.PROXY_SECRET);
+    binanceProxy.setProxyConfig(env.PROXY_URL, env.PROXY_SECRET, env.PROXY_URL_2, env.PROXY_SECRET_2);
     kvConfig.setKvNamespace(env.CONFIG_KV);
 
     ctx.waitUntil(

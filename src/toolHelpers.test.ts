@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { computeCvdFromTrades, classifyPriceBias, summarizeKlines, truncateRows } from "./toolHelpers.js";
+import { computeCvdFromTrades, classifyPriceBias, summarizeKlines, truncateRows, calculateADX } from "./toolHelpers.js";
 import type { AggTrade, KlineTuple } from "./binanceProxyClient.js";
+import type { KlineCandle } from "./toolHelpers.js";
 
 function trade(q: string, m: boolean): AggTrade {
   return { a: 1, p: "100", q, f: 1, l: 1, T: 0, m };
@@ -115,5 +116,39 @@ describe("truncateRows", () => {
     const rows = Array.from({ length: 20 }, (_, i) => i);
     const result = truncateRows(rows);
     expect(result.shown).toHaveLength(15);
+  });
+});
+
+function candle(high: number, low: number, close: number): KlineCandle {
+  return { openTime: 0, open: close, high, low, close, volume: 1 };
+}
+
+describe("calculateADX", () => {
+  it("returns zeros when there's not enough candles for the period", () => {
+    const candles = Array.from({ length: 10 }, (_, i) => candle(100 + i, 99 + i, 99.5 + i));
+    expect(calculateADX(candles, 14)).toEqual({ adx: 0, plusDI: 0, minusDI: 0 });
+  });
+
+  it("returns adx 0 for perfectly flat candles (no directional movement at all)", () => {
+    const candles = Array.from({ length: 40 }, () => candle(101, 99, 100));
+    const result = calculateADX(candles, 14);
+    expect(result.adx).toBe(0);
+    expect(result.plusDI).toBe(0);
+    expect(result.minusDI).toBe(0);
+  });
+
+  it("detects a strong uptrend: high ADX, +DI dominant over -DI", () => {
+    // Higher high + higher low every bar, no pullback -- textbook strong trend.
+    const candles = Array.from({ length: 40 }, (_, i) => candle(100 + i * 2, 98 + i * 2, 99 + i * 2));
+    const result = calculateADX(candles, 14);
+    expect(result.adx).toBeGreaterThan(25);
+    expect(result.plusDI).toBeGreaterThan(result.minusDI);
+  });
+
+  it("detects a strong downtrend: high ADX, -DI dominant over +DI", () => {
+    const candles = Array.from({ length: 40 }, (_, i) => candle(200 - i * 2, 198 - i * 2, 199 - i * 2));
+    const result = calculateADX(candles, 14);
+    expect(result.adx).toBeGreaterThan(25);
+    expect(result.minusDI).toBeGreaterThan(result.plusDI);
   });
 });

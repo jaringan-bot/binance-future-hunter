@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { registerSafeTool } from "../toolWrapper.js";
 import * as binanceProxy from "../binanceProxyClient.js";
 import { fmtNum, fmtTime, trendDirection } from "../format.js";
 import { symbolSchema, FUTURES_DATA_PERIOD_ENUM, errorResult } from "../shared.js";
@@ -10,7 +11,8 @@ export function registerOpenInterestTools(server: McpServer): void {
   // ─────────────────────────────────────────────────────────────
   // OPEN INTEREST
   // ─────────────────────────────────────────────────────────────
-  server.registerTool(
+  registerSafeTool(
+    server,
     "binance_get_open_interest",
     {
       title: "Open Interest Saat Ini",
@@ -46,7 +48,8 @@ export function registerOpenInterestTools(server: McpServer): void {
   );
 
 
-  server.registerTool(
+  registerSafeTool(
+    server,
     "binance_get_open_interest_history",
     {
       title: "Histori Tren Open Interest",

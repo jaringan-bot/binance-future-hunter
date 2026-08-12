@@ -131,6 +131,9 @@ a fixed watchlist (BTCUSDT, ETHUSDT, SOLUSDT).
 | `binance_set_pair_threshold` | Set a custom funding/basis threshold per pair (overrides the ±0.03%/±0.05% default), stored in Workers KV | Workers KV |
 | `binance_get_pair_threshold` | Check the custom threshold already set for a pair | Workers KV |
 | `binance_get_basis_history` | Time-series futures-vs-spot basis history (Cron snapshot every 5 min), fixed watchlist BTCUSDT/ETHUSDT/SOLUSDT — detects "basis widens then reverts" without manual repeated checks | Workers KV + Cron Trigger |
+| `binance_detect_mm_activity` | Score + tier (Weak/Moderate/Strong/Extreme) from 6 MM/whale signals at once (absorption, spoofing heuristic, stop-hunt heuristic, basis arbitrage, OI divergence, funding extreme) — replaces 5-6 manual tool calls. **Spoofing & stop-hunt scores are 1-snapshot heuristics only**, see [Honest limitations](#honest-limitations-you-should-know) | Binance native |
+| `binance_market_regime` | Classifies current market condition: TRENDING_UP/DOWN, RANGING, BREAKOUT, ACCUMULATION, DISTRIBUTION — uses ADX(14), OI trend, CVD, volatility/volume spike ratio | Binance native |
+| `binance_get_tool_catalog` | Lists all tools with category/token-cost/use-case, filterable by category — check this before calling many individual tools | Static |
 
 ## Analysis Framework: Market Maker & Whale Detection
 
@@ -197,6 +200,18 @@ Full detail (including raw test data per claim): Section 10,
 - No on-chain wallet data.
 - Coinalyze free tier: rate limit of 40 requests/minute per API key — now
   only applies to `binance_get_liquidation_history`.
+- **`binance_detect_mm_activity`: the spoofing & stop-hunt scores are
+  1-snapshot heuristics only**, NOT true detection. The original design
+  needs 2 order-book snapshots within <3 seconds (this proxy's latency is
+  ~485ms, not reliable enough for that) and price-granular liquidation
+  data (Coinalyze is rate-limited and has no price field). Confidence for
+  those two signals is lower than the other four in the same tool — also
+  noted in the evidence text of every response.
+- **`binance_market_regime`: volatility/volume spike ratios are computed
+  relative to the same fetch window** (last 10 candles vs the prior 10),
+  not a long-term historical baseline — there's no general per-pair
+  time-series storage yet (only `binance_get_basis_history`, which is
+  watchlist-only).
 
 ## Setup: Coinalyze API Key (required, one-time)
 
@@ -238,6 +253,26 @@ clear error message ("PROXY_URL atau PROXY_SECRET belum diset di worker").
 the name prompt). `wrangler secret list` should only ever leak secret
 *names*, never values — this mistake leaks the real value through a
 command that's supposed to be safe.
+
+### Secondary / failover proxy (optional)
+
+If the primary proxy hits a WAF block/rate-limit/5xx, the worker
+automatically tries a secondary proxy — but only if one is configured.
+Without it, behavior is identical to before (single proxy, error thrown
+immediately on failure).
+
+1. Deploy a SECOND Vercel instance from the same `proxy/` folder (a
+   different region if you like, e.g. Hong Kong vs Singapore) with its own
+   `PROXY_SECRET` (can differ from the primary).
+2. Set two additional secrets:
+   ```bash
+   npx wrangler secret put PROXY_URL_2
+   npx wrangler secret put PROXY_SECRET_2
+   ```
+
+Failover only triggers for errors related to proxy health (403 WAF block,
+429 rate limit, 5xx) — not for request errors (400/401/404), which would
+fail identically on any proxy.
 
 ## Setup: Workers KV (required, one-time — if you fork/deploy this repo yourself)
 
