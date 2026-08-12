@@ -261,8 +261,12 @@ export function registerFundingTools(server: McpServer): void {
           structuredContent: {
             totalPairsScanned: filtered.length,
             quoteFilter,
-            crowdedLong,
-            crowdedShort,
+            // Cuma symbol paling ekstrem tiap sisi, bukan array crowdedLong/
+            // crowdedShort penuh -- itu udah ada di tabel teks di atas,
+            // duplikasi di structuredContent gak perlu (bisa ~2,9KB di
+            // limit maksimal 50 kalau disertakan penuh).
+            topSymbolLong: crowdedLong[0] ?? null,
+            topSymbolShort: crowdedShort[0] ?? null,
           },
         };
       } catch (err) {
