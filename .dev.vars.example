@@ -1,0 +1,19 @@
+# Template buat .dev.vars (local dev secrets, wrangler auto-load, JANGAN
+# di-commit -- sudah di .gitignore). Copy file ini ke `.dev.vars`, isi
+# value asli. Buat production, pakai `wrangler secret put <NAME>`, BUKAN
+# file ini.
+
+# WAJIB -- tanpa ini, 33 dari 34 tool (semua "Binance native") gagal.
+# Lihat README.md bagian "Setup Proxy Vercel".
+PROXY_URL=
+PROXY_SECRET=
+
+# OPSIONAL -- proxy sekunder buat failover, lihat README.md bagian
+# "Proxy sekunder / failover".
+PROXY_URL_2=
+PROXY_SECRET_2=
+
+# OPSIONAL -- cuma dipakai binance_get_liquidation_history (1 dari 34
+# tool). Skip kalau gak butuh liquidation history. Lihat README.md
+# bagian "Setup Coinalyze API Key".
+COINALYZE_API_KEY=
