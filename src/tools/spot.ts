@@ -280,7 +280,9 @@ export function registerSpotTools(server: McpServer): void {
         "itu kemungkinan besar leverage-driven, bukan demand/supply riil. " +
         "Default (tanpa startTime/endTime) balikin candle TERBARU. Isi startTime untuk narik histori jauh ke belakang " +
         "(misal buat backtest) — maksimal `limit` candle per panggilan (limit maksimal 1000 untuk Spot, beda dari Futures " +
-        "yang 1500). Untuk rentang lebih dari 1000 candle, panggil berkali-kali sambil geser startTime (pagination manual).",
+        "yang 1500). Untuk rentang lebih dari 1000 candle, panggil berkali-kali sambil geser startTime (pagination manual). " +
+        "HEMAT TOKEN: default cuma balikin summary (bias, swing high/low, 15 candle terakhir) — array candle PENUH " +
+        "TIDAK disertakan kecuali `includeCandles: true` diminta eksplisit.",
       inputSchema: {
         symbol: symbolSchema,
         interval: z
@@ -297,10 +299,17 @@ export function registerSpotTools(server: McpServer): void {
           .string()
           .optional()
           .describe("Waktu akhir (ISO 8601) — opsional, dipakai bareng startTime untuk membatasi window spesifik."),
+        includeCandles: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe(
+            "Sertakan array candle PENUH di structuredContent -- default false biar hemat token. Set true kalau butuh proses data candle secara programatik.",
+          ),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ symbol, interval, limit, startTime, endTime }) => {
+    async ({ symbol, interval, limit, startTime, endTime, includeCandles }) => {
       try {
         const startMs = parseTimeParam(startTime, "startTime");
         const endMs = parseTimeParam(endTime, "endTime");
@@ -335,7 +344,16 @@ export function registerSpotTools(server: McpServer): void {
 
         return {
           content: [{ type: "text", text }],
-          structuredContent: { symbol, interval, bias, changePct, swingHigh, swingLow, lastClose, candles },
+          structuredContent: {
+            symbol,
+            interval,
+            bias,
+            changePct,
+            swingHigh,
+            swingLow,
+            lastClose,
+            ...(includeCandles ? { candles } : {}),
+          },
         };
       } catch (err) {
         return errorResult(err);
