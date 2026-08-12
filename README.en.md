@@ -132,20 +132,48 @@ a fixed watchlist (BTCUSDT, ETHUSDT, SOLUSDT).
 | `binance_get_pair_threshold` | Check the custom threshold already set for a pair | Workers KV |
 | `binance_get_basis_history` | Time-series futures-vs-spot basis history (Cron snapshot every 5 min), fixed watchlist BTCUSDT/ETHUSDT/SOLUSDT — detects "basis widens then reverts" without manual repeated checks | Workers KV + Cron Trigger |
 
-## Analysis Framework
+## Analysis Framework: Market Maker & Whale Detection
 
-[`docs/mm_detection_framework.en.md`](docs/mm_detection_framework.en.md) (v4,
-final) — a framework for detecting market maker activity footprints
-(absorption, spoofing, stop hunt, basis arbitrage) by combining several of
-the tools above. Every technical claim was validated against live data
-before making it into the final version — including polling latency
-(298-898ms per call, so the original suggestion of "<500ms polling" isn't
-feasible through a regular MCP tool call), the liquidation data's field set
-(no price-level info, only per-time-window), top-trader ratio divergence
-thresholds (both a fixed number and a liquidity-tiered version turned out
-not to fit — the real movement of every pair tested was far below them),
-and the actual historical retention limit of Binance's own top-trader ratio
-endpoint (~30 days max, not 90 days as originally assumed).
+No tool can see a market maker (MM)/whale's identity or specific position
+directly — Binance's public data simply doesn't expose that. What this
+framework does instead: read the **footprints** their activity leaves
+behind by combining several of the tools above, then score how strongly
+those patterns line up.
+
+**Four signal categories detected:**
+
+| Signal | Main tools | Example pattern |
+|---|---|---|
+| **Absorption** | order book depth, agg trades (futures & spot), open interest | CVD flat/rising while price stalls = sell pressure being absorbed (accumulation); sharp OI spike + sideways price = a large position just opened |
+| **Spoofing** | order book depth, order book imbalance | A large wall appears then disappears before it's ever filled; spread suddenly widens then normalizes within seconds |
+| **Stop hunt** | liquidation history, open interest, klines | A liquidation spike on one side + a long wick on the same-time candle + price reverses within 1-3 candles after |
+| **Basis arbitrage** | spot price, funding rate, open interest | Spot-futures basis widens then quickly reverts; extreme funding + rising OI (suggests a short-futures/long-spot hedge) |
+
+**Rule of thumb:** if **≥3 signals align** within the same timeframe, the
+indication of MM activity is strong enough to act on — this is a checklist
+heuristic (see the confidence tiers in the full document), **not** a
+statistically calibrated probability.
+
+Full document: [`docs/mm_detection_framework.en.md`](docs/mm_detection_framework.en.md)
+(v4, final) — contains detailed criteria per signal, a step-by-step
+workflow, a live checklist, and a tool → signal mapping.
+
+### Empirical Validation Results
+
+Every technical claim in this framework was validated directly against the
+deployed worker (not assumed) before making it into the final version. A
+few findings that corrected the original assumptions:
+
+| Original claim | Validation result |
+|---|---|
+| <500ms polling for refresh-rate spoofing detection | ❌ Real latency is 298-898ms/call (avg ~485ms) through the worker→Vercel→Binance proxy chain — not reliable for that |
+| Universal top-trader ratio divergence threshold (flat >15% or tiered 3-15%) | ❌ Never triggered — real movement across the 4 pairs tested (SOLUSDT, BNBUSDT, LINKUSDT, AVAXUSDT) over a 2-hour window was only 0.40-2.35 points, far below either threshold |
+| Top-trader ratio historical retention "30-90 days" | ⚠️ Corrected — 90 days isn't available from Binance at all; 30 days only at coarse resolution (4h/1d), 15-minute resolution goes back only ~5 days |
+| Liquidation history can be mapped to price levels | ❌ `binance_get_liquidation_history` only returns `{totalLong, totalShort, dominance}` per time window, no price at all — needs a manual cross-check against `klines` |
+| Calm-market conditions (BTCUSDT) don't over-trigger | ✅ Confirmed — score ~1-1.5/6 (Weak tier) during sideways market, no false alarms under normal conditions |
+
+Full detail (including raw test data per claim): Section 10,
+[`docs/mm_detection_framework.en.md`](docs/mm_detection_framework.en.md#10-empirical-validation).
 
 ## Honest limitations you should know
 
@@ -299,6 +327,29 @@ domain).
    required)
 4. Save, then enable the connector for whichever conversations you want
 
+### Example Usage
+
+Once the connector is active, just ask in normal conversation — Claude
+decides which tool(s) to call, and how many times, based on the question:
+
+- *"What's BTCUSDT's funding rate right now, any sign of crowding?"* →
+  `binance_get_funding_rate`
+- *"Which pair has the most extreme funding rate across the whole market
+  right now?"* → `binance_scan_funding_extremes`
+- *"Give me a full overview of ETHUSDT — funding, OI, order book, price
+  bias"* → `binance_analyze_pair` (composite, 1 call instead of 6 separate
+  ones)
+- *"Any signs of market maker activity in SOLUSDT lately?"* → a combination
+  of tools (order book, agg trades, OI, liquidation, klines) following the
+  [Analysis Framework](#analysis-framework-market-maker--whale-detection)
+  above — just name the pair, Claude runs the detection workflow
+- *"Compare the funding rate of BTC, ETH, SOL, and BNB"* →
+  `binance_compare_symbols`
+
+Since every tool is read-only, it's safe to ask anything about market data
+without risking triggering an order/trade — this worker has no such
+capability at all.
+
 ## Manual testing before registering with Claude (recommended)
 
 There's no automated test suite in this repo — `npm run typecheck` is the
@@ -331,7 +382,23 @@ proxy path works. For the Coinalyze path, change `name` to
 `binance_get_liquidation_history` — if that also returns valid data, the
 Coinalyze path works.
 
-## Token Efficiency Audit
+## Audit & Results
+
+### Token Efficiency
+
+MCP tool responses go straight into Claude's context window — unlike a
+normal REST API, where response size is comparatively free. This repo used
+to have a few tools that quietly wasted tokens; they've since been fixed
+and verified against the live worker (2026-08-12):
+
+| Finding | Before | After |
+|---|---|---|
+| `binance_get_klines`/`spot_klines` — `structuredContent.candles` always included the full array | ~14,400 tokens at `limit=500` (57.7KB), up to ~43,000 tokens at the max limit of 1500 | Opt-in via the `includeCandles` parameter (default `false`) — default returns only a summary (bias, swing high/low, last 15 candles) |
+| 6 history tools (OI history, long/short ratio, top trader ratio, funding rate history, taker volume ratio, liquidation history) — unbounded text table rows | 20-29KB (~5,000-7,250 tokens) per call at `limit=500` | Truncated to the last 15 rows in text — summary stats (avg/trend/dominance) are still computed from the FULL fetched set, not just what's displayed |
+| The 5 longest tool descriptions (funding_rate, top_trader_ratio, spot_price, klines, spot_klines) | 16,869 characters total | 15,671 characters (~7%, ~300 tokens saved on the one-time tool-list load per session) |
+| `binance_scan_funding_extremes` — `structuredContent.crowdedLong/crowdedShort` duplicated the array already shown in the text table | ~2.9KB at `limit=50` (max) | Just `topSymbolLong`/`topSymbolShort` (the single most extreme symbol per side) — the full ranked list stays in the text table |
+
+Re-verify anytime:
 
 ```bash
 npm run token-audit
@@ -346,6 +413,31 @@ tool description or response format changes. Token estimation uses a
 chars/4 heuristic (no publicly published Claude tokenizer package exists),
 so the numbers are approximate — useful for relative comparison
 (before vs. after a change), not exact token counts.
+
+### Security
+
+- **Symbol input validation.** `symbolSchema` (used by every tool that
+  takes a `symbol` parameter) is capped at 20 characters and only accepts
+  `[A-Z0-9_]`. There was previously no bound — since the symbol is used
+  directly as part of Workers KV keys (`threshold:${symbol}`,
+  `basis_history:${symbol}`), unbounded input risked exceeding KV's
+  512-byte key limit or injecting characters (colons, newlines) that could
+  corrupt key construction. The 20-character bound was validated against
+  real data (the longest symbol on Binance Futures today is 17 characters),
+  and the regex deliberately allows underscores so dated/quarterly
+  contracts (e.g. `BTCUSDT_260925`) stay valid.
+- **Read-only with respect to accounts.** No tool places orders or trades,
+  or accesses private account data — the one tool that writes state
+  (`binance_set_pair_threshold`) only stores a threshold preference in the
+  worker's own Workers KV.
+- **Credentials always go through Wrangler secrets**, never hardcoded or
+  committed to `wrangler.toml`/git — see the explicit warning in the
+  [Vercel Proxy setup](#setup-vercel-proxy-required-one-time) section about
+  setting secrets safely.
+- This repo was manually scanned to confirm no real API key, secret, or
+  credential is committed anywhere — only placeholders/examples (e.g. the
+  proxy URL `whale-pearl.vercel.app` in the setup docs is an example name,
+  not a real endpoint).
 
 ## Cost
 
