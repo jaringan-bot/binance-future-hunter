@@ -19,6 +19,7 @@
 8. [Mapping Tool → Sinyal](#8-mapping-tool--sinyal)
 9. [Catatan Validasi Praktis](#9-catatan-validasi-praktis)
 10. [Kesimpulan](#10-kesimpulan)
+11. [Automated Scoring — binance_detect_mm_activity](#11-automated-scoring--binance_detect_mm_activity)
 
 ---
 
@@ -276,6 +277,8 @@
 | `binance_get_funding_rate` | Funding manipulation, scheduled rebalancing | — |
 | `binance_get_funding_rate_history` | Funding pattern analysis | — |
 | `binance_get_klines` | Wick analysis, reversal confirmation, harga mapping | — |
+| `binance_detect_mm_activity` | SEMUA 6 sinyal di atas sekaligus, otomatis + skor (lihat Section 11) | Spoofing & stop-hunt heuristik 1-snapshot, confidence lebih rendah dari 4 sinyal lain |
+| `binance_backtest_signal` | Validasi empiris skor `binance_detect_mm_activity` historis (win rate/avg return) | Forward return on-demand dari klines, bukan simulasi eksekusi riil; watchlist tetap 10 pair saja |
 
 ---
 
@@ -329,5 +332,62 @@ Skor ~1-1.5/6 → tier Weak. **Hasil masuk akal** — BTC tenang, framework tida
 
 ---
 
+## 11. Automated Scoring — `binance_detect_mm_activity`
+
+Section 1-8 di atas adalah workflow MANUAL (gabungin 5-6 tool call sendiri,
+baca tabel, hitung berapa sinyal align). `binance_detect_mm_activity`
+(dirilis 2026-08-12) otomasi PERSIS workflow itu jadi 1 tool call: fetch
+6 sumber data lewat `Promise.all`, hitung skor tiap sinyal (0-1), jumlahin
+jadi total 0-6, klasifikasi tier.
+
+**PENTING — ini SISTEM SKOR BEDA dari checklist Section 7**, jangan
+disamain:
+
+| | Section 7 (manual) | Section 11 (`binance_detect_mm_activity`) |
+|---|---|---|
+| Granularitas | Checklist ya/tidak (0-6 diskrit) | Skor kontinu tiap sinyal (0-1) |
+| Jumlah sinyal | 6 (order book, CVD, OI, basis, liquidation+klines, top trader) | 6 tapi BEDA komposisi (lihat mapping di bawah) |
+| Tier | Weak(1-2)/Moderate(3-4)/Strong(5-6) | Weak(<2)/Moderate(<3.5)/Strong(<5)/Extreme(≥5) |
+| Liquidation | Sinyal terpisah (Section 4.1, butuh `binance_get_liquidation_history` + `klines` manual) | TIDAK dipakai — stop-hunt cuma dari `klines` (lihat batasan di bawah) |
+
+### Mapping sinyal otomatis → section manual
+
+| Sinyal (`src/tools/detectMmActivity.ts`) | Section terkait | Formula ringkas | Confidence |
+|---|---|---|---|
+| `absorption` | 2.1 Order Book Absorption | CVD buy% dominan (>60%) + harga flat (\|Δ\|<0.5%) + OI naik tajam (>3%) → skor 0.7-1.0. CVD buy% (>55%) + harga turun → 0.5 (lemah). Selain itu → 0.1 | **Medium** — pakai CVD+OI+harga (data resmi Binance), TAPI cuma window 1 snapshot klines, bukan cross-check spot CVD kayak Section 2.1 manual |
+| `spoofing` | 3.1 Wall Pull / Spoofing | Spread >0.2% + wall terbesar >1% dari volume 24h → 0.6. Selain itu → 0.1 | **Low** — cuma 1 snapshot order book (bukan 2 snapshot <3 detik yang Section 3.1 minta; lihat Section 10 #2, latency proxy 298-898ms bikin itu gak reliable). Heuristik wall-vs-volume, BUKAN true spoofing detection |
+| `stopHunt` | 4.1 Liquidation Cluster Reversal | Wick >70% dari range + body <20% + reversal candle → 0.8. Wick >60% doang → 0.5. Selain itu → 0.1 | **Low** — CUMA dari `klines` (wick+reversal), TANPA konfirmasi `binance_get_liquidation_history` yang Section 4.1 minta (liquidation history gak ada field harga + Coinalyze rate-limited, lihat Section 8) |
+| `basisArb` | 5.1 Spot-Futures Basis Arbitrage | Kalau symbol ada histori D1 (10 pair watchlist tetap): z-score basis >2 std dev + funding >0.05% → 0.9. Tanpa histori: basis >2x threshold → 0.7 (kurang akurat, dicatat di evidence), >threshold → 0.5. Selain itu → 0.1 | **Medium-High** untuk 10 pair watchlist (ada konteks histori D1 24 jam), **Medium** untuk pair lain (threshold statis, gak ada konteks distribusi) |
+| `oiDivergence` | 2.1 (OI naik tajam) + 6.STEP3 | OI naik >5% + harga flat (\|Δ\|<1%) → 0.8. OI naik >3% berlawanan arah harga → 0.7. Selain itu → 0.1 | **Medium** — data OI resmi Binance, tapi window cuma 1 jam (2 titik data), bukan histori panjang |
+| `fundingExtreme` | 5.2 Funding Rate Manipulation | Funding >3x threshold → 1.0, >2x → 0.8, >threshold → 0.6, di bawah → skala proporsional | **High** — funding rate langsung dari Binance (`premiumIndex`), paling reliable dari 6 sinyal ini |
+
+**Threshold default**: funding ±0.03% (0.0003), basis ±0.05% (0.0005) —
+sama persis dengan default `binance_get_funding_rate`/`binance_get_spot_price`,
+bisa di-override per-pair lewat `binance_set_pair_threshold` (Workers KV,
+dipakai otomatis oleh `binance_detect_mm_activity` juga).
+
+**Yang TIDAK diikutkan dari framework manual**: top-trader divergence
+(Section 4.2) dan taker volume divergence (Section 2.2) TIDAK jadi sinyal
+terpisah di versi otomatis ini — di luar scope 6-sinyal awal
+(`whalescope_mcp_roadmap.md` Appendix A). Follow-up yang masuk akal kalau
+mau nambah presisi skor.
+
+### Validasi empiris — lewat `binance_backtest_signal`, bukan lagi manual
+
+Section 10 di atas (Validasi Empiris) dilakuin manual sebelum
+`binance_detect_mm_activity` ada — cocokin sinyal-per-sinyal ke kondisi
+pasar riil, sekali jalan. Sekarang, tiap 5 menit Cron Trigger snapshot ke-6
+skor di atas ke D1 (`signal_history`, watchlist 10 pair tetap) TANPA perlu
+dites manual lagi — `binance_backtest_signal` query histori itu, hitung
+forward return N jam setelah tiap sinyal aktif (skor ≥0.6) trigger, agregat
+win rate/avg return/max drawdown. Ini validasi EMPIRIS BERKELANJUTAN,
+bukan snapshot satu kali kayak Section 10 — tapi baru mulai ngumpulin data
+dari tanggal deploy (2026-08-12), belum retroaktif, dan sample size kecil
+di awal berarti confidence rendah (lihat catatan di README "Keterbatasan
+yang jujur perlu diketahui").
+
+---
+
 *Dibuat pada: 2026-08-11*
 *Versi 4.0 (final) — semua klaim teknis divalidasi langsung ke data live WhaleScope MCP, termasuk latency, batas historis endpoint, dan realita pergerakan top-trader ratio lintas pair.*
+*Section 11 ditambahkan 2026-08-12: dokumentasi `binance_detect_mm_activity` (automated scoring) + `binance_backtest_signal` (validasi empiris berkelanjutan).*
