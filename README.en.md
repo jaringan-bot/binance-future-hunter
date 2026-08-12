@@ -100,6 +100,11 @@ setup required. Per-pair custom thresholds are stored in Workers KV
 fixed 10-pair watchlist (BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT,
 DOGEUSDT, ADAUSDT, AVAXUSDT, LINKUSDT, LTCUSDT).
 
+**Cross-exchange, no extra proxy needed.** `whalescope_compare_funding_across_exchanges`
+accesses Bybit/OKX/Hyperliquid DIRECTLY from the worker (tested from real
+Cloudflare edge, no WAF/geo-block like Binance) — no credentials or extra
+setup needed for those 3 exchanges.
+
 ## What's provided
 
 | Tool | Function | Source |
@@ -136,6 +141,7 @@ DOGEUSDT, ADAUSDT, AVAXUSDT, LINKUSDT, LTCUSDT).
 | `binance_detect_mm_activity` | Score + tier (Weak/Moderate/Strong/Extreme) from 6 MM/whale signals at once (absorption, spoofing heuristic, stop-hunt heuristic, basis arbitrage, OI divergence, funding extreme) — replaces 5-6 manual tool calls. **Spoofing & stop-hunt scores are 1-snapshot heuristics only**, see [Honest limitations](#honest-limitations-you-should-know) | Binance native |
 | `binance_market_regime` | Classifies current market condition: TRENDING_UP/DOWN, RANGING, BREAKOUT, ACCUMULATION, DISTRIBUTION — uses ADX(14), OI trend, CVD, volatility/volume spike ratio | Binance native |
 | `binance_backtest_signal` | Empirically validates `binance_detect_mm_activity` signals: win rate/avg return/max drawdown from D1 signal history (fixed watchlist), forward return computed on-demand from historical klines | D1 + Binance native |
+| `whalescope_compare_funding_across_exchanges` | Compares funding rate + last price for one pair across Binance/Bybit/OKX/Hyperliquid, flags divergence — cross-confirms MM detection signals across venues. The only tool that is NOT Binance-only | Binance native + Bybit + OKX + Hyperliquid |
 | `binance_get_tool_catalog` | Lists all tools with category/token-cost/use-case, filterable by category — check this before calling many individual tools | Static |
 
 ## Analysis Framework: Market Maker & Whale Detection
@@ -231,6 +237,12 @@ Full detail (including raw test data per claim): Section 10,
   confidence — don't conclude a signal is "reliable" from little historical
   data (data only starts accumulating from when this feature was deployed,
   not retroactively).
+- **`whalescope_compare_funding_across_exchanges`: funding rate + last
+  price only**, NOT OI/24h change (those fields aren't consistent across
+  the 4 exchanges, deliberately out of scope). Binance→other-exchange
+  symbol mapping is best-effort (strips the USDT suffix) — a pair not
+  listed on Bybit/OKX/Hyperliquid shows as "failed" on that row instead of
+  failing the whole tool call.
 
 ## Setup: Coinalyze API Key (required, one-time)
 

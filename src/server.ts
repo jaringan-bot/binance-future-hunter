@@ -14,6 +14,7 @@ import { registerMmDetectionTools } from "./tools/detectMmActivity.js";
 import { registerMarketRegimeTools } from "./tools/marketRegime.js";
 import { registerCatalogTools } from "./tools/catalog.js";
 import { registerBacktestTools } from "./tools/backtest.js";
+import { registerCrossExchangeTools } from "./tools/crossExchange.js";
 
 export function createServer(): McpServer {
   const server = new McpServer({
@@ -36,6 +37,7 @@ export function createServer(): McpServer {
   registerMarketRegimeTools(server);
   registerCatalogTools(server);
   registerBacktestTools(server);
+  registerCrossExchangeTools(server);
 
   return server;
 }
