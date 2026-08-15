@@ -1,4 +1,5 @@
 import type { BinanceMarketData } from "./binanceFetcher.js";
+import type { GridContextualRisk } from "./marketContext.js";
 
 export interface GridInputParams {
   symbol: string;
@@ -19,6 +20,7 @@ export interface GridRiskAnalysisResult {
   capitalPerGridUSD: number;
   maxExposureSL: number;
   slippageStressedLoss: number;
+  stressMultiplier: 1.15 | 1.25;
   liquidationPrice: number;
   dailyFundingBleedUSD: number;
   rawProfitPerCycleUSD: number;
@@ -30,6 +32,7 @@ export interface GridRiskAnalysisResult {
   gridTypeMismatch: boolean;
   status: "SAFE" | "MODERATE" | "HIGH_RISK" | "REJECT";
   rejectionReason?: string;
+  decisionReason?: string;
 }
 
 function arithmeticGrid(lower: number, upper: number, count: number): number[] {
@@ -60,6 +63,7 @@ function reject(
     capitalPerGridUSD: 0,
     maxExposureSL: 0,
     slippageStressedLoss: 0,
+    stressMultiplier: 1.15,
     liquidationPrice: 0,
     dailyFundingBleedUSD: 0,
     rawProfitPerCycleUSD: 0,
@@ -77,6 +81,7 @@ function reject(
 export function calculateGridRisk(
   params: GridInputParams,
   marketData: BinanceMarketData,
+  contextualRisk: GridContextualRisk,
 ): GridRiskAnalysisResult {
   const feeRate = params.feeRate ?? 0.0005;
 
@@ -140,7 +145,8 @@ export function calculateGridRisk(
     totalQuantity * (avgEntryPrice - params.stopLossPrice) +
     totalQuantity * params.stopLossPrice * feeRate;
 
-  const slippageStressedLoss = Math.max(maxExposureSL, 0) * 1.15;
+  const stressMultiplier = contextualRisk.stressMultiplier;
+  const slippageStressedLoss = Math.max(maxExposureSL, 0) * stressMultiplier;
 
   const liquidationPrice =
     avgEntryPrice * (1 - 1 / params.leverage + 0.005);
@@ -174,8 +180,16 @@ export function calculateGridRisk(
 
   let status: GridRiskAnalysisResult["status"] = "SAFE";
   let rejectionReason: string | undefined;
+  let decisionReason: string | undefined;
 
-  if (liquidationPrice >= params.stopLossPrice) {
+  if (
+    contextualRisk.marketRegime === "BREAKOUT" &&
+    (contextualRisk.priceChangePct ?? 0) < 0
+  ) {
+    status = "REJECT";
+    rejectionReason =
+      "Bearish breakout detected: price is breaking down outside the grid regime toward the long-grid stop loss.";
+  } else if (liquidationPrice >= params.stopLossPrice) {
     status = "REJECT";
     rejectionReason =
       "Dynamic liquidation price is at or above the configured stop-loss price.";
@@ -183,10 +197,23 @@ export function calculateGridRisk(
     status = "REJECT";
     rejectionReason =
       "Net profit per cycle is zero or negative after funding bleed.";
+  } else if (
+    contextualRisk.marketRegime === "BREAKOUT" &&
+    (contextualRisk.priceChangePct ?? 0) > 0
+  ) {
+    status = "HIGH_RISK";
+    decisionReason =
+      "Bullish breakout detected: capital is directionally safer, but the grid range has been exceeded and grid harvesting is ineffective.";
   } else if (riskPercentage > 15 || minBreakevenCycles > 75) {
     status = "HIGH_RISK";
   } else if (riskPercentage > 5 || minBreakevenCycles > 35) {
     status = "MODERATE";
+  }
+
+  if (gridTypeMismatch && status === "SAFE") {
+    status = "MODERATE";
+    decisionReason =
+      "Grid type is mismatched with the configured range threshold; review grid construction before deployment.";
   }
 
   return {
@@ -195,6 +222,7 @@ export function calculateGridRisk(
     capitalPerGridUSD: round(capitalPerGridUSD),
     maxExposureSL: round(maxExposureSL),
     slippageStressedLoss: round(slippageStressedLoss),
+    stressMultiplier,
     liquidationPrice: round(liquidationPrice),
     dailyFundingBleedUSD: round(dailyFundingBleedUSD),
     rawProfitPerCycleUSD: round(rawProfitPerCycleUSD),
@@ -206,5 +234,6 @@ export function calculateGridRisk(
     gridTypeMismatch,
     status,
     ...(rejectionReason !== undefined ? { rejectionReason } : {}),
+    ...(decisionReason !== undefined ? { decisionReason } : {}),
   };
 }
