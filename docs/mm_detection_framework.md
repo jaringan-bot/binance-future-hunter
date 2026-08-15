@@ -20,6 +20,7 @@
 9. [Catatan Validasi Praktis](#9-catatan-validasi-praktis)
 10. [Kesimpulan](#10-kesimpulan)
 11. [Automated Scoring — binance_detect_mm_activity](#11-automated-scoring--binance_detect_mm_activity)
+12. [Smart Money Divergence Score — binance_analyze_smart_money](#12-smart-money-divergence-score--binance_analyze_smart_money)
 
 ---
 
@@ -388,6 +389,44 @@ yang jujur perlu diketahui").
 
 ---
 
+## 12. Smart Money Divergence Score — `binance_analyze_smart_money`
+
+Tool KEDUA yang mengotomatisasi bagian dari framework ini jadi skor
+terstruktur (di samping `binance_detect_mm_activity` di Section 11) --
+tapi fokusnya SEMPIT dan BEDA: bukan 6 sinyal absorption/spoofing/
+stop-hunt/basis-arb/OI-divergence/funding-extreme, melainkan spesifik
+Section 4.2 (Top Trader Divergence) diperluas dengan OI delta, funding
+rate, dan orderbook imbalance sebagai konteks pendukung.
+
+**PENTING -- perbedaan dengan Section 4.2:** Section 4.2 secara eksplisit
+menyimpulkan threshold absolut pada top-trader ratio TIDAK VALID tanpa
+kalibrasi per-pair (pergerakan riil 0.4-2.35 poin/2 jam, jauh di bawah
+threshold universal manapun yang pernah dicoba). `binance_analyze_smart_money`
+tetap pakai threshold fixed (`topTraderPositionRatio > 1.4`, `> 1.2`, `< 0.95`;
+`globalAccountRatio > 1.8`, `< 0.8`; `fundingRate < -0.03%`) sesuai
+spesifikasi eksplisit tool ini -- BUKAN klaim baru bahwa threshold absolut
+sudah tervalidasi. `confidenceScore` output tool ini mengkompensasi dengan
+mengukur margin di atas threshold + sinyal pendukung searah (funding,
+orderbook), bukan probabilitas statistik. Untuk keputusan berisiko tinggi,
+tetap cross-check dengan pendekatan relatif Section 4.2 (persentil historis
+pair itu sendiri) atau `binance_detect_mm_activity` (Section 11, sinyal
+berbeda, konfirmasi silang lebih kuat daripada mengandalkan satu tool saja).
+
+**4 kondisi yang dideteksi** (prioritas kalau overlap: liquidation risk >
+accumulation > squeeze):
+
+| Kondisi | Kriteria |
+|---|---|
+| `LONG_LIQUIDATION_RISK` | Global account ratio > 1.8, top trader ratio < 0.95, OI naik |
+| `BULLISH_ACCUMULATION` | Top trader ratio > 1.4, global account ratio < 0.8, OI naik |
+| `SHORT_SQUEEZE_RISK` | Funding rate < -0.03%, top trader ratio > 1.2, harga tidak bullish |
+| `NEUTRAL` | Tidak ada kombinasi di atas yang match |
+
+Lihat `src/smartMoneyAnalysis.ts` untuk formula skor lengkap.
+
+---
+
 *Dibuat pada: 2026-08-11*
 *Versi 4.0 (final) — semua klaim teknis divalidasi langsung ke data live WhaleScope MCP, termasuk latency, batas historis endpoint, dan realita pergerakan top-trader ratio lintas pair.*
 *Section 11 ditambahkan 2026-08-12: dokumentasi `binance_detect_mm_activity` (automated scoring) + `binance_backtest_signal` (validasi empiris berkelanjutan).*
+*Section 12 ditambahkan 2026-08-15: dokumentasi `binance_analyze_smart_money` (Smart Money Divergence Score).*

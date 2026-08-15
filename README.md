@@ -20,7 +20,7 @@ generate `id`/`database_id` baru buat akun kamu, gak perlu bikin manual).
 setelah klik, kamu TETAP perlu set secret (Cloudflare gak bisa nebak value
 dari layanan eksternal) — lihat `.dev.vars.example` di repo ini buat daftar
 lengkap, atau [Setup Proxy Vercel](#setup-proxy-vercel-wajib-sekali-saja)
-di bawah. `PROXY_URL`/`PROXY_SECRET` WAJIB (33 dari 34 tool butuh),
+di bawah. `PROXY_URL`/`PROXY_SECRET` WAJIB (34 dari 35 tool butuh),
 Coinalyze API key **OPSIONAL** (cuma 1 tool) — skip kalau gak butuh
 liquidation history.
 
@@ -74,7 +74,7 @@ dalam percakapan dengan Claude, tanpa perlu buka dashboard exchange terpisah.
   [Keterbatasan](#keterbatasan-yang-jujur-perlu-diketahui) untuk detail.
 - **Setup awal butuh proxy Vercel** (wajib) — bukan pasang-langsung-jalan,
   ada langkah konfigurasi manual sekali di awal. Coinalyze API key OPSIONAL
-  (cuma buat 1 dari 34 tool), gak menghalangi setup awal kalau di-skip.
+  (cuma buat 1 dari 35 tool), gak menghalangi setup awal kalau di-skip.
 - **Rate limit free tier Coinalyze** (40 request/menit per API key) bisa jadi
   bottleneck kalau dipakai sangat intensif.
 - Tidak ada data wallet on-chain atau data dari exchange selain Binance
@@ -100,7 +100,7 @@ dalam percakapan dengan Claude, tanpa perlu buka dashboard exchange terpisah.
   Cloudflare, jadi tidak kena block yang sama.
 
 Konsekuensinya, worker ini butuh `PROXY_URL`/`PROXY_SECRET` (proxy Vercel,
-wajib buat 33 tool Binance-native) dan, opsional, `COINALYZE_API_KEY`
+wajib buat 34 tool Binance-native) dan, opsional, `COINALYZE_API_KEY`
 (cuma buat `binance_get_liquidation_history`) — lihat bagian Setup di
 bawah.
 
@@ -155,6 +155,7 @@ kredensial atau setup tambahan buat 3 exchange itu.
 | `binance_detect_mm_activity` | Skor + tier (Weak/Moderate/Strong/Extreme) dari 6 sinyal MM/whale sekaligus (absorption, spoofing heuristic, stop-hunt heuristic, basis arbitrage, OI divergence, funding extreme) — ganti 5-6 tool call manual. **Skor spoofing & stop-hunt cuma heuristik 1-snapshot**, lihat [Keterbatasan](#keterbatasan-yang-jujur-perlu-diketahui) | Binance native |
 | `binance_market_regime` | Klasifikasi kondisi pasar: TRENDING_UP/DOWN, RANGING, BREAKOUT, ACCUMULATION, DISTRIBUTION — pakai ADX(14), tren OI, CVD, spike volatilitas/volume | Binance native |
 | `binance_backtest_signal` | Validasi empiris sinyal `binance_detect_mm_activity`: win rate/avg return/max drawdown dari histori sinyal D1 (watchlist tetap), forward return dihitung on-demand dari klines historis | D1 + Binance native |
+| `binance_analyze_smart_money` | Skor divergensi smart money (top trader) vs retail (global account) dari 5 variabel: top trader ratio, global account ratio, delta OI, funding rate, orderbook imbalance — kondisi LONG_LIQUIDATION_RISK/BULLISH_ACCUMULATION/SHORT_SQUEEZE_RISK/NEUTRAL + confidenceScore. Beda dari `binance_detect_mm_activity` (6 sinyal absorption/spoofing/stop-hunt/basis-arb) — fokus khusus top-trader-vs-retail | Binance native |
 | `whalescope_compare_funding_across_exchanges` | Bandingkan funding rate, last price, open interest, 24h change 1 pair across Binance/Bybit/OKX/Hyperliquid, deteksi divergensi — cross-confirm sinyal MM detection antar exchange. Satu-satunya tool yang BUKAN Binance-only | Binance native + Bybit + OKX + Hyperliquid |
 | `binance_get_tool_catalog` | Daftar semua tool + kategori/token-cost/use-case, filter per kategori — cek ini dulu sebelum manggil banyak tool individual. Nama+description auto dari tool registry (selalu akurat), kategori/token-cost tetap manual | Semi-otomatis |
 
@@ -266,6 +267,12 @@ Detail penuh (termasuk raw data test per klaim): Section 10,
   `src/tools/catalog.ts`) — tool baru yang belum di-curated bakal muncul
   dengan category `"uncategorized"`, tetap kelihatan (gak ke-omit diam-diam)
   tapi belum ter-kategorisasi rapi.
+- **`binance_analyze_smart_money` pakai threshold FIXED** (bukan hasil
+  kalibrasi statistik per-pair) — lihat Section 4.2 & 12 di
+  `docs/mm_detection_framework.md` untuk kenapa threshold absolut pada
+  top-trader ratio harus dipakai hati-hati. `confidenceScore` output-nya
+  mengukur margin di atas threshold, BUKAN probabilitas statistik
+  terkalibrasi.
 
 ## Setup Proxy Vercel (wajib, sekali saja)
 
@@ -308,9 +315,26 @@ sama seperti sebelumnya (1 proxy, error langsung dilempar kalau gagal).
    npx wrangler secret put PROXY_SECRET_2
    ```
 
-Failover cuma jalan untuk error yang berkaitan sama kesehatan proxy (403
-WAF block, 429 rate limit, 5xx) — bukan buat error request (400/401/404)
-yang bakal gagal identik di proxy manapun.
+Failover cuma jalan untuk error yang berkaitan sama kesehatan/kredensial
+tier (401 secret salah, 403 WAF block, 429 rate limit, 5xx) — bukan buat
+error request genuinely (400 symbol salah, 404) yang bakal gagal identik
+di tier manapun. 401 SENGAJA termasuk (beda dari versi sebelumnya) karena
+tiap tier proxy punya secret SENDIRI — primary salah bukan berarti
+secondary juga salah.
+
+### Direct fallback (tier terakhir, otomatis ON)
+
+Kalau primary DAN secondary (kalau dikonfigurasi) sama-sama gagal, worker
+otomatis coba langsung ke `fapi.binance.com`/`api.binance.com` TANPA proxy
+sama sekali sebagai last-resort. Tidak butuh setup apapun (default ON) --
+set `DISABLE_DIRECT_FALLBACK=true` di environment variable worker (bukan
+secret, plain var biasa) kalau mau matikan. Lihat komentar "DIRECT
+FALLBACK" di `src/binanceProxyClient.ts` untuk detail & catatan jujur soal
+kenapa tier ini kemungkinan besar tetap kena WAF block di kondisi produksi
+saat ini (worker Cloudflare ini SUDAH TERBUKTI diblokir Binance secara
+langsung) -- tetap berguna untuk `wrangler dev` lokal (IP pool beda dari
+edge Cloudflare produksi) dan sebagai jaring pengaman kalau kebijakan block
+berubah.
 
 ## Setup Workers KV (wajib, sekali saja — kalau fork/deploy repo ini sendiri)
 
@@ -350,10 +374,10 @@ worker"), dan Cron Trigger snapshot basis+sinyal MM (tiap 5 menit) akan
 gagal silent tiap tick (ke-log ke Workers Logs, tidak menggagalkan endpoint
 `/mcp` lain).
 
-## Setup Coinalyze API Key (OPSIONAL — cuma buat 1 dari 34 tool)
+## Setup Coinalyze API Key (OPSIONAL — cuma buat 1 dari 35 tool)
 
 Beda dari 3 setup di atas, ini BUKAN prasyarat buat server jalan. Worker
-deploy & 33 tool lain jalan normal tanpa ini — cuma
+deploy & 34 tool lain jalan normal tanpa ini — cuma
 `binance_get_liquidation_history` yang butuh.
 
 1. Daftar gratis di https://coinalyze.net
@@ -389,6 +413,26 @@ ini bisa liat IP visitor lain, kontradiksi sama tujuannya.
    Balikin JSON: total request, jumlah IP unik, top 20 IP (+ negara,
    count), 20 request terakhir mentah. Default window 24 jam, bisa
    diubah lewat `hours`.
+
+## Keamanan: DNS Rebinding Protection (OPSIONAL)
+
+Endpoint `/mcp` memvalidasi header `Origin` sebelum memproses request --
+default izinkan `https://claude.ai`/`https://claude.com` (dan request TANPA
+header `Origin` sama sekali, yang mencakup mayoritas MCP client
+server-to-server, termasuk cara worker ini dipakai sebagai custom
+connector). Request dengan `Origin` LAIN yang tidak diizinkan dibalas 403.
+Ini pengganti opsi bawaan SDK (`enableDnsRebindingProtection`/
+`allowedHosts`/`allowedOrigins`) yang sudah `@deprecated` di
+`@modelcontextprotocol/sdk` -- SDK sekarang merekomendasikan middleware
+eksternal, itu yang dilakukan di sini.
+
+Kalau kamu punya web app sendiri yang perlu manggil `/mcp` langsung dari
+browser, tambahkan origin-nya:
+```bash
+npx wrangler secret put ALLOWED_ORIGINS
+# contoh value: https://app-kamu.com,https://staging.app-kamu.com
+```
+(comma-separated, tanpa spasi setelah koma juga OK -- di-trim otomatis.)
 
 Data disimpan di D1 (`request_log`), di-prune otomatis tiap Cron tick
 buat row lebih dari 30 hari (tabel ini gak dibatasi watchlist tetap kayak

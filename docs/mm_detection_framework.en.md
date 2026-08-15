@@ -20,6 +20,7 @@
 9. [Conclusion](#9-conclusion)
 10. [Empirical Validation](#10-empirical-validation)
 11. [Automated Scoring — binance_detect_mm_activity](#11-automated-scoring--binance_detect_mm_activity)
+12. [Smart Money Divergence Score — binance_analyze_smart_money](#12-smart-money-divergence-score--binance_analyze_smart_money)
 
 ---
 
@@ -392,6 +393,45 @@ limitations you should know").
 
 ---
 
+## 12. Smart Money Divergence Score — `binance_analyze_smart_money`
+
+A SECOND tool that automates part of this framework into a structured
+score (alongside `binance_detect_mm_activity` in Section 11) — but its
+focus is NARROWER and DIFFERENT: not the 6 absorption/spoofing/stop-hunt/
+basis-arb/OI-divergence/funding-extreme signals, but specifically Section
+4.2 (Top Trader Divergence) extended with OI delta, funding rate, and
+orderbook imbalance as supporting context.
+
+**IMPORTANT -- difference from Section 4.2:** Section 4.2 explicitly
+concludes that absolute thresholds on the top-trader ratio are NOT VALID
+without per-pair calibration (real-world movement is 0.4-2.35 points/2h,
+far below any universal threshold ever tested). `binance_analyze_smart_money`
+still uses fixed thresholds (`topTraderPositionRatio > 1.4`, `> 1.2`,
+`< 0.95`; `globalAccountRatio > 1.8`, `< 0.8`; `fundingRate < -0.03%`) per
+this tool's explicit spec -- this is NOT a new claim that absolute
+thresholds are now validated. The tool's `confidenceScore` output
+compensates by measuring margin past threshold + aligned supporting
+signals (funding, orderbook), not a statistical probability. For
+high-stakes decisions, still cross-check with Section 4.2's relative
+approach (the pair's own historical percentile) or
+`binance_detect_mm_activity` (Section 11, different signals -- cross-
+confirmation is stronger than relying on one tool alone).
+
+**4 detected conditions** (priority on overlap: liquidation risk >
+accumulation > squeeze):
+
+| Condition | Criteria |
+|---|---|
+| `LONG_LIQUIDATION_RISK` | Global account ratio > 1.8, top trader ratio < 0.95, OI rising |
+| `BULLISH_ACCUMULATION` | Top trader ratio > 1.4, global account ratio < 0.8, OI rising |
+| `SHORT_SQUEEZE_RISK` | Funding rate < -0.03%, top trader ratio > 1.2, price not bullish |
+| `NEUTRAL` | None of the above combinations match |
+
+See `src/smartMoneyAnalysis.ts` for the full scoring formula.
+
+---
+
 *Created: 2026-08-11*
 *Version 4.0 (final) — every technical claim validated directly against live WhaleScope MCP data, including latency, endpoint historical limits, and the real-world movement of the top-trader ratio across pairs.*
 *Section 11 added 2026-08-12: documents `binance_detect_mm_activity` (automated scoring) + `binance_backtest_signal` (continuous empirical validation).*
+*Section 12 added 2026-08-15: documents `binance_analyze_smart_money` (Smart Money Divergence Score).*
