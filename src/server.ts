@@ -15,6 +15,7 @@ import { registerMarketRegimeTools } from "./tools/marketRegime.js";
 import { registerCatalogTools } from "./tools/catalog.js";
 import { registerBacktestTools } from "./tools/backtest.js";
 import { registerCrossExchangeTools } from "./tools/crossExchange.js";
+import { registerSmartMoneyTools } from "./tools/smartMoney.js";
 import { resetToolRegistry } from "./toolWrapper.js";
 
 export function createServer(): McpServer {
@@ -44,6 +45,7 @@ export function createServer(): McpServer {
   registerCatalogTools(server);
   registerBacktestTools(server);
   registerCrossExchangeTools(server);
+  registerSmartMoneyTools(server);
 
   return server;
 }
