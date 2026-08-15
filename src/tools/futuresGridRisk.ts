@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerSafeTool } from "../toolWrapper.js";
 import { fetchBinanceMarketData } from "../binanceFetcher.js";
+import { fetchMarketContext } from "../marketContext.js";
 import { calculateGridRisk } from "../gridRiskEngine.js";
 
 const gridRiskSchema = {
@@ -24,7 +25,7 @@ export function registerFuturesGridRiskTool(server: McpServer): void {
     {
       title: "Analyze Futures Grid Risk",
       description:
-        "Analyze Binance Futures long-grid risk using capital allocation, stop loss, dynamic liquidation, funding bleed, and stressed loss.",
+        "Analyze Binance Futures long-grid risk with core grid math, Market Regime context, Top-Trader/OI squeeze risk, dynamic stress, and circuit-breaker decisions.",
       inputSchema: gridRiskSchema,
       annotations: {
         readOnlyHint: true,
@@ -33,43 +34,52 @@ export function registerFuturesGridRiskTool(server: McpServer): void {
     },
     async (params) => {
       try {
-        const marketData = await fetchBinanceMarketData(
-          params.symbol,
-          params.stopLossPrice,
-        );
+        const [marketData, contextualRisk] = await Promise.all([
+          fetchBinanceMarketData(params.symbol, params.stopLossPrice),
+          fetchMarketContext(params.symbol),
+        ]);
 
-        const analysis = calculateGridRisk(params, marketData);
+        const analysis = calculateGridRisk(params, marketData, contextualRisk);
+        const circuitBreakerTriggered = analysis.status === "REJECT";
+        const circuitBreakerReason =
+          analysis.rejectionReason ??
+          analysis.decisionReason ??
+          (analysis.minBreakevenCycles > 0
+            ? `Do not close the bot before ${analysis.minBreakevenCycles} profitable cycles unless a risk circuit breaker is triggered.`
+            : "No cycle threshold is available because the setup is not profitable.");
+
+        const payload = {
+          symbol: params.symbol.toUpperCase(),
+          metrics: analysis,
+          market: marketData,
+          context: contextualRisk,
+          anomalies: {
+            gridTypeMismatch: analysis.gridTypeMismatch,
+            marketRegimeUnavailable: !contextualRisk.contextAvailable,
+            bearishBreakout:
+              contextualRisk.marketRegime === "BREAKOUT" &&
+              (contextualRisk.priceChangePct ?? 0) < 0,
+            bullishBreakout:
+              contextualRisk.marketRegime === "BREAKOUT" &&
+              (contextualRisk.priceChangePct ?? 0) > 0,
+            longSqueezeRisk: contextualRisk.longSqueezeRisk,
+          },
+          circuit_breaker: {
+            triggered: circuitBreakerTriggered,
+            status: analysis.status,
+            minimumCycles: analysis.minBreakevenCycles,
+            reason: circuitBreakerReason,
+          },
+        };
 
         return {
           content: [
             {
               type: "text",
-              text: JSON.stringify(
-                {
-                  symbol: params.symbol.toUpperCase(),
-                  metrics: analysis,
-                  market: marketData,
-                  circuit_breaker: {
-                    triggered: analysis.status === "REJECT",
-                    status: analysis.status,
-                    reason: analysis.rejectionReason ?? null,
-                  },
-                },
-                null,
-                2,
-              ),
+              text: JSON.stringify(payload, null, 2),
             },
           ],
-          structuredContent: {
-            symbol: params.symbol.toUpperCase(),
-            metrics: analysis,
-            market: marketData,
-            circuit_breaker: {
-              triggered: analysis.status === "REJECT",
-              status: analysis.status,
-              reason: analysis.rejectionReason ?? null,
-            },
-          },
+          structuredContent: payload,
         };
       } catch (error) {
         const message =
