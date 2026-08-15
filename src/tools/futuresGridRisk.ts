@@ -1,0 +1,6 @@
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { z } from 'zod';
+import { registerSafeTool } from '../toolWrapper.js';
+import { fetchBinanceMarketData } from '../binanceFetcher.js';
+import { calculateGridRisk } from '../gridRiskEngine.js';
+export function registerFuturesGridRiskTool(server:McpServer):void{registerSafeTool(server,'analyze_futures_grid_risk',{title:'Analyze Futures Grid Risk',description:'Analyze futures grid risk',inputSchema:{symbol:z.string(),initialCapital:z.number(),lowerPrice:z.number(),upperPrice:z.number(),currentPrice:z.number(),gridCount:z.number().int().min(2),stopLossPrice:z.number(),leverage:z.number(),gridType:z.enum(['ARITHMETIC','GEOMETRIC']),feeRate:z.number().default(0.0005)}},async(params)=>{const market=await fetchBinanceMarketData(params.symbol,params.stopLossPrice); const analysis=calculateGridRisk(params,market); return {content:[{type:'text',text:JSON.stringify({market,analysis},null,2)}],structuredContent:{market,analysis}};});}
