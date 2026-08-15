@@ -16,36 +16,6 @@ import { registerCatalogTools } from "./tools/catalog.js";
 import { registerBacktestTools } from "./tools/backtest.js";
 import { registerCrossExchangeTools } from "./tools/crossExchange.js";
 import { registerSmartMoneyTools } from "./tools/smartMoney.js";
+import { registerFuturesGridRiskTool } from "./tools/futuresGridRisk.js";
 import { resetToolRegistry } from "./toolWrapper.js";
-
-export function createServer(): McpServer {
-  const server = new McpServer({
-    name: "whalescope-mcp",
-    version: "1.0.0",
-  });
-
-  // Reset registry auto-catalog (toolWrapper.ts) sebelum register ulang --
-  // createServer() jalan tiap request (stateless), jadi registry harus
-  // dibersihin biar gak numpuk duplikat kalau isolate dipakai ulang.
-  resetToolRegistry();
-
-  registerFundingTools(server);
-  registerOpenInterestTools(server);
-  registerRatiosTools(server);
-  registerOrderbookTools(server);
-  registerTradesTools(server);
-  registerLiquidationTools(server);
-  registerPriceTools(server);
-  registerSpotTools(server);
-  registerCompositeTools(server);
-  registerConfigTools(server);
-  registerBasisHistoryTools(server);
-  registerMmDetectionTools(server);
-  registerMarketRegimeTools(server);
-  registerCatalogTools(server);
-  registerBacktestTools(server);
-  registerCrossExchangeTools(server);
-  registerSmartMoneyTools(server);
-
-  return server;
-}
+export function createServer(): McpServer { const server = new McpServer({ name:'whalescope-mcp', version:'1.0.0'}); resetToolRegistry(); registerFundingTools(server); registerOpenInterestTools(server); registerRatiosTools(server); registerOrderbookTools(server); registerTradesTools(server); registerLiquidationTools(server); registerPriceTools(server); registerSpotTools(server); registerCompositeTools(server); registerConfigTools(server); registerBasisHistoryTools(server); registerMmDetectionTools(server); registerMarketRegimeTools(server); registerCatalogTools(server); registerBacktestTools(server); registerCrossExchangeTools(server); registerSmartMoneyTools(server); registerFuturesGridRiskTool(server); return server;}
