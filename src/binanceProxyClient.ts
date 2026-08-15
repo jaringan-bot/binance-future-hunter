@@ -27,7 +27,7 @@
 // Lihat proxy/README.md untuk detail whitelist path yang diizinkan proxy ini.
 
 import { fetchWithRetry } from "./retry.js";
-import { cachedFetch } from "./cache.js";
+import { withCache } from "./cache.js";
 import { checkAndRecordRequest } from "./rateLimiter.js";
 
 // Path yang TIDAK di-cache sama sekali (ttl=0) -- order book & trade granular
@@ -119,19 +119,24 @@ interface ProxyEndpoint {
 
 let primaryEndpoint: ProxyEndpoint | undefined;
 let secondaryEndpoint: ProxyEndpoint | undefined;
+let directFallbackEnabled = true;
 
-// secondaryUrl/secondarySecret OPSIONAL -- kalau tidak diset, perilaku
-// persis sama seperti sebelum ada failover (cuma 1 proxy, error langsung
-// dilempar). Backward compatible, tidak breaking buat deployment yang belum
-// setup proxy kedua.
+// secondaryUrl/secondarySecret OPSIONAL -- kalau tidak diset, tier kedua
+// cuma di-skip. enableDirectFallback default true: kalau primary DAN
+// secondary (kalau ada) gagal, coba langsung ke fapi.binance.com/
+// api.binance.com TANPA proxy sama sekali sebagai last-resort -- lihat
+// komentar DIRECT FALLBACK di bawah untuk kenapa ini masih berguna
+// meskipun worker ini SUDAH TERBUKTI diblokir WAF Binance secara langsung.
 export function setProxyConfig(
   url: string | undefined,
   secret: string | undefined,
   secondaryUrl?: string,
   secondarySecret?: string,
+  enableDirectFallback = true,
 ) {
   primaryEndpoint = url && secret ? { url, secret } : undefined;
   secondaryEndpoint = secondaryUrl && secondarySecret ? { url: secondaryUrl, secret: secondarySecret } : undefined;
+  directFallbackEnabled = enableDirectFallback;
 }
 
 export class BinanceProxyError extends Error {
@@ -145,13 +150,68 @@ export class BinanceProxyError extends Error {
   }
 }
 
-// Status yang layak dicoba ulang ke proxy SEKUNDER: 403 (WAF block, kasus
-// utama kenapa proxy ini ada), 429 (rate limit), 5xx (proxy/upstream lagi
-// bermasalah). SENGAJA TIDAK termasuk 400/401/404 -- itu error request
-// (symbol salah, secret salah, path salah) yang bakal gagal identik di
-// proxy manapun, retry ke proxy lain cuma buang latency tanpa peluang
-// berhasil.
-const FAILOVER_STATUS = new Set([403, 429, 500, 502, 503, 504]);
+// Status yang layak dicoba ulang ke tier BERIKUTNYA: 401 (secret salah --
+// TIAP tier proxy punya secret SENDIRI, jadi primary salah bukan berarti
+// secondary juga salah, beda kasus dari 400/404 di bawah), 403 (WAF block,
+// kasus utama kenapa proxy ini ada), 429 (rate limit), 5xx (proxy/upstream
+// lagi bermasalah). SENGAJA TIDAK termasuk 400/404 -- itu genuinely error
+// request (symbol salah, path salah) yang bakal gagal identik di tier
+// manapun, retry ke tier lain cuma buang latency tanpa peluang berhasil.
+const FAILOVER_STATUS = new Set([401, 403, 429, 500, 502, 503, 504]);
+
+// DIRECT FALLBACK -- tier terakhir, langsung ke Binance TANPA proxy sama
+// sekali. CATATAN JUJUR: worker Cloudflare ini SUDAH TERBUKTI diblokir
+// total oleh WAF Binance (403, lihat komentar file di atas) -- tier ini di
+// kondisi produksi saat ini kemungkinan besar ikut kena 403. Tetap
+// dipertahankan sebagai last-resort karena: (a) kalau kebijakan block
+// Binance/Cloudflare berubah, tier ini otomatis pulih tanpa perlu redeploy;
+// (b) `wrangler dev` lokal atau fork yang dijalankan dari runtime lain
+// punya IP pool BEDA dari edge Cloudflare produksi, jadi bisa saja tidak
+// kena block sama sekali (dikonfirmasi langsung: `wrangler dev` lokal
+// BERHASIL narik data Binance lewat tier ini tanpa proxy dikonfigurasi
+// sama sekali).
+const DIRECT_BASE_BY_MARKET: Record<"futures" | "spot", string> = {
+  futures: "https://fapi.binance.com",
+  spot: "https://api.binance.com",
+};
+
+// Cache key TERPISAH dari URL fetch fisik -- satu logical request
+// (path+params+market) bisa dilayani tier manapun (primary/secondary/
+// direct), tapi harus tetap 1 cache entry supaya failover antar tier tidak
+// memecah cache jadi entry-entry terpisah per tier (kehilangan hit rate).
+function buildCacheKeyUrl(
+  path: string,
+  params: Record<string, string | number | undefined>,
+  market: "futures" | "spot",
+): string {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined) search.set(key, String(value));
+  }
+  search.sort();
+  return `https://whalescope-cache.internal${path}?market=${market}&${search.toString()}`;
+}
+
+// Parse response body bersama buat callProxyEndpoint & callProxyDirect --
+// keduanya punya kontrak sama (JSON body, error 4xx/5xx dari upstream),
+// cuma beda cara build URL/header request-nya.
+async function parseProxyResponse<T>(response: Response, path: string, authErrorHint: string): Promise<T> {
+  const bodyText = await response.text();
+  if (!response.ok) {
+    throw new BinanceProxyError(
+      `Proxy/Binance error HTTP ${response.status}: ${bodyText.slice(0, 300)}. ` +
+        (response.status === 401 ? authErrorHint : "Cek symbol/parameter, atau kemungkinan geo-restriction Binance."),
+      response.status,
+      path,
+    );
+  }
+
+  try {
+    return JSON.parse(bodyText) as T;
+  } catch {
+    throw new BinanceProxyError(`Response proxy bukan JSON valid: ${bodyText.slice(0, 300)}`, response.status, path);
+  }
+}
 
 async function callProxyEndpoint<T>(
   endpoint: ProxyEndpoint,
@@ -170,11 +230,8 @@ async function callProxyEndpoint<T>(
 
   let response: Response;
   try {
-    response = await cachedFetch(
-      url.toString(),
-      { headers: { "x-proxy-secret": endpoint.secret, Accept: "application/json" } },
-      cacheTtlForPath(path),
-      fetchWithRetry,
+    response = await withCache(buildCacheKeyUrl(path, params, market), cacheTtlForPath(path), () =>
+      fetchWithRetry(url.toString(), { headers: { "x-proxy-secret": endpoint.secret, Accept: "application/json" } }),
     );
   } catch (err) {
     throw new BinanceProxyError(
@@ -184,27 +241,38 @@ async function callProxyEndpoint<T>(
     );
   }
 
-  const bodyText = await response.text();
-  if (!response.ok) {
+  return parseProxyResponse<T>(response, path, "Cek PROXY_SECRET cocok antara worker dan Vercel (primary maupun secondary).");
+}
+
+async function callProxyDirect<T>(
+  path: string,
+  params: Record<string, string | number | undefined>,
+  market: "futures" | "spot",
+): Promise<T> {
+  const url = new URL(`${DIRECT_BASE_BY_MARKET[market]}${path}`);
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined) url.searchParams.set(key, String(value));
+  }
+
+  let response: Response;
+  try {
+    response = await withCache(buildCacheKeyUrl(path, params, market), cacheTtlForPath(path), () =>
+      fetchWithRetry(url.toString(), { headers: { Accept: "application/json" } }),
+    );
+  } catch (err) {
     throw new BinanceProxyError(
-      `Proxy/Binance error HTTP ${response.status}: ${bodyText.slice(0, 300)}. ` +
-        (response.status === 401
-          ? "Cek PROXY_SECRET cocok antara worker dan Vercel."
-          : "Cek symbol/parameter, atau kemungkinan geo-restriction Binance."),
-      response.status,
+      `Gagal menghubungi Binance langsung (direct fallback): ${(err as Error).message}.`,
+      undefined,
       path,
     );
   }
 
-  try {
-    return JSON.parse(bodyText) as T;
-  } catch {
-    throw new BinanceProxyError(
-      `Response proxy bukan JSON valid: ${bodyText.slice(0, 300)}`,
-      response.status,
-      path,
-    );
-  }
+  return parseProxyResponse<T>(response, path, "Kemungkinan WAF block Binance (lihat komentar DIRECT FALLBACK).");
+}
+
+interface ProxyTier {
+  label: string;
+  run: () => Promise<unknown>;
 }
 
 async function callProxy<T>(
@@ -219,6 +287,11 @@ async function callProxy<T>(
       path,
     );
   }
+  // Primary WAJIB dikonfigurasi -- direct fallback cuma dipakai SETELAH
+  // primary (yang sudah dikonfigurasi) gagal, BUKAN pengganti setup proxy
+  // sama sekali. Kalau tidak, error jadi kurang jelas untuk deployment
+  // yang lupa set secret (lihat README "PROXY_URL atau PROXY_SECRET belum
+  // diset" -- pesan itu wajib tetap muncul di kasus ini).
   if (!primaryEndpoint) {
     throw new BinanceProxyError(
       "PROXY_URL atau PROXY_SECRET belum diset di worker. Jalankan `wrangler secret put PROXY_URL` dan `wrangler secret put PROXY_SECRET`.",
@@ -231,16 +304,31 @@ async function callProxy<T>(
   // & keterbatasannya (best-effort per-isolate, bukan hard global limiter).
   checkAndRecordRequest();
 
-  try {
-    return await callProxyEndpoint<T>(primaryEndpoint, path, params, market);
-  } catch (err) {
-    const status = err instanceof BinanceProxyError ? err.status : undefined;
-    const isFailoverWorthy = status === undefined || FAILOVER_STATUS.has(status);
-    if (!secondaryEndpoint || !isFailoverWorthy) throw err;
-
-    console.log(`[proxy-failover] primary gagal (${status ?? "network error"}), coba secondary untuk ${path}`);
-    return callProxyEndpoint<T>(secondaryEndpoint, path, params, market);
+  const tiers: ProxyTier[] = [
+    { label: "primary", run: () => callProxyEndpoint<T>(primaryEndpoint!, path, params, market) },
+  ];
+  if (secondaryEndpoint) {
+    const endpoint = secondaryEndpoint;
+    tiers.push({ label: "secondary", run: () => callProxyEndpoint<T>(endpoint, path, params, market) });
   }
+  if (directFallbackEnabled) {
+    tiers.push({ label: "direct", run: () => callProxyDirect<T>(path, params, market) });
+  }
+
+  let lastErr: unknown;
+  for (let i = 0; i < tiers.length; i++) {
+    try {
+      return (await tiers[i].run()) as T;
+    } catch (err) {
+      lastErr = err;
+      const status = err instanceof BinanceProxyError ? err.status : undefined;
+      const isFailoverWorthy = status === undefined || FAILOVER_STATUS.has(status);
+      const nextTier = tiers[i + 1];
+      if (!isFailoverWorthy || !nextTier) throw err;
+      console.log(`[proxy-failover] ${tiers[i].label} gagal (${status ?? "network error"}), coba ${nextTier.label} untuk ${path}`);
+    }
+  }
+  throw lastErr;
 }
 
 // ─────────────────────────────────────────────────────────────

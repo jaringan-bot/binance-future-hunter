@@ -3,7 +3,7 @@
 # value asli. Buat production, pakai `wrangler secret put <NAME>`, BUKAN
 # file ini.
 
-# WAJIB -- tanpa ini, 33 dari 34 tool (semua "Binance native") gagal.
+# WAJIB -- tanpa ini, 34 dari 35 tool (semua "Binance native") gagal.
 # Lihat README.md bagian "Setup Proxy Vercel".
 PROXY_URL=
 PROXY_SECRET=
@@ -13,7 +13,12 @@ PROXY_SECRET=
 PROXY_URL_2=
 PROXY_SECRET_2=
 
-# OPSIONAL -- cuma dipakai binance_get_liquidation_history (1 dari 34
+# OPSIONAL -- "true" buat matikan direct-to-Binance fallback (tier
+# terakhir setelah primary & secondary gagal, default ON). Lihat
+# README.md bagian "Direct fallback (tier terakhir, otomatis ON)".
+DISABLE_DIRECT_FALLBACK=
+
+# OPSIONAL -- cuma dipakai binance_get_liquidation_history (1 dari 35
 # tool). Skip kalau gak butuh liquidation history. Lihat README.md
 # bagian "Setup Coinalyze API Key".
 COINALYZE_API_KEY=
@@ -22,3 +27,8 @@ COINALYZE_API_KEY=
 # Tanpa ini, endpoint itu SELALU 403. Lihat README.md bagian
 # "Admin: Usage Log".
 ADMIN_SECRET=
+
+# OPSIONAL -- comma-separated, origin browser TAMBAHAN yang diizinkan
+# memanggil /mcp (default: https://claude.ai, https://claude.com). Lihat
+# README.md bagian "Keamanan: DNS Rebinding Protection".
+ALLOWED_ORIGINS=

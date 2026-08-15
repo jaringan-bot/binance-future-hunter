@@ -27,8 +27,31 @@ describe("binanceProxyClient proxy failover", () => {
     setProxyConfig(undefined, undefined);
   });
 
-  it("throws the primary error directly when no secondary is configured", async () => {
+  it("throws immediately when primary is not configured, even with direct fallback enabled", async () => {
+    // Direct fallback only kicks in AFTER a configured primary fails -- it's
+    // not a substitute for setup, so the "PROXY_URL belum diset" error must
+    // stay clear for deployments that simply forgot to set secrets.
+    await expect(getCurrentFundingRateNative("BTCUSDT")).rejects.toThrow(BinanceProxyError);
+  });
+
+  it("falls over to the direct Binance endpoint when primary fails and no secondary is configured", async () => {
     setProxyConfig("https://primary.example", "secret1");
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ msg: "forbidden" }, 403))
+      .mockResolvedValueOnce(jsonResponse(fundingBody, 200));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await getCurrentFundingRateNative("BTCUSDT");
+    expect(result.lastFundingRate).toBe("0.0001");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const directUrl = String(fetchMock.mock.calls[1][0]);
+    expect(directUrl).toContain("https://fapi.binance.com/fapi/v1/premiumIndex");
+    expect((fetchMock.mock.calls[1][1]?.headers as Record<string, string> | undefined)?.["x-proxy-secret"]).toBeUndefined();
+  });
+
+  it("does NOT use direct fallback when explicitly disabled", async () => {
+    setProxyConfig("https://primary.example", "secret1", undefined, undefined, false);
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ msg: "forbidden" }, 403));
     vi.stubGlobal("fetch", fetchMock);
 
@@ -50,7 +73,35 @@ describe("binanceProxyClient proxy failover", () => {
     expect(String(fetchMock.mock.calls[1][0])).toContain("secondary.example");
   });
 
-  it("does NOT fail over on a non-retriable 400 (would fail identically on secondary)", async () => {
+  it("falls over to secondary then direct when primary AND secondary both fail", async () => {
+    setProxyConfig("https://primary.example", "secret1", "https://secondary.example", "secret2");
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ msg: "forbidden" }, 403))
+      .mockResolvedValueOnce(jsonResponse({ msg: "forbidden" }, 403))
+      .mockResolvedValueOnce(jsonResponse(fundingBody, 200));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await getCurrentFundingRateNative("BTCUSDT");
+    expect(result.lastFundingRate).toBe("0.0001");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(String(fetchMock.mock.calls[2][0])).toContain("https://fapi.binance.com");
+  });
+
+  it("falls over on 401 (wrong secret) -- a bad primary secret doesn't imply the secondary's is bad too", async () => {
+    setProxyConfig("https://primary.example", "wrong-secret", "https://secondary.example", "secret2");
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ msg: "unauthorized" }, 401))
+      .mockResolvedValueOnce(jsonResponse(fundingBody, 200));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await getCurrentFundingRateNative("BTCUSDT");
+    expect(result.lastFundingRate).toBe("0.0001");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does NOT fail over on a non-retriable 400 (would fail identically on any tier)", async () => {
     setProxyConfig("https://primary.example", "secret1", "https://secondary.example", "secret2");
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ msg: "bad symbol" }, 400));
     vi.stubGlobal("fetch", fetchMock);

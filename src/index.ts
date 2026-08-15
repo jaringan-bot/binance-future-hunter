@@ -17,6 +17,14 @@ interface Env {
   // instance Vercel region lain, lihat proxy/README.md.
   PROXY_URL_2?: string;
   PROXY_SECRET_2?: string;
+  // OPSIONAL -- "true" buat matikan direct-to-Binance fallback (tier
+  // terakhir setelah primary & secondary gagal, lihat komentar DIRECT
+  // FALLBACK di binanceProxyClient.ts). Default ON.
+  DISABLE_DIRECT_FALLBACK?: string;
+  // OPSIONAL -- comma-separated, origin browser TAMBAHAN yang diizinkan
+  // memanggil /mcp selain default (https://claude.ai, https://claude.com).
+  // Lihat komentar DNS rebinding protection di bawah.
+  ALLOWED_ORIGINS?: string;
   CONFIG_KV?: KVNamespace;
   DB?: D1Database;
   // OPSIONAL -- kalau di-set, aktifin GET /admin/usage (ringkasan siapa
@@ -48,10 +56,47 @@ function withCors(response: Response): Response {
   return new Response(response.body, { status: response.status, headers });
 }
 
+// DNS rebinding / cross-site request protection.
+//
+// @modelcontextprotocol/sdk's WebStandardStreamableHTTPServerTransport still
+// ships `enableDnsRebindingProtection`/`allowedHosts`/`allowedOrigins`
+// options, but they're marked @deprecated in the SDK's own type defs -- the
+// SDK now expects this to be handled by external middleware, which is what
+// this function is.
+//
+// We validate the `Origin` header ONLY (not `Host`). On Cloudflare Workers,
+// which route is even reachable for a given request is decided by the
+// platform (zone/custom-domain binding) before this code runs, so spoofing
+// `Host` doesn't open a new route the way it would on a shared multi-tenant
+// origin server -- Host validation would be redundant here. The real threat
+// this guards against is a malicious web page using DNS rebinding to make a
+// victim's browser call this public endpoint as if it were same-origin;
+// browsers ALWAYS send `Origin` on cross-origin fetch/XHR. Non-browser MCP
+// clients (server-to-server calls, which is how this worker is actually used
+// as a Claude custom connector) typically send no `Origin` header at all, so
+// those are allowed through unconditionally.
+const DEFAULT_ALLOWED_ORIGINS = new Set(["https://claude.ai", "https://claude.com"]);
+
+function isOriginAllowed(origin: string | null, env: Env): boolean {
+  if (!origin) return true;
+  if (DEFAULT_ALLOWED_ORIGINS.has(origin)) return true;
+  const extra = (env.ALLOWED_ORIGINS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return extra.includes(origin);
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     coinalyze.setApiKey(env.COINALYZE_API_KEY);
-    binanceProxy.setProxyConfig(env.PROXY_URL, env.PROXY_SECRET, env.PROXY_URL_2, env.PROXY_SECRET_2);
+    binanceProxy.setProxyConfig(
+      env.PROXY_URL,
+      env.PROXY_SECRET,
+      env.PROXY_URL_2,
+      env.PROXY_SECRET_2,
+      env.DISABLE_DIRECT_FALLBACK !== "true",
+    );
     kvConfig.setKvNamespace(env.CONFIG_KV);
     d1Client.setD1Database(env.DB);
     const url = new URL(request.url);
@@ -98,6 +143,23 @@ export default {
     if (url.pathname !== "/mcp") {
       return withCors(
         new Response("Not found. Gunakan endpoint /mcp untuk koneksi MCP.", { status: 404 }),
+      );
+    }
+
+    const origin = request.headers.get("Origin");
+    if (!isOriginAllowed(origin, env)) {
+      return withCors(
+        new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            error: {
+              code: -32600,
+              message: `Origin '${origin}' tidak diizinkan (DNS rebinding protection). Set ALLOWED_ORIGINS di worker kalau ini legitimate.`,
+            },
+            id: null,
+          }),
+          { status: 403, headers: { "Content-Type": "application/json" } },
+        ),
       );
     }
 
@@ -153,7 +215,13 @@ export default {
   // signal-snapshot supaya satu gagal gak gugurin yang lain).
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     coinalyze.setApiKey(env.COINALYZE_API_KEY);
-    binanceProxy.setProxyConfig(env.PROXY_URL, env.PROXY_SECRET, env.PROXY_URL_2, env.PROXY_SECRET_2);
+    binanceProxy.setProxyConfig(
+      env.PROXY_URL,
+      env.PROXY_SECRET,
+      env.PROXY_URL_2,
+      env.PROXY_SECRET_2,
+      env.DISABLE_DIRECT_FALLBACK !== "true",
+    );
     kvConfig.setKvNamespace(env.CONFIG_KV);
     d1Client.setD1Database(env.DB);
 
