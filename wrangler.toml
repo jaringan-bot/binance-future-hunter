@@ -22,8 +22,11 @@ binding = "DB"
 database_name = "whalescope-mcp-db"
 database_id = "3600a9bb-9261-492a-bf06-3a11b0448f4e"
 
-# Snapshot basis + sinyal MM futures-vs-spot tiap 5 menit untuk watchlist
-# (lihat src/index.ts scheduled handler) -- 1 dari maksimal 5 Cron Trigger
-# di Cloudflare Free plan.
+# Dua Cron Trigger (2 dari maksimal 5 di Cloudflare Free plan), dibedakan
+# lewat event.cron di src/index.ts scheduled handler:
+# - */5: snapshot basis + sinyal MM futures-vs-spot untuk watchlist, plus
+#   prune request_log & wall_tracking.
+# - */1: scan wall kandidat order book untuk watchlist (wall_tracking, D1)
+#   -- lebih sering karena wall bisa hilang dalam hitungan menit.
 [triggers]
-crons = ["*/5 * * * *"]
+crons = ["*/5 * * * *", "*/1 * * * *"]

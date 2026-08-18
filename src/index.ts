@@ -7,6 +7,7 @@ import * as d1Client from "./d1Client.js";
 import { SNAPSHOT_WATCHLIST } from "./shared.js";
 import { computeMmSignals } from "./tools/detectMmActivity.js";
 import { isAuthorized } from "./adminUsage.js";
+import { scanWallCandidates } from "./cron/wallTrackingCron.js";
 
 interface Env {
   COINALYZE_API_KEY?: string;
@@ -34,6 +35,8 @@ interface Env {
 }
 
 const REQUEST_LOG_RETENTION_MS = 30 * 24 * 3600 * 1000; // 30 hari
+const WALL_TRACKING_RETENTION_MS = 48 * 3600 * 1000; // 48 jam
+const WALL_SCAN_CRON = "*/1 * * * *";
 
 // Server ini STATELESS (sessionIdGenerator: undefined): setiap request
 // membuat instance server + transport baru. Ini pola resmi yang
@@ -206,14 +209,19 @@ export default {
     }
   },
 
-  // Cron Trigger (lihat [triggers] di wrangler.toml, jalan tiap 5 menit) --
-  // dua hal per symbol di SNAPSHOT_WATCHLIST (shared.ts, 10 pair), disimpan
-  // ke D1: (1) market snapshot (basis futures-vs-spot + funding + OI, dibaca
-  // binance_get_basis_history), (2) 6 skor sinyal MM lewat computeMmSignals()
-  // (dibaca binance_backtest_signal). Satu symbol gagal TIDAK menggagalkan
-  // symbol lain (try/catch per-symbol, dan basis-snapshot terpisah dari
-  // signal-snapshot supaya satu gagal gak gugurin yang lain).
-  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+  // Dua Cron Trigger (lihat [triggers] di wrangler.toml), dibedakan lewat
+  // event.cron string:
+  // - WALL_SCAN_CRON (*/1, tiap 1 menit): scan wall kandidat order book
+  //   untuk SNAPSHOT_WATCHLIST -> wall_tracking (dibaca
+  //   binance_get_orderbook_wall_persistence).
+  // - selain itu (*/5, tiap 5 menit, DEFAULT/fallback): dua hal per symbol
+  //   di SNAPSHOT_WATCHLIST -- (1) market snapshot (basis futures-vs-spot +
+  //   funding + OI, dibaca binance_get_basis_history), (2) 6 skor sinyal MM
+  //   lewat computeMmSignals() (dibaca binance_backtest_signal). Satu symbol
+  //   gagal TIDAK menggagalkan symbol lain (try/catch per-symbol, dan
+  //   basis-snapshot terpisah dari signal-snapshot supaya satu gagal gak
+  //   gugurin yang lain). Prune request_log & wall_tracking juga di sini.
+  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     coinalyze.setApiKey(env.COINALYZE_API_KEY);
     binanceProxy.setProxyConfig(
       env.PROXY_URL,
@@ -224,6 +232,21 @@ export default {
     );
     kvConfig.setKvNamespace(env.CONFIG_KV);
     d1Client.setD1Database(env.DB);
+
+    if (event.cron === WALL_SCAN_CRON) {
+      ctx.waitUntil(
+        Promise.all(
+          SNAPSHOT_WATCHLIST.map(async (symbol) => {
+            try {
+              await scanWallCandidates(symbol);
+            } catch (err) {
+              console.error(`[cron] gagal wall scan ${symbol}:`, (err as Error)?.message ?? String(err));
+            }
+          }),
+        ),
+      );
+      return;
+    }
 
     ctx.waitUntil(
       Promise.all(
@@ -277,6 +300,15 @@ export default {
       d1Client
         .pruneOldRequestLogs(Date.now() - REQUEST_LOG_RETENTION_MS)
         .catch((err) => console.error("[cron] gagal prune request_log:", (err as Error)?.message ?? String(err))),
+    );
+
+    // Prune wall_tracking >48 jam -- dilakukan di tick 5-menit ini (bukan
+    // Cron Trigger ke-3) karena retensi 48 jam gak butuh presisi prune tiap
+    // menit, dan slot Cron Trigger Free plan terbatas 5.
+    ctx.waitUntil(
+      d1Client
+        .pruneOldWallTracking(Date.now() - WALL_TRACKING_RETENTION_MS)
+        .catch((err) => console.error("[cron] gagal prune wall_tracking:", (err as Error)?.message ?? String(err))),
     );
   },
 };

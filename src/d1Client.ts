@@ -200,3 +200,71 @@ export async function queryRequestLogSummary(hours: number): Promise<RequestLogS
 export async function pruneOldRequestLogs(cutoffMs: number): Promise<void> {
   await requireDb().prepare("DELETE FROM request_log WHERE timestamp < ?").bind(cutoffMs).run();
 }
+
+// wall_tracking -- wall kandidat (qty >= 2x median level lain di sisi yang
+// sama) dari order book, diisi Cron terpisah tiap 1 menit (beda dari cron
+// 5 menit di atas) untuk SNAPSHOT_WATCHLIST. Dibaca queryWallPersistence()
+// oleh binance_get_orderbook_wall_persistence (src/tools/wallPersistence.ts).
+export interface WallCandidateRow {
+  symbol: string;
+  capturedAt: number;
+  side: "bid" | "ask";
+  price: number;
+  qty: number;
+  medianRatio: number;
+}
+
+interface RawWallCandidateRow {
+  captured_at: number;
+  qty: number;
+}
+
+// Batch insert sama pola dengan insertSignalSnapshots -- semua wall kandidat
+// satu tick cron (bisa banyak baris per symbol per sisi) jadi satu batch.
+export async function insertWallCandidates(rows: WallCandidateRow[]): Promise<void> {
+  if (rows.length === 0) return;
+  const database = requireDb();
+  const stmt = database.prepare(
+    "INSERT INTO wall_tracking (symbol, captured_at, side, price, qty, median_ratio) VALUES (?, ?, ?, ?, ?, ?)",
+  );
+  await database.batch(
+    rows.map((r) => stmt.bind(r.symbol, r.capturedAt, r.side, r.price, r.qty, r.medianRatio)),
+  );
+}
+
+export interface WallPersistencePoint {
+  capturedAt: number;
+  qty: number;
+}
+
+// Band harga +/- 0.05% di sekitar priceLevel -- toleransi kecil karena harga
+// order book bergerak tick-by-tick, wall di harga "sama" jarang persis sama
+// float ke float antar snapshot.
+const WALL_PRICE_TOLERANCE = 0.0005;
+
+export async function queryWallPersistence(
+  symbol: string,
+  side: "bid" | "ask",
+  priceLevel: number,
+  lookbackMinutes: number,
+): Promise<WallPersistencePoint[]> {
+  const lowPrice = priceLevel * (1 - WALL_PRICE_TOLERANCE);
+  const highPrice = priceLevel * (1 + WALL_PRICE_TOLERANCE);
+  const cutoff = Date.now() - lookbackMinutes * 60 * 1000;
+
+  const result = await requireDb()
+    .prepare(
+      "SELECT captured_at, qty FROM wall_tracking WHERE symbol = ? AND side = ? AND price BETWEEN ? AND ? AND captured_at >= ? ORDER BY captured_at ASC",
+    )
+    .bind(symbol.toUpperCase(), side, lowPrice, highPrice, cutoff)
+    .all<RawWallCandidateRow>();
+
+  return result.results.map((r) => ({ capturedAt: r.captured_at, qty: r.qty }));
+}
+
+// Dipanggil dari scheduled() (index.ts) di tick 5-menit yang sudah ada --
+// retensi 48 jam lebih dari cukup buat interval prune 5 menit, gak perlu
+// Cron Trigger ke-3 cuma buat pembersihan (slot free-tier terbatas 5).
+export async function pruneOldWallTracking(cutoffMs: number): Promise<void> {
+  await requireDb().prepare("DELETE FROM wall_tracking WHERE captured_at < ?").bind(cutoffMs).run();
+}
