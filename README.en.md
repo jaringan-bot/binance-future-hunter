@@ -21,7 +21,7 @@ what's still manual: you STILL need to set secrets afterward (Cloudflare
 can't guess values from external services) — see `.dev.vars.example` in
 this repo for the full list, or
 [Vercel Proxy setup](#setup-vercel-proxy-required-one-time) below.
-`PROXY_URL`/`PROXY_SECRET` are REQUIRED (34 of 35 tools need them), the
+`PROXY_URL`/`PROXY_SECRET` are REQUIRED (43 of 44 tools need them), the
 Coinalyze API key is **OPTIONAL** (only 1 tool) — skip it if you don't need
 liquidation history.
 
@@ -76,7 +76,7 @@ conversation with Claude, without needing a separate exchange dashboard.
   [Limitations](#honest-limitations-you-should-know) section for details.
 - **Initial setup needs a Vercel proxy** (required) — not plug-and-play,
   there's a one-time manual configuration step. Coinalyze API key is
-  OPTIONAL (only 1 of 35 tools), doesn't block initial setup if skipped.
+  OPTIONAL (only 1 of 44 tools), doesn't block initial setup if skipped.
 - **Coinalyze free-tier rate limit** (40 requests/minute per API key) could
   become a bottleneck under very heavy use.
 - No on-chain wallet data, and no data from exchanges other than Binance
@@ -103,7 +103,7 @@ conversation with Claude, without needing a separate exchange dashboard.
   itself hosted on Cloudflare, so it doesn't hit the same block.
 
 As a consequence, this worker needs `PROXY_URL`/`PROXY_SECRET` (Vercel
-proxy, required for the 33 Binance-native tools) and, optionally,
+proxy, required for the 42 Binance-native tools) and, optionally,
 `COINALYZE_API_KEY` (only for `binance_get_liquidation_history`) — see the
 Setup section below.
 
@@ -162,6 +162,15 @@ setup needed for those 3 exchanges.
 | `binance_analyze_smart_money` | Smart money (top trader) vs retail (global account) divergence score from 5 variables: top trader ratio, global account ratio, OI delta, funding rate, orderbook imbalance — condition LONG_LIQUIDATION_RISK/BULLISH_ACCUMULATION/SHORT_SQUEEZE_RISK/NEUTRAL + confidenceScore. Different from `binance_detect_mm_activity` (6 absorption/spoofing/stop-hunt/basis-arb signals) — narrowly focused on top-trader-vs-retail | Binance native |
 | `whalescope_compare_funding_across_exchanges` | Compares funding rate, last price, open interest, and 24h change for one pair across Binance/Bybit/OKX/Hyperliquid, flags divergence — cross-confirms MM detection signals across venues. The only tool that is NOT Binance-only | Binance native + Bybit + OKX + Hyperliquid |
 | `binance_get_tool_catalog` | Lists all tools with category/token-cost/use-case, filterable by category — check this before calling many individual tools. Name+description are auto-pulled from the tool registry (always accurate); category/token-cost stay manual | Semi-automatic |
+| `binance_get_adl_risk` | Auto-Deleveraging risk rating (LOW/MEDIUM/HIGH) per pair, updated every 30 minutes | Binance native |
+| `binance_get_insurance_fund_balance` | Historical snapshot of insurance fund balance per margin asset | Binance native |
+| `binance_get_mark_price_klines` | Candlesticks from MARK PRICE (liquidation/funding reference), not the traded price | Binance native |
+| `binance_get_index_price_klines` | Candlesticks from INDEX PRICE (blended across spot exchanges), the basis for premium index/funding | Binance native |
+| `binance_get_premium_index_klines` | Candlesticks from PREMIUM INDEX (mark vs index price ratio), the main component of the funding rate | Binance native |
+| `binance_get_continuous_klines` | Candlesticks for PERPETUAL/CURRENT_QUARTER/NEXT_QUARTER contracts per underlying pair | Binance native |
+| `binance_get_quarterly_settlement_price` | Historical delivery/settlement price for quarterly contracts (not applicable to perpetuals) | Binance native |
+| `binance_get_composite_index_info` | Base asset composition + weights for a composite index symbol (e.g. BTCDOMUSDT) | Binance native |
+| `binance_get_index_constituents` | List of exchanges+prices+weights making up a pair's index price | Binance native |
 
 ## Analysis Framework: Market Maker & Whale Detection
 
@@ -385,10 +394,10 @@ worker"), and the basis+MM-signal Cron Trigger (every 5 min) will fail
 silently each tick (logged to Workers Logs, doesn't break the `/mcp`
 endpoint).
 
-## Setup: Coinalyze API Key (OPTIONAL — only 1 of 35 tools)
+## Setup: Coinalyze API Key (OPTIONAL — only 1 of 44 tools)
 
 Unlike the 3 setup steps above, this is NOT a prerequisite for the server
-to work. The worker deploys and the other 34 tools work fine without
+to work. The worker deploys and the other 43 tools work fine without
 it -- only `binance_get_liquidation_history` needs it.
 
 1. Sign up for free at https://coinalyze.net

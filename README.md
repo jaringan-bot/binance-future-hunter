@@ -20,7 +20,7 @@ generate `id`/`database_id` baru buat akun kamu, gak perlu bikin manual).
 setelah klik, kamu TETAP perlu set secret (Cloudflare gak bisa nebak value
 dari layanan eksternal) — lihat `.dev.vars.example` di repo ini buat daftar
 lengkap, atau [Setup Proxy Vercel](#setup-proxy-vercel-wajib-sekali-saja)
-di bawah. `PROXY_URL`/`PROXY_SECRET` WAJIB (34 dari 35 tool butuh),
+di bawah. `PROXY_URL`/`PROXY_SECRET` WAJIB (43 dari 44 tool butuh),
 Coinalyze API key **OPSIONAL** (cuma 1 tool) — skip kalau gak butuh
 liquidation history.
 
@@ -74,7 +74,7 @@ dalam percakapan dengan Claude, tanpa perlu buka dashboard exchange terpisah.
   [Keterbatasan](#keterbatasan-yang-jujur-perlu-diketahui) untuk detail.
 - **Setup awal butuh proxy Vercel** (wajib) — bukan pasang-langsung-jalan,
   ada langkah konfigurasi manual sekali di awal. Coinalyze API key OPSIONAL
-  (cuma buat 1 dari 35 tool), gak menghalangi setup awal kalau di-skip.
+  (cuma buat 1 dari 44 tool), gak menghalangi setup awal kalau di-skip.
 - **Rate limit free tier Coinalyze** (40 request/menit per API key) bisa jadi
   bottleneck kalau dipakai sangat intensif.
 - Tidak ada data wallet on-chain atau data dari exchange selain Binance
@@ -100,7 +100,7 @@ dalam percakapan dengan Claude, tanpa perlu buka dashboard exchange terpisah.
   Cloudflare, jadi tidak kena block yang sama.
 
 Konsekuensinya, worker ini butuh `PROXY_URL`/`PROXY_SECRET` (proxy Vercel,
-wajib buat 34 tool Binance-native) dan, opsional, `COINALYZE_API_KEY`
+wajib buat 43 tool Binance-native) dan, opsional, `COINALYZE_API_KEY`
 (cuma buat `binance_get_liquidation_history`) — lihat bagian Setup di
 bawah.
 
@@ -158,6 +158,15 @@ kredensial atau setup tambahan buat 3 exchange itu.
 | `binance_analyze_smart_money` | Skor divergensi smart money (top trader) vs retail (global account) dari 5 variabel: top trader ratio, global account ratio, delta OI, funding rate, orderbook imbalance — kondisi LONG_LIQUIDATION_RISK/BULLISH_ACCUMULATION/SHORT_SQUEEZE_RISK/NEUTRAL + confidenceScore. Beda dari `binance_detect_mm_activity` (6 sinyal absorption/spoofing/stop-hunt/basis-arb) — fokus khusus top-trader-vs-retail | Binance native |
 | `whalescope_compare_funding_across_exchanges` | Bandingkan funding rate, last price, open interest, 24h change 1 pair across Binance/Bybit/OKX/Hyperliquid, deteksi divergensi — cross-confirm sinyal MM detection antar exchange. Satu-satunya tool yang BUKAN Binance-only | Binance native + Bybit + OKX + Hyperliquid |
 | `binance_get_tool_catalog` | Daftar semua tool + kategori/token-cost/use-case, filter per kategori — cek ini dulu sebelum manggil banyak tool individual. Nama+description auto dari tool registry (selalu akurat), kategori/token-cost tetap manual | Semi-otomatis |
+| `binance_get_adl_risk` | Rating risiko Auto-Deleveraging (LOW/MEDIUM/HIGH) per pair, update tiap 30 menit | Binance native |
+| `binance_get_insurance_fund_balance` | Snapshot historis saldo insurance fund per asset margin | Binance native |
+| `binance_get_mark_price_klines` | Candlestick dari MARK PRICE (acuan liquidation/funding), bukan harga transaksi | Binance native |
+| `binance_get_index_price_klines` | Candlestick dari INDEX PRICE (blended beberapa exchange spot), dasar premium index/funding | Binance native |
+| `binance_get_premium_index_klines` | Candlestick dari PREMIUM INDEX (rasio mark vs index price), komponen utama funding rate | Binance native |
+| `binance_get_continuous_klines` | Candlestick kontrak PERPETUAL/CURRENT_QUARTER/NEXT_QUARTER per pair underlying | Binance native |
+| `binance_get_quarterly_settlement_price` | Histori delivery/settlement price kontrak quarterly (tidak berlaku untuk perpetual) | Binance native |
+| `binance_get_composite_index_info` | Komposisi base asset + bobot sebuah composite index symbol (mis. BTCDOMUSDT) | Binance native |
+| `binance_get_index_constituents` | Daftar exchange+harga+bobot penyusun index price sebuah pair | Binance native |
 
 ## Framework Analisis: Deteksi Market Maker & Whale
 
@@ -374,10 +383,10 @@ worker"), dan Cron Trigger snapshot basis+sinyal MM (tiap 5 menit) akan
 gagal silent tiap tick (ke-log ke Workers Logs, tidak menggagalkan endpoint
 `/mcp` lain).
 
-## Setup Coinalyze API Key (OPSIONAL — cuma buat 1 dari 35 tool)
+## Setup Coinalyze API Key (OPSIONAL — cuma buat 1 dari 44 tool)
 
 Beda dari 3 setup di atas, ini BUKAN prasyarat buat server jalan. Worker
-deploy & 34 tool lain jalan normal tanpa ini — cuma
+deploy & 43 tool lain jalan normal tanpa ini — cuma
 `binance_get_liquidation_history` yang butuh.
 
 1. Daftar gratis di https://coinalyze.net
