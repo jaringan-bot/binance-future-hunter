@@ -22,6 +22,7 @@ const CATEGORY_ENUM = [
   "orderbook",
   "trades",
   "liquidation",
+  "risk",
   "technical",
   "spot",
   "composite",
@@ -82,6 +83,15 @@ const CATALOG_METADATA: Record<string, CatalogMetadata> = {
   binance_backtest_signal: { category: "backtest", tokenCost: "high", useCase: "Validasi empiris sinyal MM detection: win rate/avg return/max drawdown dari histori sinyal D1 + forward return on-demand", dependencies: ["history", "technical"] },
   whalescope_compare_funding_across_exchanges: { category: "cross-exchange", tokenCost: "medium", useCase: "Bandingkan funding rate, price, OI, 24h change 1 pair across Binance/Bybit/OKX/Hyperliquid, deteksi divergensi", dependencies: ["funding"] },
   binance_get_tool_catalog: { category: "meta", tokenCost: "low", useCase: "Daftar semua tool + kategori/use-case (tool ini sendiri)", dependencies: [] },
+  binance_get_adl_risk: { category: "risk", tokenCost: "low", useCase: "Quantile risk rating ADL per pair (update tiap 30 menit)", dependencies: [] },
+  binance_get_insurance_fund_balance: { category: "risk", tokenCost: "low", useCase: "Snapshot historis saldo insurance fund per asset margin", dependencies: [] },
+  binance_get_mark_price_klines: { category: "technical", tokenCost: "medium", useCase: "Candle mark price (acuan liquidation/funding), bukan harga transaksi", dependencies: [] },
+  binance_get_index_price_klines: { category: "technical", tokenCost: "medium", useCase: "Candle index price (blended spot), dasar premium index/funding", dependencies: [] },
+  binance_get_premium_index_klines: { category: "technical", tokenCost: "medium", useCase: "Candle premium index (rasio mark vs index price), komponen funding rate", dependencies: [] },
+  binance_get_continuous_klines: { category: "technical", tokenCost: "medium", useCase: "Candle kontrak PERPETUAL/CURRENT_QUARTER/NEXT_QUARTER per pair underlying", dependencies: [] },
+  binance_get_quarterly_settlement_price: { category: "history", tokenCost: "low", useCase: "Histori delivery/settlement price kontrak quarterly", dependencies: [] },
+  binance_get_composite_index_info: { category: "composite", tokenCost: "low", useCase: "Komposisi base asset + bobot sebuah composite index symbol", dependencies: [] },
+  binance_get_index_constituents: { category: "composite", tokenCost: "low", useCase: "Daftar exchange+symbol penyusun index price composite index symbol", dependencies: [] },
 };
 
 function truncateUseCase(description: string | undefined): string {

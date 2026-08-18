@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerSafeTool } from "../toolWrapper.js";
 import * as binanceProxy from "../binanceProxyClient.js";
-import { fmtNum, fmtPrice, fmtPct, trendDirection } from "../format.js";
+import { fmtNum, fmtPrice, fmtPct, fmtTime, trendDirection } from "../format.js";
 import { symbolSchema, errorResult } from "../shared.js";
 import { summarizeKlines } from "../toolHelpers.js";
 
@@ -250,6 +250,100 @@ export function registerCompositeTools(server: McpServer): void {
         return {
           content: [{ type: "text", text }],
           structuredContent: { metric, results: sorted },
+        };
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+
+  // ─────────────────────────────────────────────────────────────
+  // COMPOSITE INDEX INFO
+  // ─────────────────────────────────────────────────────────────
+  registerSafeTool(
+    server,
+    "binance_get_composite_index_info",
+    {
+      title: "Composite Index Symbol Information",
+      description:
+        "Mengambil komposisi base asset (beserta bobot kuantitas/persentase) sebuah COMPOSITE INDEX symbol " +
+        "(mis. DEFIUSDT — index multi-aset, bukan pair single-asset biasa). " +
+        "PENTING: cuma relevan untuk symbol composite index — kebanyakan pair biasa (BTCUSDT, ETHUSDT, dst) TIDAK " +
+        "punya data ini dan akan balik kosong/error karena bukan composite index.",
+      inputSchema: {
+        symbol: symbolSchema.optional().describe("Symbol composite index tertentu -- opsional, kosongkan untuk semua composite index."),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ symbol }) => {
+      try {
+        const data = await binanceProxy.getCompositeIndexInfoNative(symbol);
+        if (data.length === 0) {
+          return { content: [{ type: "text", text: `Tidak ada data composite index untuk ${symbol ?? "(semua symbol)"}.` }] };
+        }
+        const blocks = data.map((idx) => {
+          const rows = idx.baseAssetList
+            .map((a) => `| ${a.baseAsset} | ${a.quoteAsset} | ${a.weightInQuantity} | ${fmtPct(a.weightInPercentage)} |`)
+            .join("\n");
+          return [
+            `## ${idx.symbol}`,
+            `| Base Asset | Quote Asset | Weight (Quantity) | Weight (%) |`,
+            `|---|---|---|---|`,
+            rows,
+          ].join("\n");
+        });
+        const text = [`# Composite Index Info${symbol ? ` — ${symbol}` : ""}`, ``, blocks.join("\n\n")].join("\n");
+        return {
+          content: [{ type: "text", text }],
+          structuredContent: { indices: data },
+        };
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+
+  // ─────────────────────────────────────────────────────────────
+  // INDEX PRICE CONSTITUENTS
+  // ─────────────────────────────────────────────────────────────
+  registerSafeTool(
+    server,
+    "binance_get_index_constituents",
+    {
+      title: "Index Price Constituents",
+      description:
+        "Mengambil daftar exchange spot + harga + bobot yang menyusun INDEX PRICE sebuah pair (dasar perhitungan " +
+        "index price yang dipakai binance_get_index_price_klines/premium index/funding rate). " +
+        "Berlaku untuk pair biasa (mis. BTCUSDT, ETHUSDT — index price-nya blended dari beberapa exchange spot " +
+        "seperti Binance/OKX/Coinbase/dst), BUKAN cuma untuk composite index symbol. " +
+        "Kalau harga di satu exchange menyimpang jauh dari yang lain, itu bisa jadi indikasi anomali data di " +
+        "exchange tersebut (bukan berarti index price Binance salah).",
+      inputSchema: { symbol: symbolSchema },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ symbol }) => {
+      try {
+        const data = await binanceProxy.getIndexConstituentsNative(symbol);
+        const rows = data.constituents
+          .map((c) => `| ${c.exchange} | ${c.symbol} | ${fmtPrice(c.price)} | ${fmtPct(c.weight)} |`)
+          .join("\n");
+        const text = [
+          `# Index Price Constituents — ${data.symbol}`,
+          ``,
+          `Waktu: ${fmtTime(data.time)}`,
+          ``,
+          `| Exchange | Symbol | Harga | Bobot |`,
+          `|---|---|---|---|`,
+          rows,
+          ``,
+          `_Bandingkan harga antar exchange untuk deteksi anomali data di satu sumber. Gunakan bersama ` +
+            `binance_get_index_price_klines untuk melihat pergerakan index price hasil blend ini dalam bentuk candle._`,
+        ].join("\n");
+        return {
+          content: [{ type: "text", text }],
+          structuredContent: { symbol: data.symbol, time: data.time, constituents: data.constituents },
         };
       } catch (err) {
         return errorResult(err);

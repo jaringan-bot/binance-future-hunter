@@ -84,6 +84,25 @@ export const symbolSchema = z
     "Simbol pair Binance Futures, contoh: BTCUSDT, ETHUSDT. Harus pair perpetual yang terdaftar di Binance USDS-M Futures.",
   );
 
+// Pair underlying TANPA suffix margin-asset (mis. "BTCUSD", bukan "BTCUSDT")
+// -- dipakai endpoint yang basisnya kontrak dated/continuous (indexPriceKlines,
+// continuousKlines, delivery-price), beda dari symbolSchema yang untuk pair
+// trading langsung. Regex sama longgarnya dengan symbolSchema (underscore
+// diizinkan untuk notasi dated contract seperti BTCUSD_260925).
+export const pairSchema = z
+  .string()
+  .toUpperCase()
+  .min(1, "Pair tidak boleh kosong")
+  .max(20, "Pair Binance Futures maksimal 20 karakter")
+  .regex(/^[A-Z0-9_]+$/, "Pair cuma boleh huruf, angka, dan underscore (contoh: BTCUSD, BTCUSD_260925)")
+  .describe(
+    "Pair underlying Binance Futures TANPA suffix margin-asset, contoh: BTCUSD (bukan BTCUSDT). Dipakai untuk kontrak dated/continuous, beda dari symbol pair trading biasa.",
+  );
+
+// Tipe kontrak untuk continuousKlines -- PERPETUAL tidak punya expiry,
+// CURRENT_QUARTER/NEXT_QUARTER adalah kontrak dated yang delivery tiap kuartal.
+export const CONTRACT_TYPE_ENUM = ["PERPETUAL", "CURRENT_QUARTER", "NEXT_QUARTER"] as const;
+
 // Parse ISO 8601 datetime string ke epoch ms. Dipakai untuk startTime/endTime
 // klines (Futures & Spot) supaya backtest bisa narik histori jauh ke belakang,
 // bukan cuma N candle terakhir.

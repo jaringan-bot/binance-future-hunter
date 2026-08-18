@@ -51,12 +51,22 @@ const SHORT_CACHE_PATHS = new Set([
   "/api/v3/ticker/price",
   "/api/v3/ticker/24hr",
   "/api/v3/ticker/bookTicker",
+  "/fapi/v1/symbolAdlRisk",
+  "/fapi/v1/insuranceBalance",
 ]);
 const SHORT_CACHE_TTL_SECONDS = 5;
 
 // Candle & rata-rata bergerak -- berubah per interval, cache seukuran
 // interval terkecil yang wajar (1 menit) masih aman.
-const MEDIUM_CACHE_PATHS = new Set(["/fapi/v1/klines", "/api/v3/klines", "/api/v3/avgPrice"]);
+const MEDIUM_CACHE_PATHS = new Set([
+  "/fapi/v1/klines",
+  "/api/v3/klines",
+  "/api/v3/avgPrice",
+  "/fapi/v1/markPriceKlines",
+  "/fapi/v1/indexPriceKlines",
+  "/fapi/v1/premiumIndexKlines",
+  "/fapi/v1/continuousKlines",
+]);
 const MEDIUM_CACHE_TTL_SECONDS = 60;
 
 // Histori funding & rasio futures/data/* -- Binance sendiri baru update
@@ -69,11 +79,12 @@ const LONG_CACHE_PATHS = new Set([
   "/futures/data/globalLongShortAccountRatio",
   "/futures/data/openInterestHist",
   "/futures/data/takerlongshortRatio",
+  "/futures/data/delivery-price",
 ]);
 const LONG_CACHE_TTL_SECONDS = 300;
 
 // Metadata listing/status pair -- praktis statis, jarang berubah dalam sehari.
-const STATIC_CACHE_PATHS = new Set(["/api/v3/exchangeInfo"]);
+const STATIC_CACHE_PATHS = new Set(["/api/v3/exchangeInfo", "/fapi/v1/indexInfo", "/fapi/v1/constituents"]);
 const STATIC_CACHE_TTL_SECONDS = 3600;
 
 function cacheTtlForPath(path: string): number {
@@ -110,6 +121,19 @@ const PROXY_ALLOWED_PATHS = new Set([
   "/api/v3/aggTrades",
   "/api/v3/avgPrice",
   "/api/v3/exchangeInfo",
+  // ADL Risk, Insurance Fund, Mark/Index/Premium Index Klines, Composite
+  // Index Info, Continuous Klines, Quarterly Settlement Price, Index
+  // Constituents -- 9 endpoint publik (security NONE) yang belum tercover,
+  // lihat whalescope_mcp_roadmap.md gap-analysis vs katalog resmi Binance.
+  "/fapi/v1/symbolAdlRisk",
+  "/fapi/v1/insuranceBalance",
+  "/fapi/v1/markPriceKlines",
+  "/fapi/v1/indexPriceKlines",
+  "/fapi/v1/premiumIndexKlines",
+  "/fapi/v1/indexInfo",
+  "/fapi/v1/continuousKlines",
+  "/futures/data/delivery-price",
+  "/fapi/v1/constituents",
 ]);
 
 interface ProxyEndpoint {
@@ -722,4 +746,174 @@ export async function getSpotExchangeInfo(symbol: string): Promise<SpotSymbolInf
     "spot",
   );
   return data.symbols[0] ?? null;
+}
+
+// ─────────────────────────────────────────────────────────────
+// ADL RISK (NATIVE) — rating risiko auto-deleveraging per symbol.
+// Shape dikonfirmasi live (2026-08-18): { symbol, adlRisk: "LOW"|"MEDIUM"|
+// "HIGH", updateTime } -- SATU object, bukan array/quantile numerik.
+// ─────────────────────────────────────────────────────────────
+export interface AdlRiskEntry {
+  symbol: string;
+  adlRisk: string;
+  updateTime: number;
+}
+
+export async function getAdlRiskNative(symbol: string): Promise<AdlRiskEntry> {
+  return callProxy<AdlRiskEntry>("/fapi/v1/symbolAdlRisk", { symbol: symbol.toUpperCase() });
+}
+
+// ─────────────────────────────────────────────────────────────
+// INSURANCE FUND BALANCE (NATIVE) — snapshot historis saldo insurance fund
+// per asset margin, di-update Binance secara periodik (BUKAN live tiap detik).
+// ─────────────────────────────────────────────────────────────
+export interface InsuranceFundAsset {
+  asset: string;
+  marginBalance: string;
+  updateTime: number;
+}
+
+export interface InsuranceFundBalance {
+  symbols: string[];
+  assets: InsuranceFundAsset[];
+}
+
+export async function getInsuranceFundBalanceNative(symbol?: string): Promise<InsuranceFundBalance> {
+  return callProxy<InsuranceFundBalance>(
+    "/fapi/v1/insuranceBalance",
+    symbol ? { symbol: symbol.toUpperCase() } : {},
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// MARK PRICE / INDEX PRICE / PREMIUM INDEX / CONTINUOUS KLINES (NATIVE) —
+// candle dari mark price/index price/premium index/kontrak dated, BUKAN
+// dari harga transaksi (trade) seperti getKlinesNative. Format tuple sama
+// dengan KlineTuple (field volume/trades/taker* akan selalu "0"/ignore
+// karena tidak ada transaksi riil di belakang harga sintetis ini).
+// ─────────────────────────────────────────────────────────────
+export async function getMarkPriceKlinesNative(
+  symbol: string,
+  interval: string,
+  limit: number,
+  startTime?: number,
+  endTime?: number,
+): Promise<KlineTuple[]> {
+  return callProxy<KlineTuple[]>("/fapi/v1/markPriceKlines", {
+    symbol: symbol.toUpperCase(),
+    interval,
+    limit,
+    startTime,
+    endTime,
+  });
+}
+
+export async function getIndexPriceKlinesNative(
+  pair: string,
+  interval: string,
+  limit: number,
+  startTime?: number,
+  endTime?: number,
+): Promise<KlineTuple[]> {
+  return callProxy<KlineTuple[]>("/fapi/v1/indexPriceKlines", {
+    pair: pair.toUpperCase(),
+    interval,
+    limit,
+    startTime,
+    endTime,
+  });
+}
+
+export async function getPremiumIndexKlinesNative(
+  symbol: string,
+  interval: string,
+  limit: number,
+  startTime?: number,
+  endTime?: number,
+): Promise<KlineTuple[]> {
+  return callProxy<KlineTuple[]>("/fapi/v1/premiumIndexKlines", {
+    symbol: symbol.toUpperCase(),
+    interval,
+    limit,
+    startTime,
+    endTime,
+  });
+}
+
+export async function getContinuousKlinesNative(
+  pair: string,
+  contractType: string,
+  interval: string,
+  limit: number,
+  startTime?: number,
+  endTime?: number,
+): Promise<KlineTuple[]> {
+  return callProxy<KlineTuple[]>("/fapi/v1/continuousKlines", {
+    pair: pair.toUpperCase(),
+    contractType,
+    interval,
+    limit,
+    startTime,
+    endTime,
+  });
+}
+
+// ─────────────────────────────────────────────────────────────
+// COMPOSITE INDEX INFO (NATIVE) — komposisi index untuk symbol composite
+// (mis. DEFIUSDT), cuma relevan untuk symbol composite index, BUKAN pair biasa.
+// ─────────────────────────────────────────────────────────────
+export interface CompositeIndexBaseAsset {
+  baseAsset: string;
+  quoteAsset: string;
+  weightInQuantity: string;
+  weightInPercentage: string;
+}
+
+export interface CompositeIndexInfo {
+  symbol: string;
+  time: number;
+  component: string;
+  baseAssetList: CompositeIndexBaseAsset[];
+}
+
+export async function getCompositeIndexInfoNative(symbol?: string): Promise<CompositeIndexInfo[]> {
+  const data = await callProxy<CompositeIndexInfo | CompositeIndexInfo[]>(
+    "/fapi/v1/indexInfo",
+    symbol ? { symbol: symbol.toUpperCase() } : {},
+  );
+  return Array.isArray(data) ? data : [data];
+}
+
+// ─────────────────────────────────────────────────────────────
+// QUARTERLY CONTRACT SETTLEMENT PRICE (NATIVE) — histori delivery price
+// kontrak dated (QUARTERLY), TIDAK berlaku untuk PERPETUAL.
+// ─────────────────────────────────────────────────────────────
+export interface DeliveryPriceEntry {
+  deliveryTime: number;
+  deliveryPrice: number;
+}
+
+export async function getQuarterlySettlementPriceNative(pair: string): Promise<DeliveryPriceEntry[]> {
+  return callProxy<DeliveryPriceEntry[]>("/futures/data/delivery-price", { pair: pair.toUpperCase() });
+}
+
+// ─────────────────────────────────────────────────────────────
+// INDEX PRICE CONSTITUENTS (NATIVE) — daftar exchange+symbol penyusun index
+// price sebuah pair, cuma relevan untuk symbol composite index.
+// ─────────────────────────────────────────────────────────────
+export interface IndexConstituent {
+  exchange: string;
+  symbol: string;
+  price: string;
+  weight: string;
+}
+
+export interface IndexConstituentsResponse {
+  symbol: string;
+  time: number;
+  constituents: IndexConstituent[];
+}
+
+export async function getIndexConstituentsNative(symbol: string): Promise<IndexConstituentsResponse> {
+  return callProxy<IndexConstituentsResponse>("/fapi/v1/constituents", { symbol: symbol.toUpperCase() });
 }
