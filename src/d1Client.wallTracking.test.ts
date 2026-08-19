@@ -59,17 +59,30 @@ class FakeStatement {
   }
 
   async all<T>(): Promise<{ results: T[] }> {
-    if (this.sql.startsWith("SELECT captured_at, qty FROM wall_tracking")) {
-      const [symbol, side, lowPrice, highPrice, cutoff] = this.args as [string, string, number, number, number];
-      const results = this.db.rows
-        .filter(
-          (r) =>
-            r.symbol === symbol &&
-            r.side === side &&
-            r.price >= lowPrice &&
-            r.price <= highPrice &&
-            r.captured_at >= cutoff,
-        )
+    if (this.sql.startsWith("SELECT captured_at, qty FROM (")) {
+      const [priceLevel, symbol, side, lowPrice, highPrice, cutoff] = this.args as [
+        number,
+        string,
+        string,
+        number,
+        number,
+        number,
+      ];
+      const matches = this.db.rows.filter(
+        (r) =>
+          r.symbol === symbol && r.side === side && r.price >= lowPrice && r.price <= highPrice && r.captured_at >= cutoff,
+      );
+      // Mirror the real ROW_NUMBER() OVER (PARTITION BY captured_at ORDER BY
+      // ABS(price - priceLevel) ASC) WHERE rn = 1: one row per captured_at,
+      // the one nearest to priceLevel.
+      const nearestByTick = new Map<number, FakeRow>();
+      for (const r of matches) {
+        const current = nearestByTick.get(r.captured_at);
+        if (!current || Math.abs(r.price - priceLevel) < Math.abs(current.price - priceLevel)) {
+          nearestByTick.set(r.captured_at, r);
+        }
+      }
+      const results = [...nearestByTick.values()]
         .sort((a, b) => a.captured_at - b.captured_at)
         .map((r) => ({ captured_at: r.captured_at, qty: r.qty }));
       return { results: results as T[] };
@@ -137,6 +150,32 @@ describe("wall_tracking D1 read/write path", () => {
         { capturedAt: now - 4 * 60_000, qty: 10 },
         { capturedAt: now - 3 * 60_000, qty: 8 },
       ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("queryWallPersistence returns only the nearest-price row per captured_at, not every level in the tolerance band", async () => {
+    const now = 1_700_000_000_000;
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+
+    // One order-book scan (single captured_at) can produce several distinct
+    // wall-candidate price levels within the +/-0.05% tolerance band around
+    // priceLevel=64573.6 (BTCUSDT tick size $0.1 means dozens of levels fit
+    // in that band) -- only the one closest to priceLevel should represent
+    // "this wall" at this tick, not all of them.
+    const t = now - 60_000;
+    fake.rows = [
+      { symbol: "BTCUSDT", captured_at: t, side: "ask", price: 64573.7, qty: 3.789, median_ratio: 2.1 }, // closest
+      { symbol: "BTCUSDT", captured_at: t, side: "ask", price: 64590.1, qty: 0.045, median_ratio: 2.3 },
+      { symbol: "BTCUSDT", captured_at: t, side: "ask", price: 64550.2, qty: 0.034, median_ratio: 2.2 },
+    ];
+
+    try {
+      const points = await queryWallPersistence("BTCUSDT", "ask", 64573.6, 5);
+      expect(points).toHaveLength(1);
+      expect(points[0]).toEqual({ capturedAt: t, qty: 3.789 });
     } finally {
       vi.useRealTimers();
     }
