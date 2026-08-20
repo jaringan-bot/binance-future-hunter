@@ -1,7 +1,15 @@
+import { withCache } from "./cache.js";
+
 export interface BinanceMarketData {
   predictedFundingRate: number;
   openInterest: number;
   orderBookBidDepthSL: number;
+}
+
+export interface SymbolTradingRules {
+  minQty: number;
+  stepSize: number;
+  minNotional: number;
 }
 
 interface BinancePremiumIndexResponse {
@@ -16,8 +24,29 @@ interface BinanceDepthResponse {
   bids: Array<[string, string]>;
 }
 
+interface BinanceLotSizeFilter {
+  filterType: "LOT_SIZE";
+  minQty: string;
+  stepSize: string;
+}
+
+interface BinanceMinNotionalFilter {
+  filterType: "MIN_NOTIONAL";
+  notional: string;
+}
+
+type BinanceSymbolFilter =
+  | BinanceLotSizeFilter
+  | BinanceMinNotionalFilter
+  | { filterType: string; [key: string]: unknown };
+
+interface BinanceExchangeInfoResponse {
+  symbols?: Array<{ filters: BinanceSymbolFilter[] }>;
+}
+
 const BINANCE_FUTURES_API = "https://fapi.binance.com";
 const REQUEST_TIMEOUT_MS = 5_000;
+const TRADING_RULES_TTL_SECONDS = 3_600;
 
 async function fetchJson<T>(
   path: string,
@@ -101,4 +130,64 @@ export async function fetchBinanceMarketData(
     openInterest: openInterestValue,
     orderBookBidDepthSL,
   };
+}
+
+async function fetchExchangeInfoResponse(symbol: string): Promise<Response> {
+  const url = new URL("/fapi/v1/exchangeInfo", BINANCE_FUTURES_API);
+  url.searchParams.set("symbol", symbol);
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  try {
+    return await fetch(url.toString(), {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// Trading rules (min qty, step size, min notional) jarang berubah, jadi
+// di-cache 1 jam lewat withCache() -- konsisten dgn pola cache.ts yang
+// dipakai fetcher lain di file ini, hindari roundtrip exchangeInfo penuh
+// tiap kali grid risk tool dipanggil untuk pair yang sama.
+export async function fetchSymbolTradingRules(
+  symbol: string,
+): Promise<SymbolTradingRules | undefined> {
+  const normalizedSymbol = symbol.trim().toUpperCase();
+  const cacheKeyUrl = `https://cache.internal/fapi/v1/exchangeInfo?symbol=${normalizedSymbol}`;
+
+  try {
+    const response = await withCache(cacheKeyUrl, TRADING_RULES_TTL_SECONDS, () =>
+      fetchExchangeInfoResponse(normalizedSymbol),
+    );
+
+    if (!response.ok) return undefined;
+
+    const data = (await response.json()) as BinanceExchangeInfoResponse;
+    const symbolInfo = data.symbols?.[0];
+    if (!symbolInfo) return undefined;
+
+    const lotSizeFilter = symbolInfo.filters.find(
+      (filter): filter is BinanceLotSizeFilter => filter.filterType === "LOT_SIZE",
+    );
+    const minNotionalFilter = symbolInfo.filters.find(
+      (filter): filter is BinanceMinNotionalFilter => filter.filterType === "MIN_NOTIONAL",
+    );
+
+    if (!lotSizeFilter || !minNotionalFilter) return undefined;
+
+    const minQty = parseFiniteNumber(lotSizeFilter.minQty);
+    const stepSize = parseFiniteNumber(lotSizeFilter.stepSize);
+    const minNotional = parseFiniteNumber(minNotionalFilter.notional);
+
+    if (minQty <= 0 || stepSize <= 0 || minNotional <= 0) return undefined;
+
+    return { minQty, stepSize, minNotional };
+  } catch {
+    return undefined;
+  }
 }
