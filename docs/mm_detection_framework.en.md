@@ -281,7 +281,7 @@
 | `binance_get_funding_rate_history` | Funding pattern analysis | — |
 | `binance_get_klines` | Wick analysis, reversal confirmation, price mapping | — |
 | `binance_detect_mm_activity` | ALL 6 signals above at once, automated + scored (see Section 11) | Spoofing & stop-hunt are 1-snapshot heuristics, lower confidence than the other 4 signals |
-| `binance_backtest_signal` | Empirically validates `binance_detect_mm_activity`'s historical scores (win rate/avg return) | Forward return computed on-demand from klines, not a simulation of real execution; fixed 10-pair watchlist only |
+| `binance_backtest_signal` | Empirically validates `binance_detect_mm_activity`'s historical scores (win rate/avg return) | Forward return computed on-demand from klines, not a simulation of real execution; fixed 50-pair watchlist only |
 
 ---
 
@@ -360,7 +360,7 @@ checklist**, don't conflate them:
 | `absorption` | 2.1 Order Book Absorption | Dominant CVD buy% (>60%) + flat price (\|Δ\|<0.5%) + sharp OI increase (>3%) → score 0.7-1.0. CVD buy% (>55%) + falling price → 0.5 (weak). Otherwise → 0.1 | **Medium** — uses CVD+OI+price (official Binance data), BUT only a single klines snapshot window, not a spot-CVD cross-check like the manual Section 2.1 |
 | `spoofing` | 3.1 Wall Pull / Spoofing | Spread >0.2% + largest wall >1% of 24h volume → 0.6. Otherwise → 0.1 | **Low** — only 1 order-book snapshot (not the 2 snapshots <3 seconds apart that Section 3.1 calls for; see Section 10 #2, proxy latency of 298-898ms makes that unreliable). A wall-vs-volume heuristic, NOT true spoofing detection |
 | `stopHunt` | 4.1 Liquidation Cluster Reversal | Wick >70% of range + body <20% + reversal candle → 0.8. Wick >60% alone → 0.5. Otherwise → 0.1 | **Low** — from `klines` ALONE (wick+reversal), WITHOUT the `binance_get_liquidation_history` confirmation Section 4.1 calls for (liquidation history has no price field + Coinalyze is rate-limited, see Section 8) |
-| `basisArb` | 5.1 Spot-Futures Basis Arbitrage | If the symbol has D1 history (fixed 10-pair watchlist): basis z-score >2 std dev + funding >0.05% → 0.9. Without history: basis >2x threshold → 0.7 (less accurate, noted in the evidence text), >threshold → 0.5. Otherwise → 0.1 | **Medium-High** for the 10-pair watchlist (has 24h D1 historical context), **Medium** for other pairs (static threshold, no distribution context) |
+| `basisArb` | 5.1 Spot-Futures Basis Arbitrage | If the symbol has D1 history (fixed 50-pair watchlist): basis z-score >2 std dev + funding >0.05% → 0.9. Without history: basis >2x threshold → 0.7 (less accurate, noted in the evidence text), >threshold → 0.5. Otherwise → 0.1 | **Medium-High** for the 50-pair watchlist (has 24h D1 historical context), **Medium** for other pairs (static threshold, no distribution context) |
 | `oiDivergence` | 2.1 (sharp OI increase) + 6.STEP3 | OI up >5% + flat price (\|Δ\|<1%) → 0.8. OI up >3% against price direction → 0.7. Otherwise → 0.1 | **Medium** — official Binance OI data, but only a 1-hour window (2 data points), not a long history |
 | `fundingExtreme` | 5.2 Funding Rate Manipulation | Funding >3x threshold → 1.0, >2x → 0.8, >threshold → 0.6, below → proportional scale | **High** — funding rate straight from Binance (`premiumIndex`), the most reliable of these 6 signals |
 
@@ -382,7 +382,7 @@ Section 10 above (Empirical Validation) was done manually before
 `binance_detect_mm_activity` existed — matching signals one by one against
 real market conditions, a one-time pass. Now, every 5 minutes a Cron
 Trigger snapshots the 6 scores above into D1 (`signal_history`, fixed
-10-pair watchlist) with no manual testing needed —
+50-pair watchlist) with no manual testing needed —
 `binance_backtest_signal` queries that history, computes the forward
 return N hours after each active signal (score ≥0.6) triggered, and
 aggregates win rate/avg return/max drawdown. This is CONTINUOUS empirical

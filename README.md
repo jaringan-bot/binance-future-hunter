@@ -111,8 +111,8 @@ lewat Cache API bawaan Cloudflare Workers, tidak perlu setup apapun.
 Threshold custom per-pair tersimpan di Workers KV (binding `CONFIG_KV`).
 Time-series (basis+funding+OI, dan 6 skor sinyal `binance_detect_mm_activity`)
 tersimpan di D1 (binding `DB`) — diisi otomatis oleh Cron Trigger tiap 5
-menit untuk watchlist tetap 10 pair (BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT,
-XRPUSDT, DOGEUSDT, ADAUSDT, AVAXUSDT, LINKUSDT, LTCUSDT).
+menit untuk watchlist tetap 50 pair (`SNAPSHOT_WATCHLIST` di `src/shared.ts`,
+diurutkan market cap, mis. BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT, dst).
 
 **Cross-exchange, tanpa proxy tambahan.** `whalescope_compare_funding_across_exchanges`
 akses Bybit/OKX/Hyperliquid LANGSUNG dari worker (dites dari edge
@@ -151,7 +151,7 @@ kredensial atau setup tambahan buat 3 exchange itu.
 | `binance_compare_symbols` | Bandingkan 1 metrik (funding rate, %change 24h, OI, top trader ratio, taker ratio) across 2-10 pair sekaligus, diurutkan dari paling ekstrem | Binance native |
 | `binance_set_pair_threshold` | Set threshold funding/basis custom per-pair (override default ±0.03%/±0.05%), tersimpan di Workers KV | Workers KV |
 | `binance_get_pair_threshold` | Cek threshold custom yang sudah di-set untuk sebuah pair | Workers KV |
-| `binance_get_basis_history` | Histori basis+funding+OI time-series (snapshot Cron tiap 5 menit ke D1), watchlist tetap 10 pair — deteksi "basis melebar lalu kembali" tanpa cek manual berkali-kali | D1 + Cron Trigger |
+| `binance_get_basis_history` | Histori basis+funding+OI time-series (snapshot Cron tiap 5 menit ke D1), watchlist tetap 50 pair — deteksi "basis melebar lalu kembali" tanpa cek manual berkali-kali | D1 + Cron Trigger |
 | `binance_detect_mm_activity` | Skor + tier (Weak/Moderate/Strong/Extreme) dari 6 sinyal MM/whale sekaligus (absorption, spoofing heuristic, stop-hunt heuristic, basis arbitrage, OI divergence, funding extreme) — ganti 5-6 tool call manual. **Skor spoofing & stop-hunt cuma heuristik 1-snapshot**, lihat [Keterbatasan](#keterbatasan-yang-jujur-perlu-diketahui) | Binance native |
 | `binance_market_regime` | Klasifikasi kondisi pasar: TRENDING_UP/DOWN, RANGING, BREAKOUT, ACCUMULATION, DISTRIBUTION — pakai ADX(14), tren OI, CVD, spike volatilitas/volume | Binance native |
 | `binance_backtest_signal` | Validasi empiris sinyal `binance_detect_mm_activity`: win rate/avg return/max drawdown dari histori sinyal D1 (watchlist tetap), forward return dihitung on-demand dari klines historis | D1 + Binance native |
@@ -241,11 +241,11 @@ Detail penuh (termasuk raw data test per klaim): Section 10,
   window fetch yang sama** (10 candle terakhir vs 10 sebelumnya), bukan
   baseline historis jangka panjang.
 - **Time-series D1 (`market_snapshots`, `signal_history`) HANYA untuk
-  watchlist tetap 10 pair** — pair lain di luar itu tidak pernah di-snapshot
+  watchlist tetap 50 pair** — pair lain di luar itu tidak pernah di-snapshot
   cron sama sekali, `binance_get_basis_history` dan `binance_backtest_signal`
-  cuma bisa dipanggil untuk 10 pair itu.
+  cuma bisa dipanggil untuk 50 pair itu.
 - **Belum ada pruning/retention buat row D1** — row nambah terus tanpa batas
-  seiring waktu (di 10 pair x ~6.048 row/hari gabungan kedua tabel, D1 free
+  seiring waktu (di 50 pair x ~6.048 row/hari gabungan kedua tabel, D1 free
   tier 5 juta write/hari & 5GB storage masih longgar untuk waktu yang lama,
   tapi ini bukan solusi permanen).
 - **Migrasi KV→D1 (basis history) TIDAK backfill data lama** — histori basis
