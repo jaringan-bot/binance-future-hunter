@@ -23,7 +23,10 @@
 // BUKAN jaminan keras cross-isolate/cross-request). Ini proteksi
 // best-effort, BUKAN hard global rate limiter.
 const WINDOW_MS = 60_000;
-const MAX_REQUESTS_PER_WINDOW = 780;
+// Exported so rateLimiter.test.ts asserts against this value instead of a
+// hardcoded copy -- a hardcoded copy is what let the test silently desync
+// from this constant when it was raised 200 -> 780 (see below).
+export const MAX_REQUESTS_PER_WINDOW = 780;
 
 let timestamps: number[] = [];
 
