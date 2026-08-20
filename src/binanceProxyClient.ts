@@ -84,7 +84,12 @@ const LONG_CACHE_PATHS = new Set([
 const LONG_CACHE_TTL_SECONDS = 300;
 
 // Metadata listing/status pair -- praktis statis, jarang berubah dalam sehari.
-const STATIC_CACHE_PATHS = new Set(["/api/v3/exchangeInfo", "/fapi/v1/indexInfo", "/fapi/v1/constituents"]);
+const STATIC_CACHE_PATHS = new Set([
+  "/api/v3/exchangeInfo",
+  "/fapi/v1/exchangeInfo",
+  "/fapi/v1/indexInfo",
+  "/fapi/v1/constituents",
+]);
 const STATIC_CACHE_TTL_SECONDS = 3600;
 
 function cacheTtlForPath(path: string): number {
@@ -134,6 +139,7 @@ const PROXY_ALLOWED_PATHS = new Set([
   "/fapi/v1/continuousKlines",
   "/futures/data/delivery-price",
   "/fapi/v1/constituents",
+  "/fapi/v1/exchangeInfo",
 ]);
 
 interface ProxyEndpoint {
@@ -746,6 +752,41 @@ export async function getSpotExchangeInfo(symbol: string): Promise<SpotSymbolInf
     "spot",
   );
   return data.symbols[0] ?? null;
+}
+
+// ─────────────────────────────────────────────────────────────
+// EXCHANGE INFO (per-symbol, futures) — trading rules (LOT_SIZE,
+// MIN_NOTIONAL) untuk validasi grid qty/notional minimum. Dipakai
+// analyze_futures_grid_risk, BUKAN untuk cek status listing (itu sudah
+// ada versi Spot lewat getSpotExchangeInfo).
+// ─────────────────────────────────────────────────────────────
+export interface FuturesLotSizeFilter {
+  filterType: "LOT_SIZE";
+  minQty: string;
+  stepSize: string;
+}
+
+export interface FuturesMinNotionalFilter {
+  filterType: "MIN_NOTIONAL";
+  notional: string;
+}
+
+type FuturesSymbolFilter =
+  | FuturesLotSizeFilter
+  | FuturesMinNotionalFilter
+  | { filterType: string; [key: string]: unknown };
+
+export interface FuturesExchangeInfoSymbol {
+  symbol: string;
+  filters: FuturesSymbolFilter[];
+}
+
+export interface FuturesExchangeInfoResponse {
+  symbols: FuturesExchangeInfoSymbol[];
+}
+
+export async function getFuturesExchangeInfo(symbol: string): Promise<FuturesExchangeInfoResponse> {
+  return callProxy<FuturesExchangeInfoResponse>("/fapi/v1/exchangeInfo", { symbol: symbol.toUpperCase() });
 }
 
 // ─────────────────────────────────────────────────────────────

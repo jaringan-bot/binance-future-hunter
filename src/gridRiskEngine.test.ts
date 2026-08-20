@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { calculateGridRisk, type GridInputParams } from "./gridRiskEngine.js";
 import { FALLBACK_CONTEXT } from "./marketContext.js";
 import type { BinanceMarketData } from "./binanceFetcher.js";
+import { setProxyConfig } from "./binanceProxyClient.js";
 
 const marketData: BinanceMarketData = {
   predictedFundingRate: 0,
@@ -27,7 +28,12 @@ function exchangeInfoResponse(minQty: string, stepSize: string, minNotional: str
   );
 }
 
+// fetchSymbolTradingRules sekarang lewat getFuturesExchangeInfo() ->
+// callProxy(), jadi butuh proxy dikonfigurasi (setProxyConfig) sebelum
+// global fetch di-stub -- callProxy menolak request kalau primaryEndpoint
+// belum diset, terlepas dari apa yang dikembalikan fetch.
 function stubTradingRulesFetch(minQty = "0.1", stepSize = "0.1", minNotional = "5") {
+  setProxyConfig("https://primary.example", "test-secret");
   vi.stubGlobal(
     "fetch",
     vi.fn().mockResolvedValue(exchangeInfoResponse(minQty, stepSize, minNotional)),
@@ -36,6 +42,7 @@ function stubTradingRulesFetch(minQty = "0.1", stepSize = "0.1", minNotional = "
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  setProxyConfig(undefined, undefined);
 });
 
 const trbBaseParams: GridInputParams = {
