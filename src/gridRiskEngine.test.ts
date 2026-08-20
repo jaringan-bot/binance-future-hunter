@@ -12,11 +12,24 @@ const marketData: BinanceMarketData = {
 
 // Trading rules TRBUSDT dipakai sbg golden test -- minQty=0.1, stepSize=0.1,
 // minNotional=5, sesuai instruksi task (mock/inject, jangan fetch live).
+//
+// Binance /fapi/v1/exchangeInfo IGNORES the `symbol` query param and always
+// returns all listed symbols. Mock reflects that: TRBUSDT deliberately NOT
+// at index 0, with an unrelated BTCUSDT entry first, so this test actually
+// exercises symbol-matching instead of trivially passing via index 0.
 function exchangeInfoResponse(minQty: string, stepSize: string, minNotional: string): Response {
   return new Response(
     JSON.stringify({
       symbols: [
         {
+          symbol: "BTCUSDT",
+          filters: [
+            { filterType: "LOT_SIZE", minQty: "0.001", maxQty: "10000", stepSize: "0.001" },
+            { filterType: "MIN_NOTIONAL", notional: "100" },
+          ],
+        },
+        {
+          symbol: "TRBUSDT",
           filters: [
             { filterType: "LOT_SIZE", minQty, maxQty: "10000", stepSize },
             { filterType: "MIN_NOTIONAL", notional: minNotional },

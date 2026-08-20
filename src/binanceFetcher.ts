@@ -127,8 +127,12 @@ export async function fetchSymbolTradingRules(
   const normalizedSymbol = symbol.trim().toUpperCase();
 
   try {
+    // /fapi/v1/exchangeInfo MENGABAIKAN parameter query `symbol` -- Binance
+    // selalu balikin SEMUA ~872 symbol di data.symbols[], terlepas dari
+    // symbol yang diminta. Harus di-filter di sini; ambil index 0 (bug lama)
+    // selalu ambil symbol pertama dalam array (BTCUSDT), bukan yang diminta.
     const data = await getFuturesExchangeInfo(normalizedSymbol);
-    const symbolInfo = data.symbols?.[0];
+    const symbolInfo = data.symbols?.find((entry) => entry.symbol === normalizedSymbol);
     if (!symbolInfo) return undefined;
 
     const lotSizeFilter = symbolInfo.filters.find(
