@@ -252,11 +252,23 @@ export async function queryWallPersistence(
   const highPrice = priceLevel * (1 + WALL_PRICE_TOLERANCE);
   const cutoff = Date.now() - lookbackMinutes * 60 * 1000;
 
+  // Toleransi harga bisa mencakup banyak level order book berbeda dalam SATU
+  // captured_at (tick size kecil vs band 0.05% yang lebar) -- kalau semua
+  // level itu diambil, hasilnya bukan histori SATU wall lagi, tapi level
+  // acak tercampur antar waktu. ROW_NUMBER() per captured_at, urut jarak ke
+  // priceLevel, ambil rn=1 -- jadi tepat SATU baris (level terdekat) per tick.
   const result = await requireDb()
     .prepare(
-      "SELECT captured_at, qty FROM wall_tracking WHERE symbol = ? AND side = ? AND price BETWEEN ? AND ? AND captured_at >= ? ORDER BY captured_at ASC",
+      `SELECT captured_at, qty FROM (
+         SELECT captured_at, qty,
+           ROW_NUMBER() OVER (PARTITION BY captured_at ORDER BY ABS(price - ?) ASC) AS rn
+         FROM wall_tracking
+         WHERE symbol = ? AND side = ? AND price BETWEEN ? AND ? AND captured_at >= ?
+       )
+       WHERE rn = 1
+       ORDER BY captured_at ASC`,
     )
-    .bind(symbol.toUpperCase(), side, lowPrice, highPrice, cutoff)
+    .bind(priceLevel, symbol.toUpperCase(), side, lowPrice, highPrice, cutoff)
     .all<RawWallCandidateRow>();
 
   return result.results.map((r) => ({ capturedAt: r.captured_at, qty: r.qty }));

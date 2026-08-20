@@ -39,7 +39,7 @@ export function registerFuturesGridRiskTool(server: McpServer): void {
           fetchMarketContext(params.symbol),
         ]);
 
-        const analysis = calculateGridRisk(params, marketData, contextualRisk);
+        const analysis = await calculateGridRisk(params, marketData, contextualRisk);
         const circuitBreakerTriggered = analysis.status === "REJECT";
         const circuitBreakerReason =
           analysis.rejectionReason ??

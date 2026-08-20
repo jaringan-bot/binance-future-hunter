@@ -1,4 +1,5 @@
 import type { BinanceMarketData } from "./binanceFetcher.js";
+import { fetchSymbolTradingRules } from "./binanceFetcher.js";
 import type { GridContextualRisk } from "./marketContext.js";
 
 export interface GridInputParams {
@@ -35,15 +36,17 @@ export interface GridRiskAnalysisResult {
   decisionReason?: string;
 }
 
+// gridCount = jumlah interval/grid (definisi resmi Binance), jadi titik
+// harga yang dihasilkan adalah gridCount + 1, bukan gridCount.
 function arithmeticGrid(lower: number, upper: number, count: number): number[] {
-  const step = (upper - lower) / (count - 1);
-  return Array.from({ length: count }, (_, index) => lower + step * index);
+  const step = (upper - lower) / count;
+  return Array.from({ length: count + 1 }, (_, index) => lower + step * index);
 }
 
 function geometricGrid(lower: number, upper: number, count: number): number[] {
   if (lower <= 0 || upper <= 0) return [];
-  const ratio = (upper / lower) ** (1 / (count - 1));
-  return Array.from({ length: count }, (_, index) => lower * ratio ** index);
+  const ratio = (upper / lower) ** (1 / count);
+  return Array.from({ length: count + 1 }, (_, index) => lower * ratio ** index);
 }
 
 function round(value: number, decimals = 8): number {
@@ -78,11 +81,30 @@ function reject(
   };
 }
 
-export function calculateGridRisk(
+// Binance default adjust coefficient utk grid Futures -- docs menyebut nilai
+// ini "may be adjusted based on market conditions", tapi Binance sendiri gak
+// expose endpoint publik utk baca nilai real-time-nya, jadi dipakai default
+// resmi 0.8 (bukan hardcode per-pair, berlaku sama utk semua symbol).
+const ADJUST_COEF = 0.8;
+// SIDE = +1 utk Long grid -- satu-satunya arah yang didukung tool ini saat ini.
+const SIDE = 1;
+
+function assumingPriceBuy(price: number): number {
+  return price;
+}
+
+// Sisi SELL grid Long belum dipakai di tool ini (cuma Long grid yang
+// didukung), tapi disertakan supaya rumus persis mengikuti definisi resmi
+// Binance Futures Grid ("What Is Futures Grid Trading?").
+function assumingPriceSell(price: number, markPrice: number): number {
+  return Math.max(markPrice, price);
+}
+
+export async function calculateGridRisk(
   params: GridInputParams,
   marketData: BinanceMarketData,
   contextualRisk: GridContextualRisk,
-): GridRiskAnalysisResult {
+): Promise<GridRiskAnalysisResult> {
   const feeRate = params.feeRate ?? 0.0005;
 
   if (
@@ -105,6 +127,11 @@ export function calculateGridRisk(
     feeRate < 0
   ) {
     return reject("Invalid grid parameters.");
+  }
+
+  const tradingRules = await fetchSymbolTradingRules(params.symbol);
+  if (tradingRules === undefined) {
+    return reject(`Unable to fetch trading rules for symbol ${params.symbol}.`);
   }
 
   const rangePercentage =
@@ -134,12 +161,62 @@ export function calculateGridRisk(
     );
   }
 
+  // capitalPerGridUSD dipertahankan sebagai field output (interface tidak
+  // berubah) -- tidak lagi dipakai buat hitung quantity, karena mekanisme
+  // Futures Grid pakai base-asset qty KONSTAN per level, bukan USD notional
+  // konstan per level (itu mekanisme grid Spot).
   const capitalPerGridUSD =
     (params.initialCapital * params.leverage) / params.gridCount;
 
-  const quantities = filledGrid.map((price) => capitalPerGridUSD / price);
-  const totalQuantity = quantities.reduce((sum, quantity) => sum + quantity, 0);
-  const avgEntryPrice = (capitalPerGridUSD * m) / totalQuantity;
+  // grid_qty: base-asset quantity KONSTAN per order di semua level, sesuai
+  // formula resmi Binance Futures Grid ("What Is Futures Grid Trading?").
+  // BUY dominan utk Long grid.
+  const denom = grid.reduce((sum, price) => {
+    const ap = assumingPriceBuy(price);
+    const riskTerm =
+      params.leverage * Math.abs(Math.min(0, SIDE * (params.currentPrice - price)));
+    return sum + ap + riskTerm;
+  }, 0);
+
+  const gridQty = (ADJUST_COEF * params.initialCapital * params.leverage) / denom;
+
+  const totalQuantity = gridQty * m;
+  const avgEntryPrice = filledGrid.reduce((sum, price) => sum + price, 0) / m;
+
+  // Notional-per-order dicek duluan sebelum margin minimum: gridQty yang
+  // gagal minNotional SELALU juga gagal margin minimum (minGridQty di bawah
+  // dibangun dari minNotional juga), jadi kalau margin dicek duluan pesan
+  // minNotional gak akan pernah kelihatan -- dicek di sini dulu supaya
+  // pesan reject paling spesifik (root cause) yang muncul.
+  const notionalPerOrder = gridQty * params.lowerPrice;
+  if (notionalPerOrder < tradingRules.minNotional) {
+    return reject(
+      `Notional per grid order ($${notionalPerOrder.toFixed(2)}) is below Binance minimum notional ($${tradingRules.minNotional}). Reduce gridCount or increase initialCapital.`,
+      rangePercentage,
+      gridTypeMismatch,
+    );
+  }
+
+  const rawMinGridQty = Math.max(
+    tradingRules.minQty,
+    tradingRules.minNotional / params.lowerPrice,
+  );
+  const minGridQty = Math.ceil(rawMinGridQty / tradingRules.stepSize) * tradingRules.stepSize;
+
+  const minInitialMarginDenom = grid.reduce((sum, price) => {
+    const riskTerm =
+      params.leverage * minGridQty * Math.abs(Math.min(0, SIDE * (params.currentPrice - price)));
+    return sum + minGridQty * price + riskTerm;
+  }, 0);
+  const minInitialMargin = minInitialMarginDenom / (params.leverage * ADJUST_COEF);
+
+  if (params.initialCapital < minInitialMargin) {
+    return reject(
+      `Initial capital $${params.initialCapital} is below the minimum required for ${params.leverage}x leverage on this grid: needs at least $${minInitialMargin.toFixed(2)}.`,
+      rangePercentage,
+      gridTypeMismatch,
+    );
+  }
 
   const maxExposureSL =
     totalQuantity * (avgEntryPrice - params.stopLossPrice) +
@@ -163,8 +240,7 @@ export function calculateGridRisk(
   for (let index = 0; index < filledGrid.length; index += 1) {
     const nextGridPrice = grid.find((price) => price > filledGrid[index]);
     if (nextGridPrice !== undefined) {
-      rawProfitPerCycleUSD +=
-        quantities[index] * (nextGridPrice - filledGrid[index]);
+      rawProfitPerCycleUSD += gridQty * (nextGridPrice - filledGrid[index]);
     }
   }
 
