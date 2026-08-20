@@ -8,11 +8,12 @@
 // description tool.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as binanceProxy from "../binanceProxyClient.js";
-import { symbolSchema, errorResult, computeRealizedVolatility } from "../shared.js";
+import { symbolSchema, errorResult, computeRealizedVolatility, KLINE_INTERVAL_ENUM } from "../shared.js";
 import { computeCvdFromTrades, summarizeKlines, calculateADX, type KlineCandle } from "../toolHelpers.js";
 import { registerSafeTool } from "../toolWrapper.js";
 import { ToolResponseBuilder } from "../responseBuilder.js";
 import { fmtNum } from "../format.js";
+import { z } from "zod";
 
 export type MarketRegime = "TRENDING_UP" | "TRENDING_DOWN" | "RANGING" | "BREAKOUT" | "ACCUMULATION" | "DISTRIBUTION";
 
@@ -96,6 +97,15 @@ function realizedVolPct(candles: KlineCandle[]): number {
   return computeRealizedVolatility(closes, 24 * 365).periodPct;
 }
 
+// Minimum candle historis (>=21) di-scale relatif ke minimum ADX(14) yang
+// tidak berubah lintas timeframe -- 21 candle 1H (~21 jam) dan 21 candle 4H
+// (~3.5 hari) sama-sama valid secara struktural untuk ADX(14). Limit fetch
+// tetap 40 (bukan diskalakan naik/turun) karena requirement-nya adalah
+// JUMLAH candle, bukan rentang waktu -- baik 1H maupun 4H sama-sama perlu
+// ~40 candle untuk window recent(10)/prior(10) + margin ADX warm-up.
+const REGIME_MIN_CANDLES = 21;
+const REGIME_KLINE_LIMIT = 40;
+
 export function registerMarketRegimeTools(server: McpServer): void {
   registerSafeTool(
     server,
@@ -104,27 +114,41 @@ export function registerMarketRegimeTools(server: McpServer): void {
       title: "Deteksi Regime Pasar (Trending/Ranging/Breakout/Accumulation/Distribution)",
       description:
         "Klasifikasi kondisi pasar saat ini jadi salah satu dari 6 regime: TRENDING_UP, TRENDING_DOWN, RANGING, " +
-        "BREAKOUT, ACCUMULATION, DISTRIBUTION -- pakai ADX(14) dari klines 1 jam, tren OI, CVD dari agg trades, " +
-        "dan rasio spike volatilitas/volume (10 candle terakhir vs 10 sebelumnya, BUKAN baseline historis " +
-        "persisten -- belum ada penyimpanan time-series general per pair). Berguna buat kasih Claude konteks " +
-        "makro sebelum baca sinyal lain (funding, OI, order book) satu-satu.",
-      inputSchema: { symbol: symbolSchema },
+        "BREAKOUT, ACCUMULATION, DISTRIBUTION -- pakai ADX(14) dari klines timeframe pilihan (default 1 jam, bisa " +
+        "diganti lewat parameter interval, mis. '4h'), tren OI, CVD dari agg trades, dan rasio spike " +
+        "volatilitas/volume (10 candle terakhir vs 10 sebelumnya PADA TIMEFRAME YANG SAMA, BUKAN baseline " +
+        "historis persisten -- belum ada penyimpanan time-series general per pair). PENTING: memanggil tool ini " +
+        "dua kali dengan interval berbeda (mis. '1h' lalu '4h') menghasilkan DUA regime independen -- masing-masing " +
+        "punya window candle, ADX, OI-change, dan CVD sendiri, bukan derivasi satu dari yang lain. Cocok untuk " +
+        "kebutuhan multi-timeframe (mis. cross-check regime 1H vs 4H) tanpa perlu tool terpisah.",
+      inputSchema: {
+        symbol: symbolSchema,
+        interval: z
+          .enum(KLINE_INTERVAL_ENUM)
+          .default("1h")
+          .describe(
+            "Timeframe candle untuk analisis regime (ADX, OI-change, CVD, volatility/volume spike): 1m, 5m, 15m, " +
+              "30m, 1h, 2h, 4h, 6h, 12h, 1d. Default '1h' (perilaku lama, tidak ada breaking change). Gunakan '4h' " +
+              "untuk regime 4-jam yang sepenuhnya independen dari hasil 1h -- masing-masing dihitung dari window " +
+              "candle miliknya sendiri, bukan agregasi dari interval lain.",
+          ),
+      },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ symbol }) => {
+    async ({ symbol, interval }) => {
       try {
         const [klines, oiCurrent, oiHist, aggTrades] = await Promise.all([
-          binanceProxy.getKlinesNative(symbol, "1h", 40),
+          binanceProxy.getKlinesNative(symbol, interval, REGIME_KLINE_LIMIT),
           binanceProxy.getOpenInterestNative(symbol),
-          binanceProxy.getOpenInterestHistNative(symbol, "1h", 2),
+          binanceProxy.getOpenInterestHistNative(symbol, interval, 2),
           binanceProxy.getAggTrades(symbol, 100),
         ]);
 
         const { candles } = summarizeKlines(klines);
-        if (candles.length < 21) {
+        if (candles.length < REGIME_MIN_CANDLES) {
           return errorResult(
             new Error(
-              `Data klines tidak cukup untuk analisis regime (dapat ${candles.length}, butuh minimal 21 candle 1 jam).`,
+              `Data klines tidak cukup untuk analisis regime (dapat ${candles.length}, butuh minimal ${REGIME_MIN_CANDLES} candle ${interval}).`,
             ),
           );
         }
@@ -162,22 +186,24 @@ export function registerMarketRegimeTools(server: McpServer): void {
         });
 
         const builder = new ToolResponseBuilder()
-          .header(`Regime Pasar — ${symbol}`)
+          .header(`Regime Pasar — ${symbol} (${interval})`)
           .row("Regime", result.regime)
           .row("Confidence", `${(result.confidence * 100).toFixed(0)}%`)
           .interpretation("Alasan", result.reason)
           .subheader("Metrik Pendukung")
+          .row("Timeframe", interval)
           .row("ADX(14)", fmtNum(adxResult.adx, 2))
           .row("+DI / -DI", `${fmtNum(adxResult.plusDI, 2)} / ${fmtNum(adxResult.minusDI, 2)}`)
-          .row("OI Change (1h)", `${oiChangePct >= 0 ? "+" : ""}${oiChangePct.toFixed(2)}%`)
+          .row(`OI Change (${interval})`, `${oiChangePct >= 0 ? "+" : ""}${oiChangePct.toFixed(2)}%`)
           .row("Price Change (10 candle)", `${priceChangePct >= 0 ? "+" : ""}${priceChangePct.toFixed(2)}%`)
           .row("CVD Buy %", `${cvd.buyPct.toFixed(1)}%`)
           .row("Volatility Spike Ratio", `${volatilitySpikeRatio.toFixed(2)}x`)
           .row("Volume Spike Ratio", `${volumeSpikeRatio.toFixed(2)}x`)
           .note(
-            "Volatility/volume spike dihitung relatif ke 10 candle sebelumnya dalam window fetch ini, bukan baseline historis jangka panjang.",
+            `Volatility/volume spike dihitung relatif ke 10 candle ${interval} sebelumnya dalam window fetch ini, bukan baseline historis jangka panjang. Regime ini dihitung MURNI dari timeframe ${interval} -- kalau butuh regime timeframe lain (mis. cross-check 1h vs 4h), panggil tool ini lagi dengan parameter interval berbeda; jangan diturunkan/diinterpolasi dari hasil ini.`,
           )
           .struct("symbol", symbol)
+          .struct("interval", interval)
           .struct("regime", result.regime)
           .struct("confidence", result.confidence)
           .struct("adx", adxResult.adx)
