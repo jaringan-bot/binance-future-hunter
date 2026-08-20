@@ -68,6 +68,8 @@ const ALLOWED_PATHS_BY_MARKET: Record<string, Set<string>> = {
     "/fapi/v1/continuousKlines",
     "/futures/data/delivery-price",
     "/fapi/v1/constituents",
+    // exchangeInfo (LOT_SIZE/MIN_NOTIONAL) -- trading rules utk validasi grid qty minimum
+    "/fapi/v1/exchangeInfo",
   ]),
   spot: new Set([
     "/api/v3/ticker/price",
