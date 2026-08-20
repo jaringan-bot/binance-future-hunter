@@ -2,8 +2,20 @@
 // proxy Vercel itu 1 IP shared, kalau kebanyakan call bisa kena rate limit
 // Binance beneran (weight-based, 1200-2400/menit tergantung endpoint).
 // SENGAJA count-based (bukan weight-based per-endpoint, itu butuh tabel
-// weight per path, di luar scope). Threshold 200/menit jauh di bawah limit
-// weight Binance -- buffer besar karena kita gak ngitung weight asli.
+// weight per path, di luar scope).
+//
+// Dinaikkan dari 200 -> 780/menit (2026-08-20) bersamaan dengan perluasan
+// SNAPSHOT_WATCHLIST 10->50 pair (shared.ts). Perhitungan worst-case:
+// - Cron 5-menit: 50 pair x ~11 call/symbol = ~550 call.
+// - WALL_SCAN_CRON (cron TERPISAH, tiap 1 menit, 1 call/symbol via
+//   getOrderBookDepth): 50 call/menit.
+// - Pada menit kelipatan 5, kedua cron bisa trigger di window yang sama
+//   (Cloudflare tidak menjamin urutan/spacing antar Cron Trigger berbeda) --
+//   worst case realistis: 550 + 50 = ~600 call dalam 60 detik.
+// - 780 memberi buffer ~30% di atas worst-case 600 yang sudah diketahui.
+// Batas ini TETAP jauh di bawah limit asli Binance (2400/menit IP-based) --
+// rasio buffer turun dari ~12x (200 vs 2400) jadi ~3.1x (780 vs 2400),
+// masih buffer wajar, bukan mepet ke limit asli.
 //
 // KETERBATASAN JUJUR: worker ini STATELESS per-request (lihat komentar di
 // src/index.ts) -- counter module-level di sini efektif SELAMA isolate
@@ -11,7 +23,7 @@
 // BUKAN jaminan keras cross-isolate/cross-request). Ini proteksi
 // best-effort, BUKAN hard global rate limiter.
 const WINDOW_MS = 60_000;
-const MAX_REQUESTS_PER_WINDOW = 200;
+const MAX_REQUESTS_PER_WINDOW = 780;
 
 let timestamps: number[] = [];
 
