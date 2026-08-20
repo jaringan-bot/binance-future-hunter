@@ -7,10 +7,35 @@ import * as binanceProxy from "./binanceProxyClient.js";
 
 // Watchlist yang di-snapshot Cron Trigger tiap 5 menit ke D1 (basis+funding+OI
 // di market_snapshots, 6 skor sinyal MM di signal_history -- lihat scheduled()
-// handler di src/index.ts + migrations/0001_init.sql). 10 pair paling
-// likuid/sering dianalisis; D1 (5 juta write/hari) jauh di atas limit lama
-// Workers KV (1.000 write/hari) yang tadinya batasin watchlist ke 3 pair.
+// handler di src/index.ts + migrations/0001_init.sql).
+//
+// DIPERLUAS dari 10 -> 50 pair (2026-08-20), berdasarkan market cap. Analisis
+// kapasitas sebelum perluasan:
+// - D1 (5 juta write/hari): 50 pair x 7 write/symbol x 288 run/hari = 100.800
+//   write/hari, 2% dari kuota -- BUKAN bottleneck.
+// - Rate limiter proxy internal (rateLimiter.ts): worst-case 50 pair x ~11
+//   call/symbol (cron 5-menit) + 50 call (WALL_SCAN_CRON, tiap 1 menit,
+//   bertepatan di menit kelipatan 5) = ~600 call/menit -- MELEBIHI limit lama
+//   200/menit, makanya MAX_REQUESTS_PER_WINDOW dinaikkan ke 780 bersamaan
+//   dengan perubahan ini (lihat rateLimiter.ts untuk detail perhitungan).
+//   Tetap jauh di bawah limit asli Binance (2400/menit IP-based, weight
+//   bervariasi per endpoint).
+// - Vercel Hobby Active CPU (4 jam/bulan, diverifikasi dari dashboard usage
+//   riil, BUKAN dari artikel pihak ketiga): 10 pair terpakai ~35 menit/bulan
+//   (~15% kuota) -- proyeksi linear 50 pair ~175 menit (~73% kuota). Aman,
+//   tapi headroom tidak longgar -- monitor usage Vercel kalau traffic lain
+//   ikut naik.
+//
+// Semua 50 simbol divalidasi PENUH (50/50) listing aktif di Binance Futures
+// via binance_get_funding_rate (native premiumIndex) sebelum ditambahkan --
+// tidak ada "Invalid symbol" untuk simbol manapun di daftar final. Kalau
+// salah satu di-delist Binance di masa depan, cron akan log error per-symbol
+// (try/catch sudah ada di scheduled() handler, satu symbol gagal tidak
+// menggagalkan yang lain) -- tapi symbol yang delisted tetap perlu dihapus
+// manual dari daftar ini saat diketahui, supaya tidak terus gagal tiap
+// siklus tanpa guna.
 export const SNAPSHOT_WATCHLIST = [
+  // --- 10 pair asli (sudah ada sebelumnya) ---
   "BTCUSDT",
   "ETHUSDT",
   "SOLUSDT",
@@ -21,6 +46,47 @@ export const SNAPSHOT_WATCHLIST = [
   "AVAXUSDT",
   "LINKUSDT",
   "LTCUSDT",
+  // --- 40 tambahan, urutan market cap (per 2026-08-20, tervalidasi 50/50 ke Binance Futures) ---
+  "TRXUSDT",
+  "SUIUSDT",
+  "HYPEUSDT",
+  "ZECUSDT",
+  "NEARUSDT",
+  "UNIUSDT",
+  "BCHUSDT",
+  "TAOUSDT",
+  "WLDUSDT",
+  "AAVEUSDT",
+  "XMRUSDT",
+  "ONDOUSDT",
+  "FILUSDT",
+  "XLMUSDT",
+  "DOTUSDT",
+  "ENAUSDT",
+  "1000PEPEUSDT",
+  "PUMPUSDT",
+  "ASTERUSDT",
+  "WLFIUSDT",
+  "PAXGUSDT",
+  "TRUMPUSDT",
+  "XAUTUSDT",
+  "ETCUSDT",
+  "ATOMUSDT",
+  "ICPUSDT",
+  "APTUSDT",
+  "ARBUSDT",
+  "OPUSDT",
+  "INJUSDT",
+  "SEIUSDT",
+  "RUNEUSDT",
+  "TIAUSDT",
+  "STXUSDT",
+  "IMXUSDT",
+  "GALAUSDT",
+  "SANDUSDT",
+  "MANAUSDT",
+  "FTMUSDT", // funding 0.0000% saat validasi -- volume kemungkinan tipis, monitor
+  "ALGOUSDT",
 ] as const;
 
 export const PERIOD_ENUM = [
