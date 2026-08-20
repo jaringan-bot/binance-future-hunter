@@ -1,5 +1,9 @@
-import { describe, it, expect } from "vitest";
-import { classifyRegime, type RegimeInput } from "./marketRegime.js";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { z } from "zod";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { classifyRegime, registerMarketRegimeTools, type RegimeInput } from "./marketRegime.js";
+import * as binanceProxy from "../binanceProxyClient.js";
+import type { KlineTuple } from "../binanceProxyClient.js";
 
 function baseInput(overrides: Partial<RegimeInput> = {}): RegimeInput {
   return {
@@ -75,5 +79,119 @@ describe("classifyRegime", () => {
       expect(result.confidence).toBeGreaterThanOrEqual(0);
       expect(result.confidence).toBeLessThanOrEqual(1);
     }
+  });
+});
+
+vi.mock("../binanceProxyClient.js", () => ({
+  getKlinesNative: vi.fn(),
+  getOpenInterestNative: vi.fn(),
+  getOpenInterestHistNative: vi.fn(),
+  getAggTrades: vi.fn(),
+}));
+
+type RegimeToolResult = {
+  content: [{ type: "text"; text: string }];
+  structuredContent: Record<string, unknown>;
+};
+type RegimeToolHandler = (args: { symbol: string; interval: string }) => Promise<RegimeToolResult>;
+
+// Cukup 21 candle biar lolos REGIME_MIN_CANDLES, tapi tool selalu fetch
+// REGIME_KLINE_LIMIT (40) -- pakai 40 di sini biar konsisten sama call asli.
+function makeKlines(count: number): KlineTuple[] {
+  return Array.from({ length: count }, (_, i) => {
+    const open = 100 + i * 0.1;
+    return [
+      i * 3_600_000,
+      open.toFixed(2),
+      (open + 1).toFixed(2),
+      (open - 1).toFixed(2),
+      (open + 0.5).toFixed(2),
+      String(1000 + i),
+      i * 3_600_000 + 3_599_999,
+      "0",
+      10,
+      "0",
+      "0",
+      "0",
+    ] as unknown as KlineTuple;
+  });
+}
+
+// registerMarketRegimeTools() cuma butuh .registerTool dari McpServer --
+// fake minimal ini menangkap handler+inputSchema yang didaftarkan
+// registerSafeTool, TANPA perlu instance McpServer sungguhan (server.ts
+// bikin instance asli via SDK, di luar scope test unit ini).
+describe("binance_market_regime tool handler (threading interval param)", () => {
+  let handler: RegimeToolHandler;
+  let inputSchema: Record<string, z.ZodTypeAny>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+
+    vi.mocked(binanceProxy.getKlinesNative).mockResolvedValue(makeKlines(40));
+    vi.mocked(binanceProxy.getOpenInterestNative).mockResolvedValue({
+      symbol: "BTCUSDT",
+      openInterest: "1000",
+      time: 0,
+    });
+    vi.mocked(binanceProxy.getOpenInterestHistNative).mockResolvedValue([
+      { symbol: "BTCUSDT", sumOpenInterest: "900", sumOpenInterestValue: "0", timestamp: 0 },
+      { symbol: "BTCUSDT", sumOpenInterest: "950", sumOpenInterestValue: "0", timestamp: 0 },
+    ]);
+    vi.mocked(binanceProxy.getAggTrades).mockResolvedValue(
+      Array.from({ length: 10 }, (_, i) => ({
+        a: i,
+        p: "100",
+        q: "1",
+        f: i,
+        l: i,
+        T: i,
+        m: i % 2 === 0,
+      })),
+    );
+
+    const fakeServer = {
+      registerTool: (_name: string, config: { inputSchema?: Record<string, z.ZodTypeAny> }, cb: unknown) => {
+        inputSchema = config.inputSchema ?? {};
+        handler = cb as RegimeToolHandler;
+        return {};
+      },
+    } as unknown as McpServer;
+
+    registerMarketRegimeTools(fakeServer);
+  });
+
+  it("defaults interval to '1h' when not provided -- regression test, matches pre-PR behavior", async () => {
+    // z.object(inputSchema).parse(...) meniru resolusi default yang SDK
+    // MCP lakukan sebelum panggil handler -- .default("1h") di schema
+    // TIDAK otomatis kepakai kalau kita panggil handler() langsung.
+    const args = z.object(inputSchema).parse({ symbol: "BTCUSDT" }) as { symbol: string; interval: string };
+    await handler(args);
+
+    expect(binanceProxy.getKlinesNative).toHaveBeenCalledWith("BTCUSDT", "1h", 40);
+    expect(binanceProxy.getOpenInterestHistNative).toHaveBeenCalledWith("BTCUSDT", "1h", 2);
+  });
+
+  it("threads interval='4h' through to getKlinesNative and getOpenInterestHistNative instead of '1h'", async () => {
+    const args = z.object(inputSchema).parse({ symbol: "BTCUSDT", interval: "4h" }) as {
+      symbol: string;
+      interval: string;
+    };
+    await handler(args);
+
+    expect(binanceProxy.getKlinesNative).toHaveBeenCalledWith("BTCUSDT", "4h", 40);
+    expect(binanceProxy.getOpenInterestHistNative).toHaveBeenCalledWith("BTCUSDT", "4h", 2);
+    expect(binanceProxy.getKlinesNative).not.toHaveBeenCalledWith("BTCUSDT", "1h", 40);
+  });
+
+  it("reflects the requested interval in response header text and structuredContent", async () => {
+    const args = z.object(inputSchema).parse({ symbol: "BTCUSDT", interval: "4h" }) as {
+      symbol: string;
+      interval: string;
+    };
+    const result = await handler(args);
+
+    expect(result.content[0].text).toContain("Regime Pasar — BTCUSDT (4h)");
+    expect(result.structuredContent.interval).toBe("4h");
   });
 });
