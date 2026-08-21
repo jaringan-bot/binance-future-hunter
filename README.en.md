@@ -21,7 +21,7 @@ what's still manual: you STILL need to set secrets afterward (Cloudflare
 can't guess values from external services) — see `.dev.vars.example` in
 this repo for the full list, or
 [Vercel Proxy setup](#setup-vercel-proxy-required-one-time) below.
-`PROXY_URL`/`PROXY_SECRET` are REQUIRED (43 of 44 tools need them), the
+`PROXY_URL`/`PROXY_SECRET` are REQUIRED (44 of 45 tools need them), the
 Coinalyze API key is **OPTIONAL** (only 1 tool) — skip it if you don't need
 liquidation history.
 
@@ -76,7 +76,7 @@ conversation with Claude, without needing a separate exchange dashboard.
   [Limitations](#honest-limitations-you-should-know) section for details.
 - **Initial setup needs a Vercel proxy** (required) — not plug-and-play,
   there's a one-time manual configuration step. Coinalyze API key is
-  OPTIONAL (only 1 of 44 tools), doesn't block initial setup if skipped.
+  OPTIONAL (only 1 of 45 tools), doesn't block initial setup if skipped.
 - **Coinalyze free-tier rate limit** (40 requests/minute per API key) could
   become a bottleneck under very heavy use.
 - No on-chain wallet data, and no data from exchanges other than Binance
@@ -171,6 +171,7 @@ setup needed for those 3 exchanges.
 | `binance_get_quarterly_settlement_price` | Historical delivery/settlement price for quarterly contracts (not applicable to perpetuals) | Binance native |
 | `binance_get_composite_index_info` | Base asset composition + weights for a composite index symbol (e.g. BTCDOMUSDT) | Binance native |
 | `binance_get_index_constituents` | List of exchanges+prices+weights making up a pair's index price | Binance native |
+| `whalescope_full_pipeline` | The FULL Futures Grid Bot decision chain (highest-level composite tool): hard screen → Tier-1 intelligence (smart money, MM composite, 1h+4h regime, order book) → Compass-equivalent grid bound calculation (ATR + swing high/low) → EXACT capital-solve against a loss budget (`risk_usd`) per leverage option → TRADE/WATCH/NO_TRADE decision + copy-paste-ready Grid Bot config, for 1-20 symbols at once. HIGH token cost — see [`docs/full_pipeline_framework.md`](docs/full_pipeline_framework.md) (`docs/full_pipeline_framework.en.md` for the English mirror) | Binance native |
 
 ## Analysis Framework: Market Maker & Whale Detection
 
@@ -197,6 +198,46 @@ statistically calibrated probability.
 Full document: [`docs/mm_detection_framework.en.md`](docs/mm_detection_framework.en.md)
 (v4, final) — contains detailed criteria per signal, a step-by-step
 workflow, a live checklist, and a tool → signal mapping.
+
+## Framework: Full Pipeline Grid Bot (`whalescope_full_pipeline`)
+
+The highest-level composite tool in this repo — runs the ENTIRE Futures
+Grid Bot decision chain in a single tool call, for one or many symbols at
+once (max 20 per call), replacing ~8 manual tool calls
+(`binance_market_regime` ×2, `binance_analyze_smart_money`,
+`binance_detect_mm_activity`, `binance_get_order_book_imbalance`,
+`analyze_futures_grid_risk`, etc.) plus grid-bound math that previously had
+no tool at all.
+
+**Stages (2-wave fetch, reject-early):**
+
+```
+┌───────────────────────────────────────────────────────────────┐
+│ WAVE 1 (all symbols, parallel): ticker24hr, funding, 1h+4h      │
+│ klines, OI+history, agg trades, market context                  │
+├───────────────────────────────────────────────────────────────┤
+│ HARD SCREEN: tradable? volume >= minimum? |funding| <= max?     │
+│ regime 1h/4h != BREAKOUT?                                       │
+│   → FAIL = NO_TRADE, WAVE 2 IS NEVER CALLED                     │
+├───────────────────────────────────────────────────────────────┤
+│ WAVE 2 (survivors only, parallel): top-trader ratio, global     │
+│ account ratio, 24-point OI history, depth-50 order book         │
+├───────────────────────────────────────────────────────────────┤
+│ TIER-1 SCORING: smart money divergence + 6 MM composite scores  │
+│ + order book imbalance + CVD + regime → rankingScore 0-100      │
+├───────────────────────────────────────────────────────────────┤
+│ GRID BOUNDS (Compass-equivalent): ATR + swing high/low →        │
+│ upper/lower/SL/TP/gridCount/gridType                             │
+├───────────────────────────────────────────────────────────────┤
+│ CAPITAL SOLVE: exact (not iterative) per leverage option, picks │
+│ the highest leverage that's SAFE/MODERATE with safe liquidation │
+├───────────────────────────────────────────────────────────────┤
+│ DECISION: TRADE / WATCH / NO_TRADE + ready-to-use Grid Bot config│
+└───────────────────────────────────────────────────────────────┘
+```
+
+Full document (stage-by-stage, worked example, Known Limitations):
+[`docs/full_pipeline_framework.en.md`](docs/full_pipeline_framework.en.md).
 
 ### Empirical Validation Results
 
@@ -394,10 +435,10 @@ worker"), and the basis+MM-signal Cron Trigger (every 5 min) will fail
 silently each tick (logged to Workers Logs, doesn't break the `/mcp`
 endpoint).
 
-## Setup: Coinalyze API Key (OPTIONAL — only 1 of 44 tools)
+## Setup: Coinalyze API Key (OPTIONAL — only 1 of 45 tools)
 
 Unlike the 3 setup steps above, this is NOT a prerequisite for the server
-to work. The worker deploys and the other 43 tools work fine without
+to work. The worker deploys and the other 44 tools work fine without
 it -- only `binance_get_liquidation_history` needs it.
 
 1. Sign up for free at https://coinalyze.net
@@ -547,6 +588,11 @@ decides which tool(s) to call, and how many times, based on the question:
   above — just name the pair, Claude runs the detection workflow
 - *"Compare the funding rate of BTC, ETH, SOL, and BNB"* →
   `binance_compare_symbols`
+- *"Is it worth opening a Futures Grid Bot on BTCUSDT and ETHUSDT right now,
+  $20 loss budget?"* → `whalescope_full_pipeline` (highest-level composite,
+  1 call runs hard screen → Tier-1 intel → grid bounds → risk sizing →
+  TRADE/WATCH/NO_TRADE decision + copy-paste-ready Grid Bot config for both
+  pairs at once)
 
 Since every tool is read-only, it's safe to ask anything about market data
 without risking triggering an order/trade — this worker has no such

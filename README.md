@@ -20,7 +20,7 @@ generate `id`/`database_id` baru buat akun kamu, gak perlu bikin manual).
 setelah klik, kamu TETAP perlu set secret (Cloudflare gak bisa nebak value
 dari layanan eksternal) — lihat `.dev.vars.example` di repo ini buat daftar
 lengkap, atau [Setup Proxy Vercel](#setup-proxy-vercel-wajib-sekali-saja)
-di bawah. `PROXY_URL`/`PROXY_SECRET` WAJIB (43 dari 44 tool butuh),
+di bawah. `PROXY_URL`/`PROXY_SECRET` WAJIB (44 dari 45 tool butuh),
 Coinalyze API key **OPSIONAL** (cuma 1 tool) — skip kalau gak butuh
 liquidation history.
 
@@ -74,7 +74,7 @@ dalam percakapan dengan Claude, tanpa perlu buka dashboard exchange terpisah.
   [Keterbatasan](#keterbatasan-yang-jujur-perlu-diketahui) untuk detail.
 - **Setup awal butuh proxy Vercel** (wajib) — bukan pasang-langsung-jalan,
   ada langkah konfigurasi manual sekali di awal. Coinalyze API key OPSIONAL
-  (cuma buat 1 dari 44 tool), gak menghalangi setup awal kalau di-skip.
+  (cuma buat 1 dari 45 tool), gak menghalangi setup awal kalau di-skip.
 - **Rate limit free tier Coinalyze** (40 request/menit per API key) bisa jadi
   bottleneck kalau dipakai sangat intensif.
 - Tidak ada data wallet on-chain atau data dari exchange selain Binance
@@ -167,6 +167,7 @@ kredensial atau setup tambahan buat 3 exchange itu.
 | `binance_get_quarterly_settlement_price` | Histori delivery/settlement price kontrak quarterly (tidak berlaku untuk perpetual) | Binance native |
 | `binance_get_composite_index_info` | Komposisi base asset + bobot sebuah composite index symbol (mis. BTCDOMUSDT) | Binance native |
 | `binance_get_index_constituents` | Daftar exchange+harga+bobot penyusun index price sebuah pair | Binance native |
+| `whalescope_full_pipeline` | Decision chain PENUH Grid Bot Futures (composite tertinggi): hard screen → Tier-1 intelligence (smart money, MM composite, regime 1h+4h, order book) → hitung bound grid Compass-equivalent (ATR + swing high/low) → capital-solve EXACT ke budget rugi (`risk_usd`) per opsi leverage → keputusan TRADE/WATCH/NO_TRADE + parameter Grid Bot siap copy-paste, untuk 1-20 symbol sekaligus. Token cost TINGGI — lihat [`docs/full_pipeline_framework.md`](docs/full_pipeline_framework.md) | Binance native |
 
 ## Framework Analisis: Deteksi Market Maker & Whale
 
@@ -193,6 +194,46 @@ yang terkalibrasi secara statistik.
 Dokumen lengkap: [`docs/mm_detection_framework.md`](docs/mm_detection_framework.md)
 (v4, final) — berisi kriteria detail tiap sinyal, workflow step-by-step,
 checklist live, dan mapping tool → sinyal.
+
+## Framework: Full Pipeline Grid Bot (`whalescope_full_pipeline`)
+
+Tool composite tertinggi di repo ini — menjalankan SELURUH decision chain
+Grid Bot Futures dalam satu tool call, untuk satu atau banyak symbol
+sekaligus (maks 20 per call), menggantikan ~8 tool call manual
+(`binance_market_regime` ×2, `binance_analyze_smart_money`,
+`binance_detect_mm_activity`, `binance_get_order_book_imbalance`,
+`analyze_futures_grid_risk`, dst.) plus kalkulasi bound grid yang
+sebelumnya tidak ada tool-nya sama sekali.
+
+**Tahapan (2-wave fetch, reject-early):**
+
+```
+┌───────────────────────────────────────────────────────────────┐
+│ WAVE 1 (semua symbol, paralel): ticker24hr, funding, klines    │
+│ 1h+4h, OI+histori, agg trades, market context                  │
+├───────────────────────────────────────────────────────────────┤
+│ HARD SCREEN: tradable? volume >= minimum? |funding| <= maks?   │
+│ regime 1h/4h != BREAKOUT?                                       │
+│   → GAGAL = NO_TRADE, Wave 2 TIDAK PERNAH DIPANGGIL             │
+├───────────────────────────────────────────────────────────────┤
+│ WAVE 2 (survivor saja, paralel): top-trader ratio, global      │
+│ account ratio, OI histori 24 titik, order book depth 50        │
+├───────────────────────────────────────────────────────────────┤
+│ TIER-1 SCORING: smart money divergence + 6 skor MM composite   │
+│ + order book imbalance + CVD + regime → rankingScore 0-100     │
+├───────────────────────────────────────────────────────────────┤
+│ GRID BOUNDS (Compass-equivalent): ATR + swing high/low →       │
+│ upper/lower/SL/TP/gridCount/gridType                            │
+├───────────────────────────────────────────────────────────────┤
+│ CAPITAL SOLVE: exact (bukan iteratif) per opsi leverage, pilih  │
+│ leverage tertinggi SAFE/MODERATE dengan likuidasi aman          │
+├───────────────────────────────────────────────────────────────┤
+│ KEPUTUSAN: TRADE / WATCH / NO_TRADE + Grid Bot config siap-pakai│
+└───────────────────────────────────────────────────────────────┘
+```
+
+Dokumen lengkap (stage-by-stage, worked example, Known Limitations):
+[`docs/full_pipeline_framework.md`](docs/full_pipeline_framework.md).
 
 ### Hasil Validasi Empiris
 
@@ -383,10 +424,10 @@ worker"), dan Cron Trigger snapshot basis+sinyal MM (tiap 5 menit) akan
 gagal silent tiap tick (ke-log ke Workers Logs, tidak menggagalkan endpoint
 `/mcp` lain).
 
-## Setup Coinalyze API Key (OPSIONAL — cuma buat 1 dari 44 tool)
+## Setup Coinalyze API Key (OPSIONAL — cuma buat 1 dari 45 tool)
 
 Beda dari 3 setup di atas, ini BUKAN prasyarat buat server jalan. Worker
-deploy & 43 tool lain jalan normal tanpa ini — cuma
+deploy & 44 tool lain jalan normal tanpa ini — cuma
 `binance_get_liquidation_history` yang butuh.
 
 1. Daftar gratis di https://coinalyze.net
@@ -530,6 +571,11 @@ menentukan tool mana yang dipanggil (dan berapa kali) berdasarkan pertanyaan:
   di atas — sebutkan pair-nya, Claude yang menjalankan workflow deteksinya
 - *"Bandingin funding rate BTC, ETH, SOL, sama BNB"* →
   `binance_compare_symbols`
+- *"Layak gak buka Grid Bot Futures di BTCUSDT dan ETHUSDT sekarang, budget
+  rugi $20?"* → `whalescope_full_pipeline` (composite tertinggi, 1 call
+  jalanin hard screen → Tier-1 intel → grid bounds → risk sizing →
+  keputusan TRADE/WATCH/NO_TRADE + parameter Grid Bot siap copy-paste untuk
+  kedua pair sekaligus)
 
 Karena semua tool read-only, aman dicoba tanya apapun soal data pasar tanpa
 risiko memicu order/trading — worker ini tidak punya kemampuan itu sama

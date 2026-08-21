@@ -110,6 +110,20 @@ export interface AdxResult {
   minusDI: number;
 }
 
+// True Range standar (Wilder): max dari 3 kemungkinan range -- high-low
+// candle ini, atau jarak ke close candle sebelumnya (naik/turun). Diekstrak
+// dari dalam loop calculateADX supaya bisa dipakai ULANG oleh computeATR
+// (gridBoundEngine.ts) tanpa duplikasi formula -- satu sumber kebenaran
+// buat true-range dipakai baik ADX maupun ATR. Perilaku IDENTIK dengan versi
+// inline sebelumnya (toolHelpers.test.ts tetap hijau tanpa perubahan assertion).
+export function computeTrueRange(curr: KlineCandle, prev: KlineCandle): number {
+  return Math.max(
+    curr.high - curr.low,
+    Math.abs(curr.high - prev.close),
+    Math.abs(curr.low - prev.close),
+  );
+}
+
 // ADX (Average Directional Index) standar Wilder, dipakai binance_market_regime
 // buat bedain kondisi TRENDING (ADX>25) vs RANGING (ADX<20). Butuh minimal
 // 2*period+1 candle buat smoothing Wilder yang stabil (bukan cuma period+1) --
@@ -125,11 +139,7 @@ export function calculateADX(candles: KlineCandle[], period = 14): AdxResult {
   for (let i = 1; i < candles.length; i++) {
     const curr = candles[i];
     const prev = candles[i - 1];
-    const tr = Math.max(
-      curr.high - curr.low,
-      Math.abs(curr.high - prev.close),
-      Math.abs(curr.low - prev.close),
-    );
+    const tr = computeTrueRange(curr, prev);
     trueRanges.push(tr);
 
     const upMove = curr.high - prev.high;

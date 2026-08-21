@@ -92,6 +92,12 @@ const CATALOG_METADATA: Record<string, CatalogMetadata> = {
   binance_get_quarterly_settlement_price: { category: "history", tokenCost: "low", useCase: "Histori delivery/settlement price kontrak quarterly", dependencies: [] },
   binance_get_composite_index_info: { category: "composite", tokenCost: "low", useCase: "Komposisi base asset + bobot sebuah composite index symbol", dependencies: [] },
   binance_get_index_constituents: { category: "composite", tokenCost: "low", useCase: "Daftar exchange+symbol penyusun index price composite index symbol", dependencies: [] },
+  whalescope_full_pipeline: {
+    category: "composite",
+    tokenCost: "high",
+    useCase: "Decision chain penuh Grid Bot Futures (hard screen -> Tier-1 intel -> grid bounds -> risk sizing -> TRADE/WATCH/NO_TRADE) untuk 1-20 symbol sekaligus, plus parameter Grid Bot siap copy-paste",
+    dependencies: ["funding", "oi", "ratios", "orderbook", "trades", "technical", "risk", "composite"],
+  },
 };
 
 function truncateUseCase(description: string | undefined): string {
