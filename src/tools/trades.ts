@@ -3,7 +3,7 @@ import { z } from "zod";
 import { registerSafeTool } from "../toolWrapper.js";
 import * as binanceProxy from "../binanceProxyClient.js";
 import { fmtNum, fmtPrice, fmtTime } from "../format.js";
-import { symbolSchema, FUTURES_DATA_PERIOD_ENUM, errorResult } from "../shared.js";
+import { symbolSchema, FUTURES_DATA_PERIOD_ENUM, errorResult, detailParam } from "../shared.js";
 import { computeCvdFromTrades, truncateRows } from "../toolHelpers.js";
 
 export function registerTradesTools(server: McpServer): void {
@@ -17,19 +17,18 @@ export function registerTradesTools(server: McpServer): void {
     {
       title: "Aggregate Trades (untuk CVD Granular)",
       description:
-        "Mengambil trade individual terbaru (aggregate trades) LANGSUNG dari Binance lewat proxy relay, termasuk apakah masing- " +
-        "masing trade adalah buy atau sell aggressor (taker). Berbeda dari binance_get_taker_volume_ratio yang teragregasi per-jam, " +
-        "ini granular per-trade — cocok untuk mendeteksi absorption (harga stagnan tapi volume besar masuk searah, indikasi entitas " +
-        "besar menyerap likuiditas tanpa menggerakkan harga secara signifikan) atau lonjakan agresi mendadak. " +
-        "PENTING: limit maksimal dibatasi ketat karena ini data granular, tidak cocok untuk analisis periode panjang — gunakan " +
-        "binance_get_taker_volume_ratio untuk gambaran periode lebih panjang.",
+        "Trade individual terbaru (aggregate trades), granular per-trade, termasuk sisi buy/sell aggressor -- cocok " +
+        "deteksi absorption (harga stagnan tapi volume besar searah) atau lonjakan agresi mendadak. Beda dari " +
+        "binance_get_taker_volume_ratio (teragregasi per-jam). Limit maks 200, bukan untuk periode panjang. " +
+        "Default ringkas (CVD + 15 trade terakhir di teks); `detail: \"full\"` untuk array trade mentah lengkap.",
       inputSchema: {
         symbol: symbolSchema,
         limit: z.number().int().min(1).max(200).default(50).describe("Jumlah trade terakhir yang diambil, maksimal 200."),
+        detail: detailParam,
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ symbol, limit }) => {
+    async ({ symbol, limit, detail }) => {
       try {
         const trades = await binanceProxy.getAggTrades(symbol, limit);
         if (trades.length === 0) {
@@ -56,13 +55,18 @@ export function registerTradesTools(server: McpServer): void {
           `| Waktu | Harga | Quantity | Sisi |`,
           `|---|---|---|---|`,
           rows,
-          ``,
-          `_CVD positif = tekanan beli agresif dominan di window ini. CVD negatif = tekanan jual agresif dominan. Window ini sangat pendek (${trades.length} trade) — untuk gambaran lebih luas, kombinasikan dengan binance_get_taker_volume_ratio._`,
         ].join("\n");
 
         return {
           content: [{ type: "text", text }],
-          structuredContent: { symbol, cvd, buyVolume, sellVolume, buyPct },
+          structuredContent: {
+            symbol,
+            cvd,
+            buyVolume,
+            sellVolume,
+            buyPct,
+            ...(detail === "full" ? { trades } : {}),
+          },
         };
       } catch (err) {
         return errorResult(err);
@@ -77,18 +81,18 @@ export function registerTradesTools(server: McpServer): void {
     {
       title: "Taker Buy/Sell Volume Ratio",
       description:
-        "Mengambil rasio volume taker buy vs sell — proxy tekanan beli/jual AGRESIF (market order), berbeda dari long/short ratio " +
-        "yang berbasis posisi terbuka (LANGSUNG dari Binance native takerlongshortRatio, bukan lagi diturunkan manual dari volume " +
-        "candlestick Coinalyze — source of truth). Berguna sebagai konfirmasi tambahan: apakah tekanan eksekusi market saat ini " +
-        "condong beli atau jual.",
+        "Rasio volume taker buy vs sell -- proxy tekanan beli/jual AGRESIF (market order), beda dari long/short " +
+        "ratio yang berbasis posisi terbuka. LANGSUNG dari Binance native takerlongshortRatio. Default ringkas " +
+        "(rasio terkini + <=10 poin terbaru); `detail: \"full\"` untuk histori lengkap sesuai `limit`.",
       inputSchema: {
         symbol: symbolSchema,
         period: z.enum(FUTURES_DATA_PERIOD_ENUM).default("15m"),
         limit: z.number().int().min(1).max(500).default(10),
+        detail: detailParam,
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ symbol, period, limit }) => {
+    async ({ symbol, period, limit, detail }) => {
       try {
         const points = await binanceProxy.getTakerLongShortRatioNative(symbol, period, limit);
         if (points.length === 0) {
@@ -111,15 +115,21 @@ export function registerTradesTools(server: McpServer): void {
           `**Rasio terkini**: ${fmtNum(ratio, 4)} → tekanan ${bias}`,
           `(ratio > 1 = volume buy lebih besar dari sell, < 1 = sebaliknya)`,
           ``,
-          truncated ? `_Menampilkan ${shown.length} terakhir dari ${totalCount} total._` : ``,
+          truncated ? `_Menampilkan ${shown.length} terakhir dari ${totalCount}._` : ``,
           `| Waktu | Buy/Sell Ratio |`,
           `|---|---|`,
           rows,
-          ``,
-          `_Data LANGSUNG dari Binance native (takerlongshortRatio) — buySellRatio dihitung resmi oleh Binance, bukan derivasi manual dari candlestick._`,
         ].join("\n");
 
-        return { content: [{ type: "text", text }] };
+        return {
+          content: [{ type: "text", text }],
+          structuredContent: {
+            symbol,
+            ratio,
+            bias,
+            ...(detail === "full" ? { points } : { recent: shown }),
+          },
+        };
       } catch (err) {
         return errorResult(err);
       }

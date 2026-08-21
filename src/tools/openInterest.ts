@@ -3,7 +3,7 @@ import { z } from "zod";
 import { registerSafeTool } from "../toolWrapper.js";
 import * as binanceProxy from "../binanceProxyClient.js";
 import { fmtNum, fmtTime, trendDirection } from "../format.js";
-import { symbolSchema, FUTURES_DATA_PERIOD_ENUM, errorResult } from "../shared.js";
+import { symbolSchema, FUTURES_DATA_PERIOD_ENUM, errorResult, detailParam } from "../shared.js";
 import { truncateRows } from "../toolHelpers.js";
 
 export function registerOpenInterestTools(server: McpServer): void {
@@ -17,11 +17,8 @@ export function registerOpenInterestTools(server: McpServer): void {
     {
       title: "Open Interest Saat Ini",
       description:
-        "Mengambil Open Interest (total kontrak terbuka) TERKINI untuk sebuah pair (LANGSUNG dari Binance native, bukan lewat " +
-        "Coinalyze — source of truth). " +
-        "OI naik + harga naik = tren didukung entry baru (sehat). " +
-        "OI turun + harga naik = short covering / posisi ditutup, bukan entry baru (kurang solid). " +
-        "OI turun tajam = kemungkinan capitulation/liquidation massal.",
+        "Open Interest (total kontrak terbuka) TERKINI, LANGSUNG dari Binance native. OI naik + harga naik = tren " +
+        "didukung entry baru. OI turun + harga naik = short covering. OI turun tajam = kemungkinan capitulation.",
       inputSchema: { symbol: symbolSchema },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -35,7 +32,7 @@ export function registerOpenInterestTools(server: McpServer): void {
           `- Open Interest: ${fmtNum(openInterest, 2)} kontrak`,
           `- Waktu: ${fmtTime(data.time)}`,
           ``,
-          `_Gunakan bersama \`binance_get_open_interest_history\` untuk melihat tren naik/turun, dan bandingkan dengan pergerakan harga untuk interpretasi yang benar (OI saja tanpa konteks harga bisa menyesatkan). Data LANGSUNG dari Binance native._`,
+          `_Gunakan bersama binance_get_open_interest_history untuk tren, bandingkan dengan harga._`,
         ].join("\n");
         return {
           content: [{ type: "text", text }],
@@ -54,11 +51,9 @@ export function registerOpenInterestTools(server: McpServer): void {
     {
       title: "Histori Tren Open Interest",
       description:
-        "Mengambil histori Open Interest untuk melihat TREN naik/turun sepanjang waktu (bukan cuma snapshot), LANGSUNG dari " +
-        "Binance native (bukan lewat Coinalyze — source of truth). Ini yang dibutuhkan untuk menjawab 'apakah OI sedang naik " +
-        "atau turun hari ini'. Kombinasikan dengan data candlestick harga (binance_get_klines) pada periode yang sama untuk " +
-        "interpretasi yang valid: OI naik + harga naik = trend genuinely didukung entry baru; OI turun + harga naik = short " +
-        "covering (rally rapuh).",
+        "Histori Open Interest untuk lihat TREN naik/turun, LANGSUNG dari Binance native. Kombinasikan dengan " +
+        "binance_get_klines periode sama: OI naik + harga naik = entry baru; OI turun + harga naik = short covering " +
+        "(rally rapuh). Default ringkas (tren + <=10 poin terbaru); `detail: \"full\"` untuk histori lengkap sesuai `limit`.",
       inputSchema: {
         symbol: symbolSchema,
         period: z
@@ -66,10 +61,11 @@ export function registerOpenInterestTools(server: McpServer): void {
           .default("15m")
           .describe("Interval antar data poin: 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d"),
         limit: z.number().int().min(1).max(500).default(30).describe("Jumlah data poin"),
+        detail: detailParam,
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ symbol, period, limit }) => {
+    async ({ symbol, period, limit, detail }) => {
       try {
         const bars = await binanceProxy.getOpenInterestHistNative(symbol, period, limit);
         if (bars.length === 0) {
@@ -98,15 +94,24 @@ export function registerOpenInterestTools(server: McpServer): void {
           ``,
           `**Tren keseluruhan window**: OI ${direction} (${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}% dari awal ke akhir window)`,
           ``,
-          truncated ? `_Menampilkan ${shown.length} terakhir dari ${totalCount} total (tren di atas dihitung dari semua ${totalCount})._` : ``,
+          truncated ? `_Menampilkan ${shown.length} terakhir dari ${totalCount} total (tren dihitung dari semua ${totalCount})._` : ``,
           `| Waktu | Open Interest |`,
           `|---|---|`,
           rows,
-          ``,
-          `_Langkah selanjutnya yang disarankan: panggil \`binance_get_klines\` pair & timeframe yang sama untuk cek apakah OI ${direction} ini terjadi bersamaan dengan harga naik atau turun — kombinasi keduanya yang menentukan interpretasi (entry baru vs covering vs capitulation). Data LANGSUNG dari Binance native._`,
         ].join("\n");
 
-        return { content: [{ type: "text", text }] };
+        return {
+          content: [{ type: "text", text }],
+          structuredContent: {
+            symbol,
+            period,
+            direction,
+            changePct,
+            current: last,
+            pointCount: bars.length,
+            ...(detail === "full" ? { points: bars } : { recent: shown }),
+          },
+        };
       } catch (err) {
         return errorResult(err);
       }

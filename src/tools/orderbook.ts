@@ -3,7 +3,7 @@ import { z } from "zod";
 import { registerSafeTool } from "../toolWrapper.js";
 import * as binanceProxy from "../binanceProxyClient.js";
 import { fmtNum, fmtPrice, fmtTime } from "../format.js";
-import { symbolSchema, errorResult } from "../shared.js";
+import { symbolSchema, errorResult, detailParam } from "../shared.js";
 
 export function registerOrderbookTools(server: McpServer): void {
 
@@ -16,13 +16,10 @@ export function registerOrderbookTools(server: McpServer): void {
     {
       title: "Order Book Depth",
       description:
-        "Mengambil snapshot order book (bid/ask) real-time dengan size per level harga, LANGSUNG dari Binance lewat proxy relay. " +
-        "Berguna untuk melihat wall besar (potensi order whale/spoofing), spread bid-ask, dan likuiditas di sekitar harga saat ini. " +
-        "PENTING: ini snapshot SESAAT — order book berubah sangat cepat, terutama untuk pair dengan volume tinggi. Wall besar bisa " +
-        "hilang dalam hitungan detik (bisa jadi spoofing/fake wall, bukan komitmen order sungguhan). Jangan overinterpretasi satu " +
-        "snapshot sebagai sinyal pasti. " +
-        "Untuk deteksi spoofing/absorption yang lebih sistematis, lihat docs/mm_detection_framework.md Section 2-3 — rule of " +
-        "thumb: butuh minimal 3 sinyal align (misal wall + CVD + OI) sebelum menyimpulkan aktivitas MM, satu snapshot saja tidak cukup.",
+        "Snapshot order book (bid/ask) real-time -- lihat wall besar (potensi whale/spoofing), spread, likuiditas. " +
+        "PENTING: snapshot SESAAT, wall besar bisa hilang dalam detik (bisa spoofing). Butuh minimal 3 sinyal align " +
+        "sebelum simpulkan aktivitas MM (docs/mm_detection_framework.md). Default ringkas (top 10 + wall terbesar); " +
+        "`detail: \"full\"` untuk semua level sampai `limit`.",
       inputSchema: {
         symbol: symbolSchema,
         limit: z
@@ -33,10 +30,11 @@ export function registerOrderbookTools(server: McpServer): void {
           })
           .default(20)
           .describe("Jumlah level bid/ask yang diambil per sisi. Harus salah satu dari: 5, 10, 20, 50, 100, 500, 1000."),
+        detail: detailParam,
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ symbol, limit }) => {
+    async ({ symbol, limit, detail }) => {
       try {
         const data = await binanceProxy.getOrderBookDepth(symbol, limit);
 
@@ -83,12 +81,19 @@ export function registerOrderbookTools(server: McpServer): void {
           `|---|---|`,
           askRows,
           ``,
-          `_Snapshot sesaat (waktu server Binance: ${fmtTime(data.T)}). Order book berubah cepat — wall besar bisa jadi spoofing, jangan jadi satu-satunya sinyal keputusan._`,
+          `_Snapshot sesaat (waktu server Binance: ${fmtTime(data.T)})._`,
         ].join("\n");
 
         return {
           content: [{ type: "text", text }],
-          structuredContent: { symbol, bestBid, bestAsk, spread, spreadPct },
+          structuredContent: {
+            symbol,
+            bestBid,
+            bestAsk,
+            spread,
+            spreadPct,
+            ...(detail === "full" ? { bids: data.bids, asks: data.asks } : {}),
+          },
         };
       } catch (err) {
         return errorResult(err);
@@ -106,11 +111,9 @@ export function registerOrderbookTools(server: McpServer): void {
     {
       title: "Order Book Imbalance (OBI)",
       description:
-        "Menghitung persentase imbalance volume Bid vs Ask secara kumulatif di 3 level kedalaman harga (depth 5, 10, 20) " +
-        "sekaligus dalam satu panggilan, LANGSUNG dari Binance lewat proxy relay. Beda dari binance_get_order_book_depth " +
-        "yang cuma kasih snapshot mentah — tool ini langsung kasih rasio bid vs ask plus label bias (BULLISH/BEARISH/SEIMBANG) " +
-        "per depth level. PENTING: ini snapshot SESAAT — order book berubah cepat, jangan overinterpretasi satu snapshot sebagai " +
-        "sinyal pasti (sama seperti binance_get_order_book_depth).",
+        "Persentase imbalance volume Bid vs Ask kumulatif di 3 depth (5, 10, 20) sekaligus, plus label bias " +
+        "(BULLISH/BEARISH/SEIMBANG) per depth. Beda dari binance_get_order_book_depth yang cuma snapshot mentah. " +
+        "PENTING: snapshot SESAAT, jangan overinterpretasi.",
       inputSchema: {
         symbol: symbolSchema,
       },
@@ -158,8 +161,7 @@ export function registerOrderbookTools(server: McpServer): void {
           `|---|---|---|---|---|`,
           rows,
           ``,
-          `_Snapshot sesaat (waktu server Binance: ${fmtTime(data.T)}). Volume dihitung dari raw base-asset quantity, ` +
-            `bukan notional. Order book berubah cepat — jangan overinterpretasi satu snapshot sebagai sinyal pasti._`,
+          `_Snapshot sesaat (waktu server Binance: ${fmtTime(data.T)}). Volume dari raw base-asset quantity, bukan notional._`,
         ].join("\n");
 
         return {
