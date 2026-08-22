@@ -21,9 +21,7 @@ what's still manual: you STILL need to set secrets afterward (Cloudflare
 can't guess values from external services) — see `.dev.vars.example` in
 this repo for the full list, or
 [Vercel Proxy setup](#setup-vercel-proxy-required-one-time) below.
-`PROXY_URL`/`PROXY_SECRET` are REQUIRED (44 of 45 tools need them), the
-Coinalyze API key is **OPTIONAL** (only 1 tool) — skip it if you don't need
-liquidation history.
+`PROXY_URL`/`PROXY_SECRET` are REQUIRED (all 46 tools need them).
 
 ## Purpose
 
@@ -35,8 +33,7 @@ conversation with Claude, without needing a separate exchange dashboard.
 ## Benefits
 
 - **One door for many signals.** Funding rate, open interest, order book,
-  order flow, and liquidation history — all through a single MCP connector,
-  no tab-switching.
+  and order flow — all through a single MCP connector, no tab-switching.
 - **Distinguish retail from whale.** `binance_get_top_trader_ratio` gives a
   pure top-trader breakdown (separate from `binance_get_long_short_ratio`,
   which is blended) — useful for spotting divergence between retail and
@@ -63,7 +60,8 @@ conversation with Claude, without needing a separate exchange dashboard.
 - Transparent about each tool's limitations (see the section below), not
   glossed over as if all data were perfect.
 - Infrastructure fits comfortably in free tiers (Cloudflare Workers +
-  Vercel Hobby + Coinalyze free tier) for personal use.
+  Vercel Hobby) for personal use — 100% Binance-native, no third-party
+  aggregator dependency anymore.
 
 ## Weaknesses
 
@@ -71,18 +69,21 @@ conversation with Claude, without needing a separate exchange dashboard.
   periodic history) — no second-by-second push events (e.g. a fresh
   liquidation happening right now). Adding that would require extra
   infrastructure components currently out of this project's scope.
-- **One tool still goes through a third-party aggregator** (Coinalyze, for
-  liquidation history only) — see the
-  [Limitations](#honest-limitations-you-should-know) section for details.
+- **No liquidation history.** The `binance_get_liquidation_history` tool
+  (previously via Coinalyze) was removed 2026-08-22 — Binance has no public
+  market-wide REST endpoint for this, and the real-time WebSocket route
+  (`!forceOrder@arr`) hits the same WAF block as `fapi.binance.com` (tested
+  directly via a Durable Object, see
+  [`docs/superpowers/specs/2026-08-11-realtime-liquidation-stream-design.md`](docs/superpowers/specs/2026-08-11-realtime-liquidation-stream-design.md)).
+  A fix needs a paid always-on relay (Vercel Pro ~$20/month or a small VPS
+  ~$5/month) — not built yet, tracked as a known limitation until there's
+  budget/need for it.
 - **Initial setup needs a Vercel proxy** (required) — not plug-and-play,
-  there's a one-time manual configuration step. Coinalyze API key is
-  OPTIONAL (only 1 of 45 tools), doesn't block initial setup if skipped.
-- **Coinalyze free-tier rate limit** (40 requests/minute per API key) could
-  become a bottleneck under very heavy use.
+  there's a one-time manual configuration step.
 - No on-chain wallet data, and no data from exchanges other than Binance
   Futures USDS-M.
 
-**Data sources: two paths, depending on the tool.**
+**Data sources: one path, 100% Binance native.**
 
 - **Native Binance, via a Vercel relay proxy.** Binance's domain
   (`fapi.binance.com`) blocks traffic from Cloudflare Workers at the WAF
@@ -96,16 +97,9 @@ conversation with Claude, without needing a separate exchange dashboard.
   taker buy/sell volume ratio, and spot price (the proxy also relays to the
   Binance Spot API `api.binance.com` via the `market=spot` parameter, see
   `proxy/README.md`).
-- **[Coinalyze](https://coinalyze.net)**, now only for the one tool not yet
-  migrated to the native path: liquidation history
-  (`binance_get_liquidation_history`). Coinalyze re-aggregates the same
-  underlying data (the original source is still Binance), and its API is
-  itself hosted on Cloudflare, so it doesn't hit the same block.
 
 As a consequence, this worker needs `PROXY_URL`/`PROXY_SECRET` (Vercel
-proxy, required for the 42 Binance-native tools) and, optionally,
-`COINALYZE_API_KEY` (only for `binance_get_liquidation_history`) — see the
-Setup section below.
+proxy, required for all 46 tools) — see the Setup section below.
 
 **Caching & state, no extra credentials needed.** Upstream responses
 (funding rate, klines, OI, etc. — except order book & aggregate trades,
@@ -138,7 +132,6 @@ setup needed for those 3 exchanges.
 | `binance_get_order_book_depth` | Order book snapshot (bid/ask), spread, largest wall | Binance native |
 | `binance_get_order_book_imbalance` | Bid vs ask volume imbalance at depth 5/10/20, with a bias label (BULLISH/BEARISH/BALANCED) | Binance native |
 | `binance_get_agg_trades` | Granular individual trades (buy/sell aggressor) for absorption detection | Binance native |
-| `binance_get_liquidation_history` | Liquidation history | Coinalyze |
 | `binance_get_taker_volume_ratio` | Aggressive buy/sell pressure (taker volume), official Binance statistic | Binance native |
 | `binance_get_klines` | OHLCV candlesticks per timeframe, supports `startTime`/`endTime` (deep history, for backtesting, up to 1500 candles/call) | Binance native |
 | `binance_get_multi_timeframe_bias` | Bullish/Bearish/Sideways bias across 5 timeframes at once (1m/5m/15m/1h/1d) | Binance native |
@@ -176,7 +169,7 @@ setup needed for those 3 exchanges.
 ## The `detail` convention: summary vs full (token efficiency)
 
 Every tool above that returns array/history data (klines, agg trades, order
-book, open interest/funding/liquidation/basis history, long-short &
+book, open interest/funding/basis history, long-short &
 top-trader ratio) has an optional `detail: "summary" | "full"` parameter,
 defaulting to `"summary"`. This is the **only intentional default-behavior
 change** in the 2026-08 token-efficiency update — not a parameter removal,
@@ -214,7 +207,7 @@ those patterns line up.
 |---|---|---|
 | **Absorption** | order book depth, agg trades (futures & spot), open interest | CVD flat/rising while price stalls = sell pressure being absorbed (accumulation); sharp OI spike + sideways price = a large position just opened |
 | **Spoofing** | order book depth, order book imbalance | A large wall appears then disappears before it's ever filled; spread suddenly widens then normalizes within seconds |
-| **Stop hunt** | liquidation history, open interest, klines | A liquidation spike on one side + a long wick on the same-time candle + price reverses within 1-3 candles after |
+| **Stop hunt** | open interest, klines | A long wick + small body reversal candle, no liquidation confirmation (removed, see Weaknesses) |
 | **Basis arbitrage** | spot price, funding rate, open interest | Spot-futures basis widens then quickly reverts; extreme funding + rising OI (suggests a short-futures/long-spot hedge) |
 
 **Rule of thumb:** if **≥3 signals align** within the same timeframe, the
@@ -277,7 +270,6 @@ few findings that corrected the original assumptions:
 | <500ms polling for refresh-rate spoofing detection | ❌ Real latency is 298-898ms/call (avg ~485ms) through the worker→Vercel→Binance proxy chain — not reliable for that |
 | Universal top-trader ratio divergence threshold (flat >15% or tiered 3-15%) | ❌ Never triggered — real movement across the 4 pairs tested (SOLUSDT, BNBUSDT, LINKUSDT, AVAXUSDT) over a 2-hour window was only 0.40-2.35 points, far below either threshold |
 | Top-trader ratio historical retention "30-90 days" | ⚠️ Corrected — 90 days isn't available from Binance at all; 30 days only at coarse resolution (4h/1d), 15-minute resolution goes back only ~5 days |
-| Liquidation history can be mapped to price levels | ❌ `binance_get_liquidation_history` only returns `{totalLong, totalShort, dominance}` per time window, no price at all — needs a manual cross-check against `klines` |
 | Calm-market conditions (BTCUSDT) don't over-trigger | ✅ Confirmed — score ~1-1.5/6 (Weak tier) during sideways market, no false alarms under normal conditions |
 
 Full detail (including raw test data per claim): Section 10,
@@ -300,16 +292,16 @@ Full detail (including raw test data per claim): Section 10,
   and the data is a periodic snapshot, not real-time tick-by-tick.
 - OI history data (`binance_get_open_interest_history`) is limited by the
   retention of Binance's official endpoint
-  (`/futures/data/openInterestHist`) — not as long as Coinalyze's previous
-  history; check directly if you need a long range.
+  (`/futures/data/openInterestHist`); check directly if you need a long
+  range.
 - No on-chain wallet data.
-- Coinalyze free tier: rate limit of 40 requests/minute per API key — now
-  only applies to `binance_get_liquidation_history`.
+- **No liquidation history at all** (tool removed, see the Weaknesses
+  section above).
 - **`binance_detect_mm_activity`: the spoofing & stop-hunt scores are
   1-snapshot heuristics only**, NOT true detection. The original design
   needs 2 order-book snapshots within <3 seconds (this proxy's latency is
   ~485ms, not reliable enough for that) and price-granular liquidation
-  data (Coinalyze is rate-limited and has no price field). Confidence for
+  data (not available at all, see the Weaknesses section). Confidence for
   those two signals is lower than the other four in the same tool — also
   noted in the evidence text of every response.
 - **`binance_market_regime`: volatility/volume spike ratios are computed
@@ -461,24 +453,6 @@ will fail with a clear error ("D1 database (binding DB) belum ke-bind di
 worker"), and the basis+MM-signal Cron Trigger (every 5 min) will fail
 silently each tick (logged to Workers Logs, doesn't break the `/mcp`
 endpoint).
-
-## Setup: Coinalyze API Key (OPTIONAL — only 1 of 45 tools)
-
-Unlike the 3 setup steps above, this is NOT a prerequisite for the server
-to work. The worker deploys and the other 44 tools work fine without
-it -- only `binance_get_liquidation_history` needs it.
-
-1. Sign up for free at https://coinalyze.net
-2. Grab the API key from your account page
-3. Set it as a worker secret (not in `wrangler.toml`, not hardcoded):
-   ```bash
-   npx wrangler secret put COINALYZE_API_KEY
-   ```
-   (paste the API key when prompted)
-
-Without this secret, only `binance_get_liquidation_history` fails with a
-clear error ("COINALYZE_API_KEY belum diset") -- no other tool is
-affected. Skip this section if you don't need liquidation history.
 
 ## Admin: Usage Log (OPTIONAL)
 
@@ -653,9 +627,7 @@ curl -X POST http://localhost:8787/mcp \
 ```
 
 If this returns valid funding rate + basis data for BTCUSDT, the Vercel
-proxy path works. For the Coinalyze path, change `name` to
-`binance_get_liquidation_history` — if that also returns valid data, the
-Coinalyze path works.
+proxy path works.
 
 ## Audit & Results
 
@@ -683,7 +655,7 @@ Calls the deployed worker directly, measures tool schema size, response
 size across `limit` scales, and an "Information Density Ratio" (data vs.
 boilerplate) for a few representative tools, plus a simulated realistic
 multi-turn conversation. Not part of `npm test`/CI (hits the live worker +
-Binance/Coinalyze through it) — used manually to check the token impact of
+Binance through it) — used manually to check the token impact of
 tool description or response format changes. Token estimation uses a
 chars/4 heuristic (no publicly published Claude tokenizer package exists),
 so the numbers are approximate — useful for relative comparison

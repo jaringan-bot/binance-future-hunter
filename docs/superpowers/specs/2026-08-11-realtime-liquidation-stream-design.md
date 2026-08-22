@@ -1,5 +1,14 @@
 # Real-Time Liquidation Stream — Design
 
+> **UPDATE 2026-08-22**: dikonfirmasi ULANG kali ketiga (sesi terpisah lagi,
+> juga belum baca spec ini dulu) — kesimpulan sama persis, WAF block WS
+> masih ada. Keputusan diambil: `binance_get_liquidation_history` (tool
+> Coinalyze terakhir yang tersisa) DIHAPUS total dari codebase, bukan
+> dibiarkan jalan pakai Coinalyze. Dicatat sebagai keterbatasan jujur di
+> README (bagian Kekurangan) sampai ada budget/kebutuhan buat relay
+> berbayar. `coinalyzeClient.ts` dan semua wiring `COINALYZE_API_KEY`
+> sudah dihapus juga — proyek ini sekarang 100% Binance-native.
+>
 > **STATUS: DIBATALKAN (2026-08-11).** Spike test membuktikan `fstream.binance.com`
 > (WS gateway) kena WAF block yang sama seperti `fapi.binance.com` — 403 Forbidden
 > langsung dari IP Cloudflare Worker (dites via throwaway worker, lihat detail di

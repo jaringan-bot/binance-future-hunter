@@ -26,7 +26,6 @@ potentially) returned a long candle/trade/level/history array:
 | `binance_get_order_book_depth` / `binance_get_spot_order_book` | best bid/ask + spread (no raw levels) | full bids/asks array per `limit` |
 | `binance_get_open_interest_history` | trend + last <=10 points | all points per `limit` |
 | `binance_get_funding_rate_history` | average + trend + last <=10 points | all points per `limit` |
-| `binance_get_liquidation_history` | totals + dominance + last <=10 points | all points per `limit` |
 | `binance_get_basis_history` | current/avg/range + last <=10 snapshots | all snapshots within `hours` |
 | `binance_get_long_short_ratio` / `binance_get_top_trader_ratio` | snapshot + trend + last <=10 points | all points per `limit` |
 
@@ -35,7 +34,7 @@ The markdown text table stays capped to the last 10-15 rows in both modes —
 text stays human-readable even for a large `limit`).
 
 **Why not just use a smaller `limit`?** `limit` controls how much data is
-*fetched* from Binance/Coinalyze (all of it is used to compute averages/
+*fetched* from Binance (all of it is used to compute averages/
 trends), while `detail` controls how much of that already-fetched data is
 sent back to Claude. They're independent: `limit: 500, detail: "summary"`
 still computes the trend from 500 points, but only returns the summary +

@@ -18,11 +18,6 @@ PROXY_SECRET_2=
 # README.md bagian "Direct fallback (tier terakhir, otomatis ON)".
 DISABLE_DIRECT_FALLBACK=
 
-# OPSIONAL -- cuma dipakai binance_get_liquidation_history (1 dari 35
-# tool). Skip kalau gak butuh liquidation history. Lihat README.md
-# bagian "Setup Coinalyze API Key".
-COINALYZE_API_KEY=
-
 # OPSIONAL -- aktifin GET /admin/usage (siapa yang connect ke worker ini).
 # Tanpa ini, endpoint itu SELALU 403. Lihat README.md bagian
 # "Admin: Usage Log".

@@ -7,9 +7,11 @@
 // - Spoofing & stop-hunt di desain awal butuh 2 snapshot order book <3 detik
 //   dan data liquidation. Proxy ini cuma 1 snapshot per call (latency proxy
 //   ~485ms bikin 2-snapshot gak reliable), dan liquidation history
-//   (Coinalyze) rate-limited + gak granular harga. Jadi dua skor ini
-//   heuristik dari 1 snapshot order book / klines aja, BUKAN true detection
-//   -- ini didokumentasikan eksplisit di description tool & evidence text.
+//   (dulu via Coinalyze) sudah dihapus total 2026-08-22 -- gak ada data
+//   liquidation sama sekali sekarang (lihat docs/mm_detection_framework.md
+//   Section 4.1). Jadi dua skor ini heuristik dari 1 snapshot order book /
+//   klines aja, BUKAN true detection -- ini didokumentasikan eksplisit di
+//   description tool & evidence text.
 // - Basis arbitrage pakai z-score kalau symbol ada di watchlist (SNAPSHOT_WATCHLIST,
 //   shared.ts) yang punya histori di D1 (market_snapshots), fallback ke
 //   threshold sederhana untuk pair lain.
@@ -96,7 +98,7 @@ export function calculateStopHuntScore(params: {
   if (wickRatio > 0.7 && bodyRatio < 0.2 && reversal) {
     return {
       score: 0.8,
-      evidence: `Wick panjang (${(wickRatio * 100).toFixed(0)}% dari range) + body kecil + reversal candle -- pola stop-hunt klasik. Cuma dari klines (TANPA konfirmasi data liquidation, Coinalyze rate-limited/tidak granular harga).`,
+      evidence: `Wick panjang (${(wickRatio * 100).toFixed(0)}% dari range) + body kecil + reversal candle -- pola stop-hunt klasik. Cuma dari klines (TANPA konfirmasi data liquidation, tool liquidation history sudah dihapus).`,
     };
   }
   if (wickRatio > 0.6) {

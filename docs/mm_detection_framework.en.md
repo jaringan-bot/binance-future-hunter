@@ -117,25 +117,13 @@
 
 ## 4. Stop Hunt Signals
 
-### 4.1 Liquidation Cluster (Time-based) Reversal — *High Confidence*
+### 4.1 Liquidation Cluster (Time-based) Reversal — **REMOVED (2026-08-22)**
 
-**Tools used:**
-- `binance_get_liquidation_history`
-- `binance_get_open_interest`
-- `binance_get_klines`
-
-> ⚠️ **Data limitation:** `binance_get_liquidation_history` returns `{symbol, totalLong, totalShort, dominance}` per time bucket, **with no price field at all**. You cannot directly map "a cluster at a psychological level."
-
-**Detection criteria:**
-
-| Signal | Tool | Interpretation |
-|--------|------|-------------|
-| **Liquidation spike** (totalLong/totalShort jumps compared to the previous window) | `liquidation_history` | A mass force-closure occurred on one side |
-| **Long wick** on the candlestick in the same timeframe | `klines` | Price was briefly touched then reversed — manual mapping to the liquidation area |
-| **OI drops sharply** after a liquidation spike | `open_interest` | MM took the opposite side after the hunt |
-| **Price reverses** within 1-3 candles after the wick | `klines` | Confirms the stop hunt succeeded |
-
-> **Price-mapping workflow:** Use `klines` to identify the wick/extreme price at the same time as a liquidation spike — cross-reference MANUALLY, this isn't automatic since liquidation history doesn't contain a price field.
+> ⚠️ **This section no longer applies.** `binance_get_liquidation_history` (the only liquidation data source, via Coinalyze) was removed — Binance has no public market-wide REST endpoint for this, and the real-time WebSocket route hits the same WAF block as `fapi.binance.com` (tested via a Durable Object, see
+> [`docs/superpowers/specs/2026-08-11-realtime-liquidation-stream-design.md`](superpowers/specs/2026-08-11-realtime-liquidation-stream-design.md)).
+> A fix needs a paid always-on relay (~$5-20/month), not built yet.
+>
+> The `stopHunt` signal in `binance_detect_mm_activity` still runs but always at **Low** confidence — from `klines` alone (long wick + small body + reversal), WITHOUT liquidation confirmation. See Section 8/9 below.
 
 ---
 
@@ -228,9 +216,8 @@
 │  STEP 4: Validate spot basis (skip if Step 0 = futures-only)    │
 │  → Any arbitrage activity? (manual repeated snapshots)          │
 ├─────────────────────────────────────────────────────────────┤
-│  STEP 5: Check liquidation history + klines                      │
-│  → Does a liquidation spike align with a long wick at the same  │
-│    time?                                                          │
+│  STEP 5: [REMOVED] used to check liquidation history + klines,  │
+│  now klines only (long wick), NO liquidation confirmation       │
 ├─────────────────────────────────────────────────────────────┤
 │  STEP 6: Cross-check top trader ratio                            │
 │  → Moving opposite to the blended ratio? (baseline from that     │
@@ -248,7 +235,7 @@
 - [ ] **CVD:** Flat/diverging from price (futures and/or spot)
 - [ ] **OI:** Rising/falling SHARPLY (spike, not gradual) without price following
 - [ ] **Spot basis:** Widens then reverts (needs spot listing, checked manually, repeatedly)
-- [ ] **Liquidation + klines:** Liquidation spike aligns with a long wick
+- [ ] **Klines (was liquidation + klines):** Long wick + reversal, NO liquidation confirmation (tool removed)
 - [ ] **Top trader:** Moving opposite to the blended ratio, relative to that pair's own baseline
 
 ### Confidence Tier (a checklist heuristic, NOT a calibrated statistical probability)
@@ -273,7 +260,6 @@
 | `binance_get_spot_agg_trades` | Real CVD (spot), leverage vs. real-demand comparison | — |
 | `binance_get_open_interest` | Position building, post-liquidation recovery | — |
 | `binance_get_taker_volume_ratio` | Limit order dominance (MM characteristic) | — |
-| `binance_get_liquidation_history` | Liquidation spike by TIME | No price field — needs manual `klines` cross-check |
 | `binance_get_top_trader_ratio` | Smart money vs. retail divergence | Small movements (<2.5 points/2h even for a "moderate" pair); ~30-day max historical retention (4h/1d), ~5 days at 15m resolution; Binance's own "top trader" threshold is unpublished |
 | `binance_get_long_short_ratio` | Retail sentiment vs. price action | — |
 | `binance_get_spot_price` | Basis arbitrage detection | Point-in-time snapshot, no basis time-series |
@@ -295,7 +281,7 @@ This framework **does not prove** the presence of a market maker definitively �
 3. **Market context matters** — MM signals are more valid during low volume/consolidation areas.
 4. **False positives exist** — a news event or a large retail whale can trigger similar signals.
 5. **Calibrate per pair** — top-trader ratio thresholds must be built from that pair's own historical data (~5-30 days, depending on resolution), not a universal number.
-6. **Know the technical limitations** — 300-900ms latency/call, liquidation without price, limited top-trader ratio historical retention, real-time refresh-rate detection not feasible via REST tool calls, no WebSocket available.
+6. **Know the technical limitations** — 300-900ms latency/call, no liquidation data at all (tool removed, see Section 4.1), limited top-trader ratio historical retention, real-time refresh-rate detection not feasible via REST tool calls, no WebSocket available.
 
 ---
 
@@ -351,7 +337,7 @@ checklist**, don't conflate them:
 | Granularity | Yes/no checklist (0-6 discrete) | Continuous score per signal (0-1) |
 | Signal count | 6 (order book, CVD, OI, basis, liquidation+klines, top trader) | 6 but DIFFERENT composition (see mapping below) |
 | Tier | Weak(1-2)/Moderate(3-4)/Strong(5-6) | Weak(<2)/Moderate(<3.5)/Strong(<5)/Extreme(≥5) |
-| Liquidation | Separate signal (Section 4.1, needs `binance_get_liquidation_history` + manual `klines`) | NOT used — stop-hunt comes from `klines` alone (see limitations below) |
+| Liquidation | Section 4.1 — **removed**, `binance_get_liquidation_history` no longer exists | NOT used — stop-hunt comes from `klines` alone (see limitations below) |
 
 ### Automated signal → manual section mapping
 
@@ -359,7 +345,7 @@ checklist**, don't conflate them:
 |---|---|---|---|
 | `absorption` | 2.1 Order Book Absorption | Dominant CVD buy% (>60%) + flat price (\|Δ\|<0.5%) + sharp OI increase (>3%) → score 0.7-1.0. CVD buy% (>55%) + falling price → 0.5 (weak). Otherwise → 0.1 | **Medium** — uses CVD+OI+price (official Binance data), BUT only a single klines snapshot window, not a spot-CVD cross-check like the manual Section 2.1 |
 | `spoofing` | 3.1 Wall Pull / Spoofing | Spread >0.2% + largest wall >1% of 24h volume → 0.6. Otherwise → 0.1 | **Low** — only 1 order-book snapshot (not the 2 snapshots <3 seconds apart that Section 3.1 calls for; see Section 10 #2, proxy latency of 298-898ms makes that unreliable). A wall-vs-volume heuristic, NOT true spoofing detection |
-| `stopHunt` | 4.1 Liquidation Cluster Reversal | Wick >70% of range + body <20% + reversal candle → 0.8. Wick >60% alone → 0.5. Otherwise → 0.1 | **Low** — from `klines` ALONE (wick+reversal), WITHOUT the `binance_get_liquidation_history` confirmation Section 4.1 calls for (liquidation history has no price field + Coinalyze is rate-limited, see Section 8) |
+| `stopHunt` | 4.1 Liquidation Cluster Reversal (removed) | Wick >70% of range + body <20% + reversal candle → 0.8. Wick >60% alone → 0.5. Otherwise → 0.1 | **Low** — from `klines` ALONE (wick+reversal), WITHOUT liquidation confirmation (`binance_get_liquidation_history` no longer exists, see Section 4.1) |
 | `basisArb` | 5.1 Spot-Futures Basis Arbitrage | If the symbol has D1 history (fixed 50-pair watchlist): basis z-score >2 std dev + funding >0.05% → 0.9. Without history: basis >2x threshold → 0.7 (less accurate, noted in the evidence text), >threshold → 0.5. Otherwise → 0.1 | **Medium-High** for the 50-pair watchlist (has 24h D1 historical context), **Medium** for other pairs (static threshold, no distribution context) |
 | `oiDivergence` | 2.1 (sharp OI increase) + 6.STEP3 | OI up >5% + flat price (\|Δ\|<1%) → 0.8. OI up >3% against price direction → 0.7. Otherwise → 0.1 | **Medium** — official Binance OI data, but only a 1-hour window (2 data points), not a long history |
 | `fundingExtreme` | 5.2 Funding Rate Manipulation | Funding >3x threshold → 1.0, >2x → 0.8, >threshold → 0.6, below → proportional scale | **High** — funding rate straight from Binance (`premiumIndex`), the most reliable of these 6 signals |

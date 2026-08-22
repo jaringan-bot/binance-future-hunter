@@ -117,25 +117,13 @@
 
 ## 4. Sinyal Stop Hunt
 
-### 4.1 Liquidation Cluster (Waktu) Reversal — *High Confidence*
+### 4.1 Liquidation Cluster (Waktu) Reversal — **DIHAPUS (2026-08-22)**
 
-**Tool yang digunakan:**
-- `binance_get_liquidation_history`
-- `binance_get_open_interest`
-- `binance_get_klines`
-
-> ⚠️ **Batasan data:** `binance_get_liquidation_history` mengembalikan `{symbol, totalLong, totalShort, dominance}` per time-bucket, **tanpa field harga sama sekali**. Tidak bisa langsung memetakan "cluster di level psikologis".
-
-**Kriteria deteksi:**
-
-| Sinyal | Tool | Interpretasi |
-|--------|------|-------------|
-| **Spike liquidation** (totalLong/totalShort melonjak dibanding window sebelumnya) | `liquidation_history` | Ada force-closure massal di satu sisi |
-| **Wick panjang** di candlestick pada timeframe yang sama | `klines` | Harga sempat disentuh lalu reverse — mapping manual ke area liquidation |
-| **OI turun tajam** pasca liquidation spike | `open_interest` | MM ambil posisi lawan setelah hunt |
-| **Harga reverse** dalam 1–3 candle setelah wick | `klines` | Konfirmasi stop hunt berhasil |
-
-> **Workflow mapping harga:** Gunakan `klines` untuk identifikasi wick/extreme price pada waktu yang sama dengan liquidation spike — cross-reference MANUAL, tidak otomatis karena liquidation history tidak mengandung field harga.
+> ⚠️ **Section ini gak berlaku lagi.** `binance_get_liquidation_history` (satu-satunya sumber liquidation, via Coinalyze) dihapus — Binance gak punya REST publik market-wide buat data ini, dan jalur WebSocket real-time kena WAF block yang sama kayak `fapi.binance.com` (dites via Durable Object, lihat
+> [`docs/superpowers/specs/2026-08-11-realtime-liquidation-stream-design.md`](superpowers/specs/2026-08-11-realtime-liquidation-stream-design.md)).
+> Solusi butuh relay always-on berbayar (~$5-20/bulan), belum dibangun.
+>
+> Sinyal `stopHunt` di `binance_detect_mm_activity` TETAP jalan tapi selalu di confidence **Low** — cuma dari `klines` (wick panjang + body kecil + reversal), TANPA konfirmasi liquidation. Lihat Section 8/9 di bawah.
 
 ---
 
@@ -227,8 +215,8 @@
 │  STEP 4: Validasi spot basis (skip kalau Step 0 = futures-only)│
 │  → Ada aktivitas arbitrage? (snapshot manual berkali-kali)     │
 ├─────────────────────────────────────────────────────────────┤
-│  STEP 5: Cek liquidation history + klines                      │
-│  → Spike liquidation align dengan wick panjang di waktu sama?  │
+│  STEP 5: [DIHAPUS] dulu liquidation history + klines, sekarang  │
+│  cuma klines (wick panjang), TANPA konfirmasi liquidation       │
 ├─────────────────────────────────────────────────────────────┤
 │  STEP 6: Cross-check top trader ratio                          │
 │  → Arah berlawanan blended ratio? (baseline ~5-30 hari pair    │
@@ -246,7 +234,7 @@
 - [ ] **CVD:** Flat/divergen dari harga (futures dan/atau spot)
 - [ ] **OI:** Naik/turun TAJAM (spike, bukan gradual) tanpa harga follow
 - [ ] **Spot basis:** Melebar lalu kembali (butuh listing spot, cek manual berkali-kali)
-- [ ] **Liquidation + klines:** Spike liquidation align dengan wick panjang
+- [ ] **Klines (dulu liquidation + klines):** Wick panjang + reversal, TANPA konfirmasi liquidation (tool dihapus)
 - [ ] **Top trader:** Berlawanan arah dari blended ratio, dibanding baseline pair itu sendiri
 
 ### Confidence Tier (heuristik checklist, BUKAN probabilitas statistik terkalibrasi)
@@ -271,7 +259,6 @@
 | `binance_get_spot_agg_trades` | CVD riil (spot), pembanding leverage vs demand riil | — |
 | `binance_get_open_interest` | Position building, post-liquidation recovery | — |
 | `binance_get_taker_volume_ratio` | Limit order dominance (MM characteristic) | — |
-| `binance_get_liquidation_history` | Liquidation spike per WAKTU | Tanpa field harga — perlu cross-check `klines` manual |
 | `binance_get_top_trader_ratio` | Smart money vs retail divergence | Pergerakan kecil (<2.5 poin/2jam bahkan pair moderate); retensi historis ~30 hari maks (4h/1d), ~5 hari di resolusi 15m; threshold Binance sendiri tidak dipublikasikan |
 | `binance_get_long_short_ratio` | Retail sentiment vs price action | — |
 | `binance_get_spot_price` | Basis arbitrage detection | Snapshot sesaat, tidak ada time-series basis |
@@ -293,7 +280,7 @@ Framework ini **tidak membuktikan** keberadaan market maker secara definitif, me
 3. **Konteks pasar penting** — sinyal MM lebih valid di volume rendah/area konsolidasi.
 4. **False positive ada** — news event atau whale retail bisa memicu sinyal serupa.
 5. **Kalibrasi per-pair** — threshold top-trader ratio harus dibangun dari data historis pair sendiri (~5-30 hari, tergantung resolusi), bukan angka universal.
-6. **Kenali batasan teknis** — latency 300-900ms/call, liquidation tanpa harga, retensi historis top-trader ratio terbatas, refresh-rate real-time tidak feasible via REST tool call, WebSocket tidak tersedia.
+6. **Kenali batasan teknis** — latency 300-900ms/call, tidak ada data liquidation sama sekali (tool dihapus, lihat Section 4.1), retensi historis top-trader ratio terbatas, refresh-rate real-time tidak feasible via REST tool call, WebSocket tidak tersedia.
 
 ---
 
@@ -349,7 +336,7 @@ disamain:
 | Granularitas | Checklist ya/tidak (0-6 diskrit) | Skor kontinu tiap sinyal (0-1) |
 | Jumlah sinyal | 6 (order book, CVD, OI, basis, liquidation+klines, top trader) | 6 tapi BEDA komposisi (lihat mapping di bawah) |
 | Tier | Weak(1-2)/Moderate(3-4)/Strong(5-6) | Weak(<2)/Moderate(<3.5)/Strong(<5)/Extreme(≥5) |
-| Liquidation | Sinyal terpisah (Section 4.1, butuh `binance_get_liquidation_history` + `klines` manual) | TIDAK dipakai — stop-hunt cuma dari `klines` (lihat batasan di bawah) |
+| Liquidation | Section 4.1 — **dihapus**, tool `binance_get_liquidation_history` sudah tidak ada | TIDAK dipakai — stop-hunt cuma dari `klines` (lihat batasan di bawah) |
 
 ### Mapping sinyal otomatis → section manual
 
@@ -357,7 +344,7 @@ disamain:
 |---|---|---|---|
 | `absorption` | 2.1 Order Book Absorption | CVD buy% dominan (>60%) + harga flat (\|Δ\|<0.5%) + OI naik tajam (>3%) → skor 0.7-1.0. CVD buy% (>55%) + harga turun → 0.5 (lemah). Selain itu → 0.1 | **Medium** — pakai CVD+OI+harga (data resmi Binance), TAPI cuma window 1 snapshot klines, bukan cross-check spot CVD kayak Section 2.1 manual |
 | `spoofing` | 3.1 Wall Pull / Spoofing | Spread >0.2% + wall terbesar >1% dari volume 24h → 0.6. Selain itu → 0.1 | **Low** — cuma 1 snapshot order book (bukan 2 snapshot <3 detik yang Section 3.1 minta; lihat Section 10 #2, latency proxy 298-898ms bikin itu gak reliable). Heuristik wall-vs-volume, BUKAN true spoofing detection |
-| `stopHunt` | 4.1 Liquidation Cluster Reversal | Wick >70% dari range + body <20% + reversal candle → 0.8. Wick >60% doang → 0.5. Selain itu → 0.1 | **Low** — CUMA dari `klines` (wick+reversal), TANPA konfirmasi `binance_get_liquidation_history` yang Section 4.1 minta (liquidation history gak ada field harga + Coinalyze rate-limited, lihat Section 8) |
+| `stopHunt` | 4.1 Liquidation Cluster Reversal (dihapus) | Wick >70% dari range + body <20% + reversal candle → 0.8. Wick >60% doang → 0.5. Selain itu → 0.1 | **Low** — CUMA dari `klines` (wick+reversal), TANPA konfirmasi liquidation (tool `binance_get_liquidation_history` sudah dihapus, lihat Section 4.1) |
 | `basisArb` | 5.1 Spot-Futures Basis Arbitrage | Kalau symbol ada histori D1 (50 pair watchlist tetap): z-score basis >2 std dev + funding >0.05% → 0.9. Tanpa histori: basis >2x threshold → 0.7 (kurang akurat, dicatat di evidence), >threshold → 0.5. Selain itu → 0.1 | **Medium-High** untuk 50 pair watchlist (ada konteks histori D1 24 jam), **Medium** untuk pair lain (threshold statis, gak ada konteks distribusi) |
 | `oiDivergence` | 2.1 (OI naik tajam) + 6.STEP3 | OI naik >5% + harga flat (\|Δ\|<1%) → 0.8. OI naik >3% berlawanan arah harga → 0.7. Selain itu → 0.1 | **Medium** — data OI resmi Binance, tapi window cuma 1 jam (2 titik data), bukan histori panjang |
 | `fundingExtreme` | 5.2 Funding Rate Manipulation | Funding >3x threshold → 1.0, >2x → 0.8, >threshold → 0.6, di bawah → skala proporsional | **High** — funding rate langsung dari Binance (`premiumIndex`), paling reliable dari 6 sinyal ini |

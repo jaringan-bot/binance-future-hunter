@@ -27,7 +27,6 @@ Ditambahkan (opsional, default `"summary"`) ke semua tool yang sebelumnya
 | `binance_get_order_book_depth` / `binance_get_spot_order_book` | best bid/ask + spread (level mentah TIDAK disertakan) | array bids/asks penuh sesuai `limit` |
 | `binance_get_open_interest_history` | tren + <=10 poin terbaru | semua poin sesuai `limit` |
 | `binance_get_funding_rate_history` | rata-rata + tren + <=10 poin terbaru | semua poin sesuai `limit` |
-| `binance_get_liquidation_history` | total + dominance + <=10 poin terbaru | semua poin sesuai `limit` |
 | `binance_get_basis_history` | current/avg/range + <=10 snapshot terbaru | semua snapshot dalam window `hours` |
 | `binance_get_long_short_ratio` / `binance_get_top_trader_ratio` | snapshot + tren + <=10 poin terbaru | semua poin sesuai `limit` |
 
@@ -36,7 +35,7 @@ mode — `detail: "full"` hanya mempengaruhi `structuredContent`, bukan
 panjang tabel teks (supaya teks tetap terbaca manusia untuk `limit` besar).
 
 **Kenapa bukan cuma `limit` kecil saja?** `limit` mengontrol berapa banyak
-data yang di-*fetch* dari Binance/Coinalyze (dipakai penuh untuk hitung
+data yang di-*fetch* dari Binance (dipakai penuh untuk hitung
 rata-rata/tren), sedangkan `detail` mengontrol berapa banyak dari data yang
 sudah di-fetch itu yang ikut dikirim balik ke Claude. Keduanya independen:
 `limit: 500, detail: "summary"` tetap menghitung tren dari 500 titik, tapi

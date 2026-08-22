@@ -2,7 +2,6 @@
 // src/tools/*.ts. Dipisah dari server.ts supaya createServer() cuma jadi
 // wiring tipis (register semua tool module), bukan file 2000+ baris.
 import { z } from "zod";
-import * as coinalyze from "./coinalyzeClient.js";
 import * as binanceProxy from "./binanceProxyClient.js";
 
 // Watchlist yang di-snapshot Cron Trigger tiap 5 menit ke D1 (basis+funding+OI
@@ -214,11 +213,9 @@ export function dropNulls<T extends object>(obj: T): Partial<T> {
 
 export function errorResult(err: unknown) {
   const message =
-    err instanceof coinalyze.CoinalyzeApiError
+    err instanceof binanceProxy.BinanceProxyError
       ? err.message
-      : err instanceof binanceProxy.BinanceProxyError
-        ? err.message
-        : `Terjadi error tak terduga: ${(err as Error)?.message ?? String(err)}`;
+      : `Terjadi error tak terduga: ${(err as Error)?.message ?? String(err)}`;
   return {
     isError: true,
     content: [{ type: "text" as const, text: message }],

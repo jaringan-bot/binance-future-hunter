@@ -20,9 +20,7 @@ generate `id`/`database_id` baru buat akun kamu, gak perlu bikin manual).
 setelah klik, kamu TETAP perlu set secret (Cloudflare gak bisa nebak value
 dari layanan eksternal) — lihat `.dev.vars.example` di repo ini buat daftar
 lengkap, atau [Setup Proxy Vercel](#setup-proxy-vercel-wajib-sekali-saja)
-di bawah. `PROXY_URL`/`PROXY_SECRET` WAJIB (44 dari 45 tool butuh),
-Coinalyze API key **OPSIONAL** (cuma 1 tool) — skip kalau gak butuh
-liquidation history.
+di bawah. `PROXY_URL`/`PROXY_SECRET` WAJIB (semua 46 tool butuh).
 
 ## Tujuan
 
@@ -34,8 +32,7 @@ dalam percakapan dengan Claude, tanpa perlu buka dashboard exchange terpisah.
 ## Manfaat
 
 - **Satu pintu buat banyak sinyal.** Funding rate, open interest, order book,
-  order flow, dan histori liquidation — semua lewat satu MCP connector, bukan
-  gonta-ganti tab.
+  dan order flow — semua lewat satu MCP connector, bukan gonta-ganti tab.
 - **Bisa bedain retail vs whale.** `binance_get_top_trader_ratio` kasih
   breakdown murni top-trader (terpisah dari `binance_get_long_short_ratio`
   yang blended) — berguna buat lihat kalau posisi retail dan whale lagi
@@ -60,8 +57,9 @@ dalam percakapan dengan Claude, tanpa perlu buka dashboard exchange terpisah.
   akun Binance/data pihak luar sama sekali.
 - Transparan soal keterbatasan tiap tool (lihat bagian di bawah), bukan
   dibungkus seolah semua data sempurna.
-- Infrastruktur cukup dengan free tier (Cloudflare Workers + Vercel Hobby +
-  Coinalyze free tier) untuk pemakaian personal.
+- Infrastruktur cukup dengan free tier (Cloudflare Workers + Vercel Hobby)
+  untuk pemakaian personal — 100% Binance-native, tidak ada dependensi
+  agregator pihak ketiga lagi.
 
 ## Kekurangan
 
@@ -69,18 +67,21 @@ dalam percakapan dengan Claude, tanpa perlu buka dashboard exchange terpisah.
   atau histori periodik) — tidak ada push event detik-demi-detik (misalnya
   liquidation baru terjadi). Menambah itu butuh komponen infrastruktur
   tambahan yang di luar cakupan project ini saat ini.
-- **Satu tool masih lewat agregator pihak ketiga** (Coinalyze, khusus histori
-  liquidation) — lihat bagian
-  [Keterbatasan](#keterbatasan-yang-jujur-perlu-diketahui) untuk detail.
+- **Tidak ada histori liquidation.** Tool `binance_get_liquidation_history`
+  (sebelumnya lewat Coinalyze) dihapus 2026-08-22 — Binance tidak punya REST
+  publik market-wide untuk data ini, dan jalur WebSocket real-time
+  (`!forceOrder@arr`) kena WAF block yang sama dengan `fapi.binance.com`
+  (dites langsung lewat Durable Object, lihat
+  [`docs/superpowers/specs/2026-08-11-realtime-liquidation-stream-design.md`](docs/superpowers/specs/2026-08-11-realtime-liquidation-stream-design.md)).
+  Solusi butuh relay always-on berbayar (Vercel Pro ~$20/bulan atau VPS kecil
+  ~$5/bulan) — belum ada, dicatat sebagai keterbatasan sampai ada budget/
+  kebutuhan buat itu.
 - **Setup awal butuh proxy Vercel** (wajib) — bukan pasang-langsung-jalan,
-  ada langkah konfigurasi manual sekali di awal. Coinalyze API key OPSIONAL
-  (cuma buat 1 dari 45 tool), gak menghalangi setup awal kalau di-skip.
-- **Rate limit free tier Coinalyze** (40 request/menit per API key) bisa jadi
-  bottleneck kalau dipakai sangat intensif.
+  ada langkah konfigurasi manual sekali di awal.
 - Tidak ada data wallet on-chain atau data dari exchange selain Binance
   Futures USDS-M.
 
-**Sumber data: dua jalur, tergantung tool.**
+**Sumber data: satu jalur, 100% Binance native.**
 
 - **Binance native, lewat proxy relay Vercel.** Domain Binance
   (`fapi.binance.com`) memblokir traffic dari Cloudflare Workers di level WAF
@@ -93,16 +94,9 @@ dalam percakapan dengan Claude, tanpa perlu buka dashboard exchange terpisah.
   long/short ratio (blended & top-trader), taker buy/sell volume ratio, dan
   harga spot (proxy juga relay ke Binance Spot API `api.binance.com` lewat
   parameter `market=spot`, lihat `proxy/README.md`).
-- **[Coinalyze](https://coinalyze.net)**, sekarang cuma untuk satu tool yang
-  belum dipindah ke jalur native: histori liquidation
-  (`binance_get_liquidation_history`). Coinalyze meng-agregasi ulang data yang
-  sama (sumber asli tetap Binance) dan API-nya sendiri di-hosting di
-  Cloudflare, jadi tidak kena block yang sama.
 
 Konsekuensinya, worker ini butuh `PROXY_URL`/`PROXY_SECRET` (proxy Vercel,
-wajib buat 43 tool Binance-native) dan, opsional, `COINALYZE_API_KEY`
-(cuma buat `binance_get_liquidation_history`) — lihat bagian Setup di
-bawah.
+wajib buat semua 46 tool) — lihat bagian Setup di bawah.
 
 **Caching & state, tanpa kredensial tambahan.** Response upstream (funding
 rate, klines, OI, dll — kecuali order book & aggregate trades yang butuh
@@ -134,7 +128,6 @@ kredensial atau setup tambahan buat 3 exchange itu.
 | `binance_get_order_book_depth` | Snapshot order book (bid/ask), spread, wall terbesar | Binance native |
 | `binance_get_order_book_imbalance` | Imbalance volume bid vs ask di depth 5/10/20, dengan label bias (BULLISH/BEARISH/SEIMBANG) | Binance native |
 | `binance_get_agg_trades` | Trade individual granular (buy/sell aggressor) untuk deteksi absorption | Binance native |
-| `binance_get_liquidation_history` | Histori liquidation | Coinalyze |
 | `binance_get_taker_volume_ratio` | Tekanan beli/jual agresif (taker volume), statistik resmi Binance | Binance native |
 | `binance_get_klines` | Candlestick OHLCV per timeframe, dukung `startTime`/`endTime` (histori jauh ke belakang, buat backtest, maks 1500 candle/panggilan) | Binance native |
 | `binance_get_multi_timeframe_bias` | Bias Bullish/Bearish/Sideways di 5 timeframe sekaligus (1m/5m/15m/1h/1d) | Binance native |
@@ -172,7 +165,7 @@ kredensial atau setup tambahan buat 3 exchange itu.
 ## Konvensi `detail`: summary vs full (hemat token)
 
 Semua tool di atas yang balikin data array/histori (klines, agg trades,
-order book, open interest/funding/liquidation/basis history, long-short &
+order book, open interest/funding/basis history, long-short &
 top-trader ratio) punya parameter opsional `detail: "summary" | "full"`,
 default `"summary"`. Ini **satu-satunya perubahan default-behavior yang
 disengaja** di pembaruan token-efficiency 2026-08 — bukan penghapusan
@@ -209,7 +202,7 @@ atas, lalu menghitung skor indikasi dari pola yang muncul.
 |---|---|---|
 | **Absorption** | order book depth, agg trades (futures & spot), open interest | CVD flat/naik tapi harga stagnan = sell pressure sedang diserap (accumulation); OI spike tajam + harga sideways = posisi besar baru dibuka |
 | **Spoofing** | order book depth, order book imbalance | Wall besar muncul lalu hilang sebelum sempat tereksekusi; spread tiba-tiba melebar lalu normal lagi dalam hitungan detik |
-| **Stop hunt** | liquidation history, open interest, klines | Spike liquidation di satu sisi + wick panjang di candle pada waktu yang sama + harga reverse dalam 1-3 candle sesudahnya |
+| **Stop hunt** | open interest, klines | Wick panjang + body kecil candle reversal, TANPA konfirmasi liquidation (dihapus, lihat Kekurangan) |
 | **Basis arbitrage** | spot price, funding rate, open interest | Basis spot-futures melebar lalu kembali cepat; funding ekstrem + OI naik (indikasi hedge short futures / long spot) |
 
 **Rule of thumb:** kalau **≥3 sinyal align** dalam timeframe yang sama,
@@ -272,7 +265,6 @@ asumsi awal:
 | Polling <500ms buat deteksi refresh-rate spoofing | ❌ Latency riil 298-898ms/call (rata-rata ~485ms) lewat proxy chain worker→Vercel→Binance — tidak reliable buat itu |
 | Threshold divergence top-trader ratio universal (flat >15% atau tiered 3-15%) | ❌ Tidak pernah trigger — pergerakan riil 4 pair yang dites (SOLUSDT, BNBUSDT, LINKUSDT, AVAXUSDT) dalam window 2 jam cuma 0.40-2.35 poin, jauh di bawah threshold manapun |
 | Retensi historis top-trader ratio "30-90 hari" | ⚠️ Dikoreksi — 90 hari tidak tersedia sama sekali dari Binance; 30 hari cuma di resolusi kasar (4h/1d), resolusi 15 menit cuma ~5 hari ke belakang |
-| Liquidation history bisa dipetakan ke level harga | ❌ Field `binance_get_liquidation_history` cuma `{totalLong, totalShort, dominance}` per window waktu, tanpa harga sama sekali — perlu cross-check manual ke `klines` |
 | Kondisi pasar tenang (BTCUSDT) tidak over-trigger | ✅ Terkonfirmasi — skor ~1-1.5/6 (tier Weak) saat pasar sideways, framework tidak salah alarm di kondisi normal |
 
 Detail penuh (termasuk raw data test per klaim): Section 10,
@@ -293,17 +285,18 @@ Detail penuh (termasuk raw data test per klaim): Section 10,
 - **Threshold "top trader" tidak dipublikasikan Binance secara pasti**, dan
   datanya snapshot periodik, bukan real-time tick-by-tick.
 - Data histori OI (`binance_get_open_interest_history`) dibatasi retensi
-  endpoint resmi Binance (`/futures/data/openInterestHist`) — tidak selama
-  histori Coinalyze sebelumnya, cek langsung kalau butuh rentang panjang.
+  endpoint resmi Binance (`/futures/data/openInterestHist`), cek langsung
+  kalau butuh rentang panjang.
 - Tidak ada data wallet on-chain.
-- Coinalyze free tier: rate limit 40 request/menit per API key — sekarang
-  cuma berlaku untuk `binance_get_liquidation_history`.
+- **Tidak ada histori liquidation sama sekali** (tool dihapus, lihat bagian
+  Kekurangan di atas).
 - **`binance_detect_mm_activity`: skor spoofing & stop-hunt cuma heuristik
   1-snapshot**, BUKAN true detection. Desain aslinya butuh 2 snapshot order
   book dalam <3 detik (proxy ini latency-nya ~485ms, belum reliable untuk
-  itu) dan data liquidation granular-harga (Coinalyze rate-limited & tidak
-  ada field harga). Confidence 2 sinyal itu lebih rendah dari 4 sinyal lain
-  di tool yang sama — dicatat juga di evidence text tiap response.
+  itu) dan data liquidation granular-harga (tidak tersedia sama sekali,
+  lihat bagian Kekurangan). Confidence 2 sinyal itu lebih rendah dari 4
+  sinyal lain di tool yang sama — dicatat juga di evidence text tiap
+  response.
 - **`binance_market_regime`: spike volatilitas/volume dihitung relatif ke
   window fetch yang sama** (10 candle terakhir vs 10 sebelumnya), bukan
   baseline historis jangka panjang.
@@ -450,25 +443,6 @@ worker"), dan Cron Trigger snapshot basis+sinyal MM (tiap 5 menit) akan
 gagal silent tiap tick (ke-log ke Workers Logs, tidak menggagalkan endpoint
 `/mcp` lain).
 
-## Setup Coinalyze API Key (OPSIONAL — cuma buat 1 dari 45 tool)
-
-Beda dari 3 setup di atas, ini BUKAN prasyarat buat server jalan. Worker
-deploy & 44 tool lain jalan normal tanpa ini — cuma
-`binance_get_liquidation_history` yang butuh.
-
-1. Daftar gratis di https://coinalyze.net
-2. Ambil API key dari halaman akun
-3. Set sebagai secret worker (bukan di `wrangler.toml`, bukan hardcode):
-   ```bash
-   npx wrangler secret put COINALYZE_API_KEY
-   ```
-   (paste API key saat diminta)
-
-Tanpa secret ini, cuma `binance_get_liquidation_history` yang gagal dengan
-pesan error jelas ("COINALYZE_API_KEY belum diset") — tool lain gak
-kepengaruh sama sekali. Skip section ini kalau gak butuh liquidation
-history.
-
 ## Admin: Usage Log (OPSIONAL)
 
 Worker publik gampang ditemuin (terdaftar di [MCP Server Registry](https://registry.modelcontextprotocol.io/))
@@ -592,7 +566,7 @@ menentukan tool mana yang dipanggil (dan berapa kali) berdasarkan pertanyaan:
 - *"Cek overview lengkap ETHUSDT — funding, OI, order book, bias harga"* →
   `binance_analyze_pair` (composite, 1 call ganti 6 tool terpisah)
 - *"Ada tanda-tanda aktivitas market maker di SOLUSDT belakangan ini?"* →
-  kombinasi beberapa tool (order book, agg trades, OI, liquidation, klines)
+  kombinasi beberapa tool (order book, agg trades, OI, klines)
   mengikuti [Framework Analisis](#framework-analisis-deteksi-market-maker--whale)
   di atas — sebutkan pair-nya, Claude yang menjalankan workflow deteksinya
 - *"Bandingin funding rate BTC, ETH, SOL, sama BNB"* →
@@ -635,9 +609,7 @@ curl -X POST http://localhost:8787/mcp \
 ```
 
 Kalau ini mengembalikan data funding rate + basis BTCUSDT yang valid, jalur
-proxy Vercel bekerja. Untuk jalur Coinalyze, ganti `name` ke
-`binance_get_liquidation_history` — kalau itu juga valid, jalur Coinalyze
-bekerja.
+proxy Vercel bekerja.
 
 ## Audit & Hasil
 
@@ -664,8 +636,8 @@ npm run token-audit
 Manggil worker deployed langsung, ukur ukuran skema tool, ukuran response
 lintas skala `limit`, dan "Information Density Ratio" (data vs boilerplate)
 buat beberapa tool representatif, plus simulasi 1 percakapan multi-turn
-realistis. Bukan bagian `npm test`/CI (hit worker live + Binance/Coinalyze
-via itu) — dipakai manual pas mau cek dampak perubahan tool description/
+realistis. Bukan bagian `npm test`/CI (hit worker live via itu) — dipakai
+manual pas mau cek dampak perubahan tool description/
 format response terhadap konsumsi token. Estimasi token pakai heuristik
 chars/4 (gak ada tokenizer resmi Claude yang di-publish sebagai package),
 jadi angkanya approximate, berguna buat perbandingan relatif (sebelum vs

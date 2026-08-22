@@ -1,6 +1,5 @@
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { createServer } from "./server.js";
-import * as coinalyze from "./coinalyzeClient.js";
 import * as binanceProxy from "./binanceProxyClient.js";
 import * as kvConfig from "./kvConfig.js";
 import * as d1Client from "./d1Client.js";
@@ -10,7 +9,6 @@ import { isAuthorized } from "./adminUsage.js";
 import { scanWallCandidates } from "./cron/wallTrackingCron.js";
 
 interface Env {
-  COINALYZE_API_KEY?: string;
   PROXY_URL?: string;
   PROXY_SECRET?: string;
   // Proxy sekunder OPSIONAL -- kalau diset, binanceProxyClient otomatis
@@ -92,7 +90,6 @@ function isOriginAllowed(origin: string | null, env: Env): boolean {
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    coinalyze.setApiKey(env.COINALYZE_API_KEY);
     binanceProxy.setProxyConfig(
       env.PROXY_URL,
       env.PROXY_SECRET,
@@ -222,7 +219,6 @@ export default {
   //   basis-snapshot terpisah dari signal-snapshot supaya satu gagal gak
   //   gugurin yang lain). Prune request_log & wall_tracking juga di sini.
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-    coinalyze.setApiKey(env.COINALYZE_API_KEY);
     binanceProxy.setProxyConfig(
       env.PROXY_URL,
       env.PROXY_SECRET,
