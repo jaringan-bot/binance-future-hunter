@@ -3,9 +3,11 @@ import { z } from "zod";
 import { registerSafeTool } from "../toolWrapper.js";
 import * as binanceProxy from "../binanceProxyClient.js";
 import { fmtNum, fmtPrice, fmtPct, fmtTime } from "../format.js";
-import { symbolSchema, KLINE_INTERVAL_ENUM, errorResult, parseTimeParam } from "../shared.js";
+import { symbolSchema, KLINE_INTERVAL_ENUM, errorResult, parseTimeParam, detailParam } from "../shared.js";
 import { computeCvdFromTrades, summarizeKlines } from "../toolHelpers.js";
 import { getPairThreshold } from "./config.js";
+
+const RECENT_CANDLES = 5;
 
 export function registerSpotTools(server: McpServer): void {
 
@@ -24,16 +26,9 @@ export function registerSpotTools(server: McpServer): void {
     {
       title: "Harga Spot Binance + Basis vs Futures",
       description:
-        "Mengambil harga SPOT Binance (bukan Futures), plus basis riil terhadap mark price Futures — dihitung vs harga " +
-        "SPOT LANGSUNG (bukan index price rata-rata beberapa exchange seperti binance_get_funding_rate), lebih akurat " +
-        "buat bedain leverage-driven (futures premium/discount melebar) vs demand/supply riil (spot-futures selaras). " +
-        "Basis melebar tiba-tiba = futures mulai memimpin/leverage-driven, early warning sebelum funding rate menyusul. " +
-        "PENTING: banyak pair Futures adalah FUTURES-ONLY (koin baru/kecil) TANPA listing Spot — tool gagal dengan " +
-        "error jelas untuk pair semacam itu (bukan bug). " +
-        "Untuk deteksi basis arbitrage (docs/mm_detection_framework.md Section 5): cek binance_check_spot_listing dulu " +
-        "kalau ragu. Ini snapshot sesaat -- untuk histori time-series 'basis melebar lalu kembali', pakai " +
-        "binance_get_basis_history (watchlist tetap BTCUSDT/ETHUSDT/SOLUSDT); pair lain di luar itu masih harus " +
-        "snapshot manual berkali-kali.",
+        "Harga SPOT Binance + basis riil vs mark price Futures (vs harga SPOT langsung, bukan index price rata-rata " +
+        "seperti binance_get_funding_rate) -- bedain leverage-driven vs demand riil. PENTING: banyak pair Futures " +
+        "FUTURES-ONLY tanpa listing Spot, tool error jelas untuk kasus itu (cek binance_check_spot_listing dulu kalau ragu).",
       inputSchema: { symbol: symbolSchema },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -54,10 +49,10 @@ export function registerSpotTools(server: McpServer): void {
         const usingCustomThreshold = customThreshold?.basisThreshold !== undefined;
         const basisInterpretation =
           basis >= BASIS_THRESHOLD
-            ? "PREMIUM (futures di atas spot — leverage/demand futures lebih agresif dari demand spot, waspada kalau melebar cepat)"
+            ? "PREMIUM (futures di atas spot)"
             : basis <= -BASIS_THRESHOLD
-              ? "DISKON (futures di bawah spot — tekanan short/leverage di futures lebih agresif dari sell pressure spot)"
-              : "NETRAL (futures dan spot selaras dekat — pergerakan harga kemungkinan didorong demand/supply riil, bukan leverage semata)";
+              ? "DISKON (futures di bawah spot)"
+              : "NETRAL (futures dan spot selaras dekat)";
 
         const text = [
           `# Harga Spot — ${symbol}`,
@@ -68,10 +63,7 @@ export function registerSpotTools(server: McpServer): void {
           ``,
           `**Interpretasi Basis**: ${basisInterpretation}`,
           ``,
-          `_Threshold basis dipakai: ±${fmtPct(BASIS_THRESHOLD, 4)}${usingCustomThreshold ? " (CUSTOM, di-set lewat binance_set_pair_threshold)" : " (default global)"}. ` +
-            `Basis di sini vs harga SPOT BINANCE LANGSUNG, beda dari basis di binance_get_funding_rate yang vs INDEX price ` +
-            `(rata-rata beberapa exchange). Kalau tool ini error "Invalid symbol", pair tersebut FUTURES-ONLY (tidak listed ` +
-            `di Binance Spot) — basis futures-vs-spot tidak bisa dihitung untuk pair semacam itu._`,
+          `_Threshold: ±${fmtPct(BASIS_THRESHOLD, 4)}${usingCustomThreshold ? " (custom)" : " (default)"}. Error "Invalid symbol" = pair FUTURES-ONLY (tidak listed Spot)._`,
         ].join("\n");
 
         return {
@@ -101,11 +93,9 @@ export function registerSpotTools(server: McpServer): void {
     {
       title: "Statistik 24 Jam (Spot)",
       description:
-        "Mengambil ringkasan statistik 24 jam di pasar SPOT Binance (bukan Futures): harga terakhir, perubahan %, " +
-        "high/low, volume, VWAP (weighted average price), dan jumlah trade — LANGSUNG dari Binance native ticker/24hr Spot. " +
-        "Bandingkan dengan binance_get_24hr_ticker (versi Futures) untuk pair yang sama: kalau volume/perubahan spot jauh " +
-        "lebih kecil dari futures, pergerakan harga kemungkinan besar didorong leverage bukan demand riil. " +
-        "PENTING: error 'Invalid symbol' berarti pair tersebut FUTURES-ONLY (tidak listed di Binance Spot).",
+        "Ringkasan statistik 24 jam pasar SPOT Binance: harga, %perubahan, high/low, volume, VWAP, jumlah trade. " +
+        "Bandingkan dengan binance_get_24hr_ticker (Futures): volume/perubahan spot jauh lebih kecil dari futures = " +
+        "pergerakan kemungkinan leverage-driven.",
       inputSchema: { symbol: symbolSchema },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -128,12 +118,9 @@ export function registerSpotTools(server: McpServer): void {
           `- Perubahan 24 Jam: ${priceChangePercent >= 0 ? "+" : ""}${priceChangePercent.toFixed(2)}% (${fmtPrice(priceChange)})`,
           `- High 24 Jam: ${fmtPrice(highPrice)}`,
           `- Low 24 Jam: ${fmtPrice(lowPrice)}`,
-          `- VWAP (harga rata-rata tertimbang volume): ${fmtPrice(vwap)}`,
+          `- VWAP: ${fmtPrice(vwap)}`,
           `- Volume: ${fmtNum(volume, 2)} (≈ ${fmtNum(quoteVolume, 0)} quote asset)`,
           `- Jumlah Trade: ${fmtNum(data.count, 0)}`,
-          ``,
-          `_Data LANGSUNG dari Binance Spot native (ticker/24hr). Bandingkan quoteVolume ini dengan volume notional ` +
-            `binance_get_24hr_ticker (Futures) untuk baca rasio futures/spot — rasio tinggi = gerakan lebih leverage-driven._`,
         ].join("\n");
 
         return {
@@ -153,10 +140,8 @@ export function registerSpotTools(server: McpServer): void {
     {
       title: "Best Bid/Ask (Spot)",
       description:
-        "Mengambil best bid/ask price + quantity real-time di pasar SPOT Binance — lebih ringan/cepat dari " +
-        "binance_get_spot_order_book kalau cuma butuh spread sesaat, tanpa perlu full depth. Berguna untuk cross-check " +
-        "spread spot vs spread futures (binance_get_order_book_depth): spread spot yang melebar tiba-tiba bisa jadi " +
-        "tanda likuiditas riil menipis, terlepas dari kondisi order book futures.",
+        "Best bid/ask price + quantity real-time SPOT -- lebih ringan dari binance_get_spot_order_book kalau cuma " +
+        "butuh spread sesaat. Cross-check spread spot vs futures (binance_get_order_book_depth).",
       inputSchema: { symbol: symbolSchema },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -174,8 +159,6 @@ export function registerSpotTools(server: McpServer): void {
           `- Bid: ${fmtPrice(bidPrice)} (qty ${fmtNum(parseFloat(data.bidQty), 4)})`,
           `- Ask: ${fmtPrice(askPrice)} (qty ${fmtNum(parseFloat(data.askQty), 4)})`,
           `- Spread: ${fmtPrice(spread)} (${spreadPct.toFixed(4)}%)`,
-          ``,
-          `_Data real-time dari Binance Spot native (ticker/bookTicker)._`,
         ].join("\n");
 
         return {
@@ -195,10 +178,9 @@ export function registerSpotTools(server: McpServer): void {
     {
       title: "Order Book Depth (Spot)",
       description:
-        "Mengambil snapshot order book (bid/ask) real-time di pasar SPOT Binance, LANGSUNG dari Binance native. " +
-        "Versi Spot dari binance_get_order_book_depth (Futures) — berguna untuk bandingkan wall/likuiditas spot vs " +
-        "futures: kalau wall besar cuma muncul di futures tapi tidak di spot, itu lebih mungkin leverage/spekulasi " +
-        "daripada komitmen order riil dari holder. PENTING: snapshot SESAAT, order book berubah cepat.",
+        "Snapshot order book (bid/ask) real-time SPOT. Versi Spot dari binance_get_order_book_depth -- bandingkan " +
+        "wall/likuiditas spot vs futures. Default ringkas (top 10 + spread); `detail: \"full\"` untuk semua level " +
+        "sampai `limit`. PENTING: snapshot SESAAT, order book berubah cepat.",
       inputSchema: {
         symbol: symbolSchema,
         limit: z
@@ -209,10 +191,11 @@ export function registerSpotTools(server: McpServer): void {
           })
           .default(20)
           .describe("Jumlah level bid/ask yang diambil per sisi. Harus salah satu dari: 5, 10, 20, 50, 100, 500, 1000, 5000."),
+        detail: detailParam,
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ symbol, limit }) => {
+    async ({ symbol, limit, detail }) => {
       try {
         const data = await binanceProxy.getSpotOrderBook(symbol, limit);
 
@@ -248,22 +231,27 @@ export function registerSpotTools(server: McpServer): void {
           `**Wall terbesar (Bid)**: harga ${fmtPrice(parseFloat(largestBid[0]))}, size ${fmtNum(parseFloat(largestBid[1]), 4)}`,
           `**Wall terbesar (Ask)**: harga ${fmtPrice(parseFloat(largestAsk[0]))}, size ${fmtNum(parseFloat(largestAsk[1]), 4)}`,
           ``,
-          `## Top 10 Bids (harga tertinggi dulu)`,
+          `## Top 10 Bids`,
           `| Harga | Quantity |`,
           `|---|---|`,
           bidRows,
           ``,
-          `## Top 10 Asks (harga terendah dulu)`,
+          `## Top 10 Asks`,
           `| Harga | Quantity |`,
           `|---|---|`,
           askRows,
-          ``,
-          `_Snapshot sesaat dari Binance Spot native. Order book berubah cepat — jangan overinterpretasi satu snapshot sebagai sinyal pasti._`,
         ].join("\n");
 
         return {
           content: [{ type: "text", text }],
-          structuredContent: { symbol, bestBid, bestAsk, spread, spreadPct },
+          structuredContent: {
+            symbol,
+            bestBid,
+            bestAsk,
+            spread,
+            spreadPct,
+            ...(detail === "full" ? { bids: data.bids, asks: data.asks } : {}),
+          },
         };
       } catch (err) {
         return errorResult(err);
@@ -278,14 +266,9 @@ export function registerSpotTools(server: McpServer): void {
     {
       title: "Data Candlestick (Spot)",
       description:
-        "Candlestick OHLCV di pasar SPOT Binance per timeframe, native Binance. Versi Spot dari binance_get_klines " +
-        "(Futures) — bandingkan bias/volume kedua versi: kalau candle futures jauh lebih volatil/volumenya jauh lebih " +
-        "besar dari spot di jam yang sama, pergerakan itu kemungkinan leverage-driven, bukan demand/supply riil. " +
-        "Default (tanpa startTime/endTime) balikin candle TERBARU. Isi startTime buat narik histori jauh ke belakang " +
-        "(misal backtest) — maksimal `limit` candle/panggilan (maks 1000 Spot, beda dari Futures 1500). Rentang >1000 " +
-        "candle: panggil berkali-kali sambil geser startTime (pagination manual). " +
-        "HEMAT TOKEN: default cuma balikin summary (bias, swing high/low, 15 candle terakhir) — array candle PENUH " +
-        "TIDAK disertakan kecuali `includeCandles: true`.",
+        "Candlestick OHLCV pasar SPOT per timeframe, native Binance. Versi Spot dari binance_get_klines -- bandingkan " +
+        "bias/volume kedua versi untuk deteksi leverage-driven move. Maks 1000 candle/panggilan (beda dari Futures 1500). " +
+        "Default ringkas, `detail: \"full\"` atau `includeCandles: true` untuk array candle penuh.",
       inputSchema: {
         symbol: symbolSchema,
         interval: z
@@ -306,13 +289,12 @@ export function registerSpotTools(server: McpServer): void {
           .boolean()
           .optional()
           .default(false)
-          .describe(
-            "Sertakan array candle PENUH di structuredContent -- default false biar hemat token. Set true kalau butuh proses data candle secara programatik.",
-          ),
+          .describe("DEPRECATED, dipertahankan untuk kompatibilitas -- pakai `detail: \"full\"` sebagai gantinya."),
+        detail: detailParam,
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ symbol, interval, limit, startTime, endTime, includeCandles }) => {
+    async ({ symbol, interval, limit, startTime, endTime, includeCandles, detail }) => {
       try {
         const startMs = parseTimeParam(startTime, "startTime");
         const endMs = parseTimeParam(endTime, "endTime");
@@ -321,6 +303,7 @@ export function registerSpotTools(server: McpServer): void {
           return { content: [{ type: "text", text: `Tidak ada data candle Spot untuk ${symbol} @ ${interval}.` }] };
         }
 
+        const isFull = detail === "full" || includeCandles;
         const { candles, lastClose, changePct, bias, swingHigh, swingLow } = summarizeKlines(raw);
 
         const recent = candles.slice(-15);
@@ -355,7 +338,7 @@ export function registerSpotTools(server: McpServer): void {
             swingHigh,
             swingLow,
             lastClose,
-            ...(includeCandles ? { candles } : {}),
+            ...(isFull ? { candles } : { recent: candles.slice(-RECENT_CANDLES) }),
           },
         };
       } catch (err) {
@@ -371,16 +354,17 @@ export function registerSpotTools(server: McpServer): void {
     {
       title: "Aggregate Trades / CVD (Spot)",
       description:
-        "Mengambil trade individual terbaru (aggregate trades) di pasar SPOT Binance, termasuk sisi buy/sell aggressor " +
-        "per trade. Versi Spot dari binance_get_agg_trades (Futures) — CVD spot menunjukkan tekanan beli/jual RIIL " +
-        "(bukan leverage), cocok dibandingkan berdampingan dengan CVD futures untuk pair yang sama.",
+        "Trade individual terbaru pasar SPOT + sisi buy/sell aggressor per trade. Versi Spot dari " +
+        "binance_get_agg_trades -- CVD spot = tekanan beli/jual RIIL (bukan leverage), bandingkan dengan CVD futures. " +
+        "Default ringkas (CVD + 15 trade terakhir di teks); `detail: \"full\"` untuk array trade mentah lengkap.",
       inputSchema: {
         symbol: symbolSchema,
         limit: z.number().int().min(1).max(200).default(50).describe("Jumlah trade terakhir yang diambil, maksimal 200."),
+        detail: detailParam,
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ symbol, limit }) => {
+    async ({ symbol, limit, detail }) => {
       try {
         const trades = await binanceProxy.getSpotAggTrades(symbol, limit);
         if (trades.length === 0) {
@@ -407,13 +391,18 @@ export function registerSpotTools(server: McpServer): void {
           `| Waktu | Harga | Quantity | Sisi |`,
           `|---|---|---|---|`,
           rows,
-          ``,
-          `_CVD spot positif = demand beli riil dominan. Bandingkan dengan CVD binance_get_agg_trades (Futures) — kalau arahnya berlawanan, itu tanda spot dan futures sedang tidak selaras (salah satu leading, salah satu lagging)._`,
         ].join("\n");
 
         return {
           content: [{ type: "text", text }],
-          structuredContent: { symbol, cvd, buyVolume, sellVolume, buyPct },
+          structuredContent: {
+            symbol,
+            cvd,
+            buyVolume,
+            sellVolume,
+            buyPct,
+            ...(detail === "full" ? { trades } : {}),
+          },
         };
       } catch (err) {
         return errorResult(err);
@@ -428,10 +417,8 @@ export function registerSpotTools(server: McpServer): void {
     {
       title: "Harga Rata-Rata Bergerak (Spot)",
       description:
-        "Mengambil harga rata-rata bergerak (moving average price) terkini di pasar SPOT Binance, dihitung Binance " +
-        "sendiri dari trade beberapa menit terakhir ('mins' pada response, biasanya 5 menit). Lebih stabil dari harga " +
-        "last-trade sesaat (binance_get_spot_price) untuk kasus yang butuh referensi harga tidak gampang ter-spike " +
-        "oleh satu trade outlier — Binance sendiri memakai ini di beberapa perhitungan risiko internal mereka.",
+        "Harga rata-rata bergerak (moving average) SPOT terkini, dihitung Binance dari trade beberapa menit terakhir " +
+        "('mins', biasanya 5 menit). Lebih stabil dari last-trade sesaat (binance_get_spot_price).",
       inputSchema: { symbol: symbolSchema },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -443,8 +430,6 @@ export function registerSpotTools(server: McpServer): void {
           `# Harga Rata-Rata Bergerak (Spot) — ${symbol}`,
           ``,
           `- Harga Rata-Rata (${data.mins} menit terakhir): ${fmtPrice(price)}`,
-          ``,
-          `_Data dari Binance Spot native (avgPrice). Berguna sebagai referensi harga yang lebih stabil dari last-trade sesaat._`,
         ].join("\n");
         return {
           content: [{ type: "text", text }],
@@ -463,10 +448,9 @@ export function registerSpotTools(server: McpServer): void {
     {
       title: "Cek Status Listing Spot",
       description:
-        "Mengecek apakah sebuah pair BENAR-BENAR listed di Binance Spot dan status tradingnya saat ini (TRADING, " +
-        "BREAK, HALT, dll), LANGSUNG dari Binance native exchangeInfo. Gunakan ini SEBELUM memanggil tool Spot lain " +
-        "untuk pair yang belum pasti listing-nya (banyak pair Futures, terutama koin baru/kecil, TIDAK punya listing " +
-        "Spot sama sekali) — daripada menebak dari pesan error 'Invalid symbol' di tool lain.",
+        "Cek apakah sebuah pair BENAR-BENAR listed di Binance Spot + status trading (TRADING/BREAK/HALT), LANGSUNG " +
+        "dari exchangeInfo. Pakai SEBELUM tool Spot lain untuk pair yang belum pasti listing-nya, daripada menebak " +
+        "dari error 'Invalid symbol'.",
       inputSchema: { symbol: symbolSchema },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -478,7 +462,7 @@ export function registerSpotTools(server: McpServer): void {
             content: [
               {
                 type: "text",
-                text: `# Cek Listing Spot — ${symbol}\n\n**TIDAK LISTED** di Binance Spot. Pair ini kemungkinan besar futures-only (tidak punya pasangan trading di Spot).`,
+                text: `# Cek Listing Spot — ${symbol}\n\n**TIDAK LISTED** di Binance Spot. Pair ini kemungkinan besar futures-only.`,
               },
             ],
             structuredContent: { symbol, listed: false },
@@ -493,8 +477,6 @@ export function registerSpotTools(server: McpServer): void {
           `- Base Asset: ${info.baseAsset}`,
           `- Quote Asset: ${info.quoteAsset}`,
           `- Spot Trading Diizinkan: ${info.isSpotTradingAllowed ? "Ya" : "Tidak"}`,
-          ``,
-          `_Status selain "TRADING" (misal BREAK/HALT) berarti pair listed tapi order sedang tidak diproses normal._`,
         ].join("\n");
 
         return {

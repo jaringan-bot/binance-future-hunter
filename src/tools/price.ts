@@ -11,8 +11,11 @@ import {
   errorResult,
   parseTimeParam,
   computeRealizedVolatility,
+  detailParam,
 } from "../shared.js";
-import { summarizeKlines, classifyPriceBias } from "../toolHelpers.js";
+import { summarizeKlines, classifyPriceBias, truncateRows } from "../toolHelpers.js";
+
+const RECENT_CANDLES = 5;
 
 export function registerPriceTools(server: McpServer): void {
 
@@ -25,15 +28,10 @@ export function registerPriceTools(server: McpServer): void {
     {
       title: "Data Candlestick (Klines)",
       description:
-        "Candlestick OHLCV untuk sebuah pair per timeframe (native Binance, bukan Coinalyze — source of truth, presisi " +
-        "harga menyesuaikan magnitude pair). Buat nentuin bias arah (bullish/bearish/sideways), cari swing high/low, " +
-        "dan level psikologis buat estimasi zona SL/TP. " +
-        "Default (tanpa startTime/endTime) balikin candle TERBARU. Isi startTime buat narik histori jauh ke belakang " +
-        "(misal backtest grid) — Binance balikin candle MULAI dari startTime ke depan, maksimal `limit` candle/panggilan " +
-        "(maks 1500 Futures). Rentang >1500 candle: panggil berkali-kali sambil geser startTime ke closeTime candle " +
-        "terakhir (pagination manual). " +
-        "HEMAT TOKEN: default cuma balikin summary (bias, swing high/low, 15 candle terakhir) — array candle PENUH " +
-        "TIDAK disertakan kecuali `includeCandles: true` (500 candle penuh ≈14.000 token kalau selalu disertakan).",
+        "Candlestick OHLCV native Binance (source of truth, bukan Coinalyze). Balikin bias arah, swing high/low, " +
+        "harga terakhir. Isi startTime untuk histori jauh ke belakang (maks `limit` candle/panggilan, maks 1500). " +
+        "Default (`detail: summary`) cuma balikin ringkasan + 5 candle terakhir -- set `detail: \"full\"` atau " +
+        "`includeCandles: true` untuk array candle penuh.",
       inputSchema: {
         symbol: symbolSchema,
         interval: z
@@ -55,13 +53,13 @@ export function registerPriceTools(server: McpServer): void {
           .optional()
           .default(false)
           .describe(
-            "Sertakan array candle PENUH (semua field OHLCV per candle) di structuredContent -- default false biar hemat token. " +
-              "Set true kalau butuh proses data candle secara programatik (backtest, kalkulasi custom), bukan cuma baca ringkasan.",
+            "DEPRECATED, dipertahankan untuk kompatibilitas -- pakai `detail: \"full\"` sebagai gantinya. true = sama seperti detail:\"full\".",
           ),
+        detail: detailParam,
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ symbol, interval, limit, startTime, endTime, includeCandles }) => {
+    async ({ symbol, interval, limit, startTime, endTime, includeCandles, detail }) => {
       try {
         const startMs = parseTimeParam(startTime, "startTime");
         const endMs = parseTimeParam(endTime, "endTime");
@@ -70,6 +68,7 @@ export function registerPriceTools(server: McpServer): void {
           return { content: [{ type: "text", text: `Tidak ada data candle untuk ${symbol} @ ${interval}.` }] };
         }
 
+        const isFull = detail === "full" || includeCandles;
         const { candles, lastClose, changePct, bias, swingHigh, swingLow } = summarizeKlines(raw);
 
         const recent = candles.slice(-15);
@@ -104,7 +103,7 @@ export function registerPriceTools(server: McpServer): void {
             swingHigh,
             swingLow,
             lastClose,
-            ...(includeCandles ? { candles } : {}),
+            ...(isFull ? { candles } : { recent: candles.slice(-RECENT_CANDLES) }),
           },
         };
       } catch (err) {
@@ -120,10 +119,8 @@ export function registerPriceTools(server: McpServer): void {
     {
       title: "Bias Multi-Timeframe Sekaligus",
       description:
-        "Tool ringkas untuk langsung mendapatkan bias arah (Bullish/Bearish/Sideways) di 5 timeframe umum " +
-        "(1m, 5m, 15m, 1h, 1d) dalam satu panggilan, tanpa perlu memanggil binance_get_klines berulang kali " +
-        "(LANGSUNG dari Binance native, presisi harga menyesuaikan magnitude pair). " +
-        "Cocok untuk menjawab pertanyaan 'apa bias BTCUSDT di semua timeframe saat ini'.",
+        "Bias arah (Bullish/Bearish/Sideways) di 5 timeframe (1m, 5m, 15m, 1h, 1d) sekaligus, LANGSUNG dari Binance " +
+        "native -- ganti beberapa panggilan binance_get_klines manual. Cocok untuk 'apa bias BTCUSDT di semua timeframe'.",
       inputSchema: { symbol: symbolSchema },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -160,7 +157,7 @@ export function registerPriceTools(server: McpServer): void {
         let alignment: string;
         if (bullCount >= 4) alignment = "Mayoritas timeframe BULLISH — bias searah kuat ke atas.";
         else if (bearCount >= 4) alignment = "Mayoritas timeframe BEARISH — bias searah kuat ke bawah.";
-        else alignment = "Timeframe TIDAK selaras (mixed) — hati-hati, kemungkinan sedang konsolidasi/transisi, cocokkan strategi scalp vs swing dengan timeframe yang relevan.";
+        else alignment = "Timeframe TIDAK selaras (mixed) — kemungkinan konsolidasi/transisi.";
 
         const text = [
           `# Bias Multi-Timeframe — ${symbol}`,
@@ -172,7 +169,10 @@ export function registerPriceTools(server: McpServer): void {
           `**Kesimpulan**: ${alignment}`,
         ].join("\n");
 
-        return { content: [{ type: "text", text }] };
+        return {
+          content: [{ type: "text", text }],
+          structuredContent: { symbol, results, alignment },
+        };
       } catch (err) {
         return errorResult(err);
       }
@@ -186,13 +186,9 @@ export function registerPriceTools(server: McpServer): void {
     {
       title: "Realized Volatility (Historis)",
       description:
-        "Menghitung realized volatility (RV) historis untuk sebuah pair Binance Futures di dua timeframe " +
-        "(15 menit, ~24 jam terakhir; dan 1 jam, ~30 jam terakhir), LANGSUNG dari Binance native klines. " +
-        "RV dihitung dari log-return antar candle close (RV = sqrt(mean(log_return^2)) * sqrt(periode/tahun)), " +
-        "ditampilkan baik dalam bentuk annualized (%) maupun per-periode (%) supaya tidak menyesatkan untuk pair " +
-        "kecil yang volatil (angka annualized saja bisa terlihat ekstrem tapi tidak intuitif). " +
-        "RV tinggi menandakan range candle historis melebar dibanding biasanya — berguna untuk cross-check " +
-        "dengan input i_atrMult di indikator Pine Script Grid Advisor saat mengkalibrasi lebar grid range.",
+        "Realized volatility (RV) dari log-return close-to-close, dua timeframe (15m/~24 jam, 1h/~30 jam), " +
+        "LANGSUNG dari Binance native klines. Dikembalikan annualized (%) + per-periode (%) supaya tidak menyesatkan " +
+        "untuk pair kecil volatil. Berguna cross-check kalibrasi lebar grid (i_atrMult Grid Advisor).",
       inputSchema: { symbol: symbolSchema },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -217,12 +213,8 @@ export function registerPriceTools(server: McpServer): void {
           `| 15 Menit (~24 jam) | ${rv15m.annualizedPct.toFixed(2)}% | ${rv15m.periodPct.toFixed(4)}% | ${closes15m.length} |`,
           `| 1 Jam (~30 jam) | ${rv1h.annualizedPct.toFixed(2)}% | ${rv1h.periodPct.toFixed(4)}% | ${closes1h.length} |`,
           ``,
-          `**Interpretasi**: RV annualized tinggi menandakan range candle historis melebar dibanding biasanya — ` +
-            `gunakan angka per-periode untuk intuisi pergerakan riil per candle (annualized saja bisa terlihat ` +
-            `ekstrem untuk pair kecil yang volatil). Cross-check dengan i_atrMult di Grid Advisor Pine Script ` +
-            `saat mengkalibrasi lebar grid range.`,
-          ``,
-          `_Data LANGSUNG dari Binance native (klines). RV dihitung dari log-return close-to-close, bukan true range._`,
+          `_RV annualized tinggi = range candle melebar dibanding biasanya; pakai angka per-periode untuk intuisi ` +
+            `pergerakan riil per candle. Dihitung dari log-return close-to-close, bukan true range._`,
         ].join("\n");
 
         return {
@@ -248,9 +240,8 @@ export function registerPriceTools(server: McpServer): void {
     {
       title: "Statistik 24 Jam",
       description:
-        "Mengambil ringkasan statistik 24 jam: harga terakhir, perubahan %, high/low 24 jam, volume — LANGSUNG dari Binance " +
-        "native ticker/24hr (rolling window resmi Binance, bukan pendekatan dari 24 candle 1 jam seperti sebelumnya). " +
-        "Cocok sebagai overview cepat sebelum masuk ke analisis lebih dalam.",
+        "Ringkasan statistik 24 jam: harga terakhir, perubahan %, high/low, volume — LANGSUNG dari Binance native " +
+        "ticker/24hr (rolling window resmi). Overview cepat sebelum analisis lebih dalam.",
       inputSchema: { symbol: symbolSchema },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -272,10 +263,11 @@ export function registerPriceTools(server: McpServer): void {
           `- High 24 Jam: ${fmtPrice(highPrice)}`,
           `- Low 24 Jam: ${fmtPrice(lowPrice)}`,
           `- Volume: ${fmtNum(volume, 2)}`,
-          ``,
-          `_Data LANGSUNG dari Binance native (ticker/24hr — rolling window resmi, bukan pendekatan dari candle 1 jam)._`,
         ].join("\n");
-        return { content: [{ type: "text", text }] };
+        return {
+          content: [{ type: "text", text }],
+          structuredContent: { symbol, lastPrice, priceChangePercent, priceChange, highPrice, lowPrice, volume },
+        };
       } catch (err) {
         return errorResult(err);
       }
@@ -292,21 +284,20 @@ export function registerPriceTools(server: McpServer): void {
     {
       title: "Candlestick Mark Price",
       description:
-        "Candlestick dari MARK PRICE (harga acuan liquidation/funding), BUKAN dari harga transaksi (trade) seperti " +
-        "binance_get_klines. Field volume/jumlah trade/taker* di response akan selalu 0 karena tidak ada transaksi " +
-        "riil di belakang harga sintetis ini. " +
-        "PENTING: pakai tool ini untuk analisis pergerakan mark price (referensi liquidation price/funding), " +
-        "BUKAN untuk technical analysis harga pasar biasa — untuk itu pakai binance_get_klines.",
+        "Candlestick dari MARK PRICE (acuan liquidation/funding), BUKAN harga transaksi -- volume/trade count selalu " +
+        "0 (harga sintetis). Pakai binance_get_klines untuk TA harga pasar biasa. Default ringkas, `detail: \"full\"` " +
+        "untuk array candle penuh.",
       inputSchema: {
         symbol: symbolSchema,
         interval: z.enum(KLINE_INTERVAL_ENUM).describe("Timeframe candle: 1m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d"),
         limit: z.number().int().min(1).max(1500).default(100).describe("Jumlah candle yang diambil, maksimal 1500"),
         startTime: z.string().optional().describe('Waktu mulai (ISO 8601, contoh "2026-07-01T00:00:00Z") — opsional.'),
         endTime: z.string().optional().describe("Waktu akhir (ISO 8601) — opsional, dipakai bareng startTime."),
+        detail: detailParam,
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ symbol, interval, limit, startTime, endTime }) => {
+    async ({ symbol, interval, limit, startTime, endTime, detail }) => {
       try {
         const startMs = parseTimeParam(startTime, "startTime");
         const endMs = parseTimeParam(endTime, "endTime");
@@ -323,12 +314,20 @@ export function registerPriceTools(server: McpServer): void {
           `**Swing Low**: ${fmtPrice(swingLow)}`,
           `**Mark Price terakhir**: ${fmtPrice(lastClose)}`,
           ``,
-          `_Ini candle MARK PRICE (acuan liquidation/funding), bukan harga transaksi. Bandingkan dengan ` +
-            `binance_get_klines untuk melihat selisih mark price vs harga transaksi (basis)._`,
+          `_Candle MARK PRICE (acuan liquidation/funding), bukan harga transaksi._`,
         ].join("\n");
         return {
           content: [{ type: "text", text }],
-          structuredContent: { symbol, interval, bias, changePct, swingHigh, swingLow, lastClose },
+          structuredContent: {
+            symbol,
+            interval,
+            bias,
+            changePct,
+            swingHigh,
+            swingLow,
+            lastClose,
+            ...(detail === "full" ? { candles } : { recent: candles.slice(-RECENT_CANDLES) }),
+          },
         };
       } catch (err) {
         return errorResult(err);
@@ -346,20 +345,19 @@ export function registerPriceTools(server: McpServer): void {
     {
       title: "Candlestick Index Price",
       description:
-        "Candlestick dari INDEX PRICE (harga acuan blended dari beberapa exchange spot, dasar perhitungan premium " +
-        "index/funding rate), BUKAN dari harga transaksi (trade) Binance Futures. " +
-        "PENTING: parameter pakai `pair` (format TANPA suffix margin-asset, contoh \"BTCUSD\"), BUKAN `symbol` " +
-        "biasa (\"BTCUSDT\") — pair salah format akan error/kosong.",
+        "Candlestick dari INDEX PRICE (blended beberapa exchange spot, dasar premium index/funding), BUKAN harga " +
+        "transaksi Futures. PENTING: pakai `pair` TANPA suffix margin-asset (contoh \"BTCUSD\"), bukan `symbol` biasa.",
       inputSchema: {
         pair: pairSchema,
         interval: z.enum(KLINE_INTERVAL_ENUM).describe("Timeframe candle: 1m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d"),
         limit: z.number().int().min(1).max(1500).default(100).describe("Jumlah candle yang diambil, maksimal 1500"),
         startTime: z.string().optional().describe('Waktu mulai (ISO 8601, contoh "2026-07-01T00:00:00Z") — opsional.'),
         endTime: z.string().optional().describe("Waktu akhir (ISO 8601) — opsional, dipakai bareng startTime."),
+        detail: detailParam,
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ pair, interval, limit, startTime, endTime }) => {
+    async ({ pair, interval, limit, startTime, endTime, detail }) => {
       try {
         const startMs = parseTimeParam(startTime, "startTime");
         const endMs = parseTimeParam(endTime, "endTime");
@@ -376,11 +374,20 @@ export function registerPriceTools(server: McpServer): void {
           `**Swing Low**: ${fmtPrice(swingLow)}`,
           `**Index Price terakhir**: ${fmtPrice(lastClose)}`,
           ``,
-          `_Ini candle INDEX PRICE (blended dari beberapa exchange spot), dasar perhitungan premium index/funding rate._`,
+          `_Candle INDEX PRICE (blended dari beberapa exchange spot), dasar perhitungan premium index/funding rate._`,
         ].join("\n");
         return {
           content: [{ type: "text", text }],
-          structuredContent: { pair, interval, bias, changePct, swingHigh, swingLow, lastClose },
+          structuredContent: {
+            pair,
+            interval,
+            bias,
+            changePct,
+            swingHigh,
+            swingLow,
+            lastClose,
+            ...(detail === "full" ? { candles } : { recent: candles.slice(-RECENT_CANDLES) }),
+          },
         };
       } catch (err) {
         return errorResult(err);
@@ -398,21 +405,20 @@ export function registerPriceTools(server: McpServer): void {
     {
       title: "Candlestick Premium Index",
       description:
-        "Candlestick dari PREMIUM INDEX (selisih mark price vs index price, komponen utama perhitungan funding " +
-        "rate), BUKAN dari harga transaksi (trade). Premium index positif konsisten = funding cenderung positif " +
-        "(long bayar short), negatif konsisten = funding cenderung negatif. " +
-        "PENTING: nilai candle di sini adalah RASIO premium (bukan harga absolut) — jangan dibaca seperti candle " +
-        "harga biasa.",
+        "Candlestick dari PREMIUM INDEX (selisih mark vs index price, komponen utama funding rate). Nilai adalah " +
+        "RASIO premium (bukan harga absolut) -- jangan dibaca seperti candle harga biasa. Premium positif konsisten " +
+        "= funding cenderung positif.",
       inputSchema: {
         symbol: symbolSchema,
         interval: z.enum(KLINE_INTERVAL_ENUM).describe("Timeframe candle: 1m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d"),
         limit: z.number().int().min(1).max(1500).default(100).describe("Jumlah candle yang diambil, maksimal 1500"),
         startTime: z.string().optional().describe('Waktu mulai (ISO 8601, contoh "2026-07-01T00:00:00Z") — opsional.'),
         endTime: z.string().optional().describe("Waktu akhir (ISO 8601) — opsional, dipakai bareng startTime."),
+        detail: detailParam,
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ symbol, interval, limit, startTime, endTime }) => {
+    async ({ symbol, interval, limit, startTime, endTime, detail }) => {
       try {
         const startMs = parseTimeParam(startTime, "startTime");
         const endMs = parseTimeParam(endTime, "endTime");
@@ -429,13 +435,20 @@ export function registerPriceTools(server: McpServer): void {
           `**Premium terendah**: ${swingLow}`,
           `**Premium terakhir**: ${lastClose}`,
           ``,
-          `_Nilai di atas adalah RASIO premium (mark price vs index price), bukan harga absolut. Premium positif ` +
-            `konsisten cenderung mendorong funding rate positif (long bayar short), gunakan bersama ` +
-            `binance_get_funding_rate untuk konfirmasi._`,
+          `_RASIO premium (mark vs index price), bukan harga absolut. Kombinasikan dengan binance_get_funding_rate._`,
         ].join("\n");
         return {
           content: [{ type: "text", text }],
-          structuredContent: { symbol, interval, bias, changePct, swingHigh, swingLow, lastClose },
+          structuredContent: {
+            symbol,
+            interval,
+            bias,
+            changePct,
+            swingHigh,
+            swingLow,
+            lastClose,
+            ...(detail === "full" ? { candles } : { recent: candles.slice(-RECENT_CANDLES) }),
+          },
         };
       } catch (err) {
         return errorResult(err);
@@ -453,11 +466,9 @@ export function registerPriceTools(server: McpServer): void {
     {
       title: "Candlestick Continuous Contract",
       description:
-        "Candlestick untuk kontrak PERPETUAL/CURRENT_QUARTER/NEXT_QUARTER dari sebuah pair underlying, berguna " +
-        "membandingkan harga kontrak dated (quarterly) vs perpetual di pair yang sama. " +
-        "PENTING: parameter pakai `pair` (format TANPA suffix margin-asset, contoh \"BTCUSD\") + `contractType`, " +
-        "BUKAN `symbol` biasa. Kontrak CURRENT_QUARTER/NEXT_QUARTER TIDAK selalu tersedia untuk semua pair " +
-        "(cuma pair dengan listing dated contract).",
+        "Candlestick untuk kontrak PERPETUAL/CURRENT_QUARTER/NEXT_QUARTER dari pair underlying -- bandingkan harga " +
+        "dated vs perpetual. PENTING: pakai `pair` (TANPA suffix margin-asset, contoh \"BTCUSD\") + `contractType`, " +
+        "bukan `symbol` biasa. Kontrak dated tidak selalu tersedia untuk semua pair.",
       inputSchema: {
         pair: pairSchema,
         contractType: z.enum(CONTRACT_TYPE_ENUM).describe("Tipe kontrak: PERPETUAL, CURRENT_QUARTER, atau NEXT_QUARTER"),
@@ -465,10 +476,11 @@ export function registerPriceTools(server: McpServer): void {
         limit: z.number().int().min(1).max(1500).default(100).describe("Jumlah candle yang diambil, maksimal 1500"),
         startTime: z.string().optional().describe('Waktu mulai (ISO 8601, contoh "2026-07-01T00:00:00Z") — opsional.'),
         endTime: z.string().optional().describe("Waktu akhir (ISO 8601) — opsional, dipakai bareng startTime."),
+        detail: detailParam,
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ pair, contractType, interval, limit, startTime, endTime }) => {
+    async ({ pair, contractType, interval, limit, startTime, endTime, detail }) => {
       try {
         const startMs = parseTimeParam(startTime, "startTime");
         const endMs = parseTimeParam(endTime, "endTime");
@@ -491,7 +503,17 @@ export function registerPriceTools(server: McpServer): void {
         ].join("\n");
         return {
           content: [{ type: "text", text }],
-          structuredContent: { pair, contractType, interval, bias, changePct, swingHigh, swingLow, lastClose },
+          structuredContent: {
+            pair,
+            contractType,
+            interval,
+            bias,
+            changePct,
+            swingHigh,
+            swingLow,
+            lastClose,
+            ...(detail === "full" ? { candles } : { recent: candles.slice(-RECENT_CANDLES) }),
+          },
         };
       } catch (err) {
         return errorResult(err);
@@ -509,34 +531,34 @@ export function registerPriceTools(server: McpServer): void {
     {
       title: "Quarterly Contract Settlement Price",
       description:
-        "Histori delivery/settlement price untuk kontrak QUARTERLY sebuah pair underlying (harga final saat " +
-        "kontrak dated expire dan di-settle). " +
-        "PENTING: cuma relevan untuk pair yang punya listing kontrak QUARTERLY/dated (ada tanggal expiry) — TIDAK " +
-        "berlaku untuk kontrak PERPETUAL yang memang tidak pernah expire/settle. Parameter pakai `pair` " +
-        "(format TANPA suffix margin-asset, contoh \"BTCUSD\").",
-      inputSchema: { pair: pairSchema },
+        "Histori delivery/settlement price kontrak QUARTERLY (harga final saat kontrak dated expire). Cuma relevan " +
+        "untuk pair dengan listing quarterly/dated -- TIDAK berlaku untuk PERPETUAL. Pakai `pair` TANPA suffix margin-asset.",
+      inputSchema: { pair: pairSchema, detail: detailParam },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ pair }) => {
+    async ({ pair, detail }) => {
       try {
         const data = await binanceProxy.getQuarterlySettlementPriceNative(pair);
         if (data.length === 0) {
           return { content: [{ type: "text", text: `Tidak ada histori settlement price untuk ${pair} (kemungkinan tidak punya kontrak quarterly).` }] };
         }
-        const rows = data.map((d) => `| ${fmtTime(d.deliveryTime)} | ${fmtPrice(d.deliveryPrice)} |`).join("\n");
+        const { shown, totalCount, truncated } = truncateRows(data, 10);
+        const rows = shown.map((d) => `| ${fmtTime(d.deliveryTime)} | ${fmtPrice(d.deliveryPrice)} |`).join("\n");
         const text = [
           `# Quarterly Settlement Price — ${pair}`,
           ``,
+          truncated ? `_Menampilkan ${shown.length} terakhir dari ${totalCount} total (\`detail: "full"\` untuk semua)._` : ``,
           `| Waktu Delivery | Settlement Price |`,
           `|---|---|`,
           rows,
-          ``,
-          `_Cuma relevan untuk kontrak QUARTERLY (ada expiry), tidak berlaku untuk PERPETUAL. Gunakan ` +
-            `binance_get_continuous_klines untuk melihat pergerakan harga kontrak dated sebelum settlement._`,
         ].join("\n");
         return {
           content: [{ type: "text", text }],
-          structuredContent: { pair, settlements: data },
+          structuredContent: {
+            pair,
+            totalCount,
+            ...(detail === "full" ? { settlements: data } : { recent: shown }),
+          },
         };
       } catch (err) {
         return errorResult(err);

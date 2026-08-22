@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerSafeTool } from "../toolWrapper.js";
 import { fmtPct, fmtTime } from "../format.js";
-import { errorResult, SNAPSHOT_WATCHLIST } from "../shared.js";
+import { errorResult, SNAPSHOT_WATCHLIST, detailParam } from "../shared.js";
 import { queryMarketSnapshots } from "../d1Client.js";
 
 export function registerBasisHistoryTools(server: McpServer): void {
@@ -12,13 +12,10 @@ export function registerBasisHistoryTools(server: McpServer): void {
     {
       title: "Histori Basis Futures-vs-Spot (Time-Series)",
       description:
-        "Baca histori basis futures-vs-spot dari snapshot Cron Trigger tiap 5 menit (BUKAN panggilan live seperti " +
-        "binance_get_spot_price) -- dipakai untuk deteksi 'basis melebar lalu kembali dalam waktu singkat' " +
-        "(docs/mm_detection_framework.md Section 5.1) yang sebelumnya harus dicek manual berkali-kali. " +
-        `HANYA tersedia untuk watchlist tetap: ${SNAPSHOT_WATCHLIST.join(", ")} -- pair lain di luar itu tidak ` +
-        "di-snapshot cron sama sekali. Data mulai terisi bertahap setelah worker pertama kali deploy dengan fitur " +
-        "ini (butuh beberapa siklus 5 menit dulu sebelum histori berguna). Disimpan di D1 (bukan Workers KV lagi), " +
-        "belum ada pruning/retention -- row nambah terus seiring waktu.",
+        "Histori basis futures-vs-spot dari snapshot Cron tiap 5 menit (BUKAN live seperti binance_get_spot_price) -- " +
+        "deteksi 'basis melebar lalu kembali' (docs/mm_detection_framework.md Section 5.1). HANYA tersedia untuk " +
+        `watchlist tetap (${SNAPSHOT_WATCHLIST.length} pair). Default ringkas (current/avg/range + <=10 poin ` +
+        "terbaru); `detail: \"full\"` untuk semua snapshot.",
       inputSchema: {
         symbol: z
           .enum(SNAPSHOT_WATCHLIST)
@@ -30,10 +27,11 @@ export function registerBasisHistoryTools(server: McpServer): void {
           .max(24)
           .default(6)
           .describe("Rentang jam ke belakang yang mau dilihat"),
+        detail: detailParam,
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ symbol, hours }) => {
+    async ({ symbol, hours, detail }) => {
       try {
         const points = await queryMarketSnapshots(symbol, hours);
         if (points.length === 0) {
@@ -60,7 +58,8 @@ export function registerBasisHistoryTools(server: McpServer): void {
         const currentDeviation = Math.abs(current - avg);
         const revertedFromExtreme = maxDeviation > 0.0003 && currentDeviation < maxDeviation * 0.3;
 
-        const recent = points.slice(-20);
+        const recentN = detail === "full" ? points.length : 10;
+        const recent = points.slice(-recentN);
         const rows = recent.map((p) => `| ${fmtTime(p.timestamp)} | ${fmtPct(p.basis ?? 0, 4)} |`).join("\n");
 
         const text = [
@@ -70,19 +69,27 @@ export function registerBasisHistoryTools(server: McpServer): void {
           `- Rata-rata Window: ${fmtPct(avg, 4)}`,
           `- Range: ${fmtPct(min, 4)} s/d ${fmtPct(max, 4)}`,
           ``,
-          `**Indikasi**: ${revertedFromExtreme ? "Basis SEMPAT melebar jauh dari rata-rata lalu KEMBALI mendekat -- pola konsisten dengan basis arbitrage/hedging (docs/mm_detection_framework.md Section 5.1), tapi cross-check dulu dengan funding rate & OI di window waktu yang sama sebelum simpulkan." : "Belum ada pola 'melebar lalu kembali' yang jelas di window ini."}`,
+          `**Indikasi**: ${revertedFromExtreme ? "Basis SEMPAT melebar jauh dari rata-rata lalu KEMBALI mendekat (pola arbitrage/hedging, cross-check funding & OI)." : "Belum ada pola 'melebar lalu kembali' yang jelas."}`,
           ``,
           `## ${recent.length} Snapshot Terakhir`,
           `| Waktu | Basis |`,
           `|---|---|`,
           rows,
-          ``,
-          `_Snapshot tiap 5 menit dari Cron Trigger, disimpan di D1. Basis dihitung sama seperti binance_get_spot_price (mark price futures vs harga spot Binance)._`,
         ].join("\n");
 
         return {
           content: [{ type: "text", text }],
-          structuredContent: { symbol, hours, current, avg, min, max, revertedFromExtreme, pointCount: points.length },
+          structuredContent: {
+            symbol,
+            hours,
+            current,
+            avg,
+            min,
+            max,
+            revertedFromExtreme,
+            pointCount: points.length,
+            ...(detail === "full" ? { points } : { recent }),
+          },
         };
       } catch (err) {
         return errorResult(err);

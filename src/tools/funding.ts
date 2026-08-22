@@ -3,7 +3,7 @@ import { z } from "zod";
 import { registerSafeTool } from "../toolWrapper.js";
 import * as binanceProxy from "../binanceProxyClient.js";
 import { fmtPrice, fmtPct, fmtTime, trendDirection } from "../format.js";
-import { symbolSchema, PERIOD_ENUM, errorResult } from "../shared.js";
+import { symbolSchema, PERIOD_ENUM, errorResult, detailParam } from "../shared.js";
 import { getPairThreshold } from "./config.js";
 import { truncateRows } from "../toolHelpers.js";
 
@@ -19,17 +19,10 @@ export function registerFundingTools(server: McpServer): void {
     {
       title: "Ambil Funding Rate Terkini",
       description:
-        "Mengambil funding rate TERKINI untuk sebuah pair Binance Futures (native premiumIndex, source of truth — " +
-        "bukan Coinalyze), plus basis (deviasi mark vs index price) buat baca sentimen premium/discount futures vs spot. " +
-        "Interpretasi kontrarian: funding positif besar = long crowded (waspada long squeeze); negatif besar = short " +
-        "crowded (waspada short squeeze). Basis positif besar = futures premium (sentimen long agresif, funding " +
-        "biasanya menyusul naik); negatif besar = discount (sentimen short agresif); basis netral tapi funding ekstrem " +
-        "= funding lagging, potensi mean-revert. " +
-        "PERHATIAN: index price Binance rata-rata tertimbang beberapa exchange spot — noisy untuk pair kecil/baru " +
-        "listing (salah satu sumber bisa illikuid), interpretasikan hati-hati. " +
-        "Threshold crowded default ±0.03% funding / ±0.05% basis bisa dioverride per-pair lewat " +
-        "binance_set_pair_threshold (Workers KV) -- berguna untuk altcoin volatil yang 'normal range'-nya beda jauh " +
-        "dari BTC/ETH.",
+        "Funding rate TERKINI (native premiumIndex, source of truth) + basis (mark vs index price). Kontrarian: " +
+        "funding positif besar = long crowded (waspada long squeeze); negatif besar = short crowded. PENTING: index " +
+        "price rata-rata tertimbang beberapa exchange -- noisy untuk pair kecil/baru listing. Threshold default " +
+        "±0.03% funding/±0.05% basis, override per-pair via binance_set_pair_threshold.",
       inputSchema: { symbol: symbolSchema },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -113,9 +106,9 @@ export function registerFundingTools(server: McpServer): void {
     {
       title: "Histori Funding Rate",
       description:
-        "Mengambil histori funding rate (yang sudah settled) untuk melihat tren crowding leverage dari waktu ke waktu " +
-        "(LANGSUNG dari Binance native, bukan lewat Coinalyze — source of truth). Berguna untuk melihat apakah sentimen " +
-        "long/short sudah crowded dalam beberapa hari terakhir atau baru saja berubah.",
+        "Histori funding rate (sudah settled) untuk lihat tren crowding leverage dari waktu ke waktu, LANGSUNG dari " +
+        "Binance native. Default ringkas (rata-rata + tren + <=10 poin terbaru); `detail: \"full\"` untuk histori " +
+        "lengkap sesuai `limit`.",
       inputSchema: {
         symbol: symbolSchema,
         period: z
@@ -131,10 +124,11 @@ export function registerFundingTools(server: McpServer): void {
           .max(500)
           .default(30)
           .describe("Jumlah data poin histori yang diambil (default 30)"),
+        detail: detailParam,
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ symbol, limit }) => {
+    async ({ symbol, limit, detail }) => {
       try {
         const points = await binanceProxy.getFundingRateHistoryNative(symbol, limit);
         if (points.length === 0) {
@@ -163,11 +157,18 @@ export function registerFundingTools(server: McpServer): void {
           ``,
           `**Rata-rata funding**: ${fmtPct(avg, 4)}`,
           `**Tren**: ${direction} (dibandingkan data paling lama vs paling baru dalam window ini)`,
-          ``,
-          `_Data LANGSUNG dari Binance native (fundingRate history — sudah settled)._`,
         ].join("\n");
 
-        return { content: [{ type: "text", text }] };
+        return {
+          content: [{ type: "text", text }],
+          structuredContent: {
+            symbol,
+            avg,
+            direction,
+            pointCount: points.length,
+            ...(detail === "full" ? { points } : { recent: points.slice(-10) }),
+          },
+        };
       } catch (err) {
         return errorResult(err);
       }
@@ -187,11 +188,9 @@ export function registerFundingTools(server: McpServer): void {
     {
       title: "Scan Funding Rate Paling Ekstrem (Semua Pair)",
       description:
-        "Scan funding rate SEMUA pair Binance Futures sekaligus (1 call ke premiumIndex tanpa symbol, bukan loop " +
-        "per-pair — jauh lebih murah), lalu urutkan dan kembalikan pair paling crowded LONG (funding paling positif) " +
-        "dan paling crowded SHORT (funding paling negatif). Berguna untuk pertanyaan 'pair apa yang funding-nya " +
-        "paling ekstrem sekarang' tanpa perlu tau symbol spesifik duluan — komplemen dari binance_get_funding_rate " +
-        "yang perlu symbol. Threshold crowded sama dengan binance_get_funding_rate (±0.03%).",
+        "Scan funding rate SEMUA pair sekaligus (1 call premiumIndex tanpa symbol, bukan loop per-pair), urutkan " +
+        "pair paling crowded LONG dan SHORT. Komplemen binance_get_funding_rate (yang butuh symbol spesifik). " +
+        "Threshold crowded sama: ±0.03%.",
       inputSchema: {
         quoteFilter: z
           .string()

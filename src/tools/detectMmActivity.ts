@@ -268,15 +268,11 @@ export function registerMmDetectionTools(server: McpServer): void {
     {
       title: "Deteksi Aktivitas Market Maker / Whale (Composite Score)",
       description:
-        "Gabungkan 6 sinyal pasar (absorption, spoofing heuristic, stop-hunt heuristic, basis arbitrage, OI " +
-        "divergence, funding extreme) jadi SATU skor + tier (Weak/Moderate/Strong/Extreme) dalam 1 tool call -- " +
-        "ganti 5-6 tool call manual + reasoning Claude. INI BUKAN rekomendasi trading, cuma indikasi yang perlu " +
-        "diverifikasi manual. PENTING: skor spoofing & stop-hunt di sini heuristik dari 1 snapshot order " +
-        "book/klines (BUKAN true detection -- butuh 2 snapshot order book <3 detik dan data liquidation " +
-        "granular-harga yang belum tersedia di proxy ini), jadi confidence dua sinyal itu lebih rendah dari 4 " +
-        "sinyal lain. Basis arbitrage pakai z-score histori kalau symbol ada di watchlist tetap (ada histori di " +
-        "D1), fallback threshold sederhana untuk pair lain. Snapshot sinyal yang sama juga disimpan tiap 5 menit " +
-        "ke D1 untuk watchlist -- lihat binance_backtest_signal buat validasi empiris historis.",
+        "Gabungkan 6 sinyal (absorption, spoofing, stop-hunt, basis arbitrage, OI divergence, funding extreme) jadi " +
+        "1 skor + tier (Weak/Moderate/Strong/Extreme) -- ganti 5-6 tool call manual. BUKAN rekomendasi trading. " +
+        "PENTING: spoofing & stop-hunt heuristik 1-snapshot (confidence lebih rendah dari 4 sinyal lain) -- lihat " +
+        "docs/mm_detection_framework.md untuk batasan lengkap. Snapshot juga disimpan tiap 5 menit ke D1 " +
+        "(binance_backtest_signal untuk validasi empiris).",
       inputSchema: { symbol: symbolSchema },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -289,19 +285,23 @@ export function registerMmDetectionTools(server: McpServer): void {
           .filter(([, s]) => s.score >= 0.6)
           .map(([k]) => k);
 
+        // Bullet reasoning dibatasi ke sinyal AKTIF (skor >=0.6) saja, maks 6
+        // (jumlah sinyal maksimum yang ada) -- evidence LENGKAP semua 6 sinyal
+        // tetap reachable via structuredContent.signals, cuma teks yang dipangkas.
         const builder = new ToolResponseBuilder()
-          .header(`Deteksi Aktivitas MM/Whale — ${symbol}`)
-          .row("Tier", `${tier} (skor ${totalScore.toFixed(2)}/6)`)
-          .row("Sinyal Aktif", activeSignals.length > 0 ? activeSignals.join(", ") : "tidak ada");
+          .header(`${symbol} — MM/Whale Activity`)
+          .row("Tier", `${tier} (skor ${totalScore.toFixed(2)}/6)`);
 
-        for (const [name, s] of Object.entries(signals)) {
-          builder.subheader(name).row("Skor", s.score.toFixed(2)).interpretation("Evidence", s.evidence);
+        if (activeSignals.length > 0) {
+          for (const name of activeSignals.slice(0, 6)) {
+            builder.row(name, signals[name as keyof MmSignals].evidence);
+          }
+        } else {
+          builder.row("Sinyal Aktif", "tidak ada (semua skor <0.6)");
         }
 
         builder
-          .note(
-            "Ini BUKAN rekomendasi trading. Sinyal spoofing & stop-hunt heuristik dari 1 snapshot (confidence lebih rendah), sinyal lain (absorption, basis, OI divergence, funding) dari data resmi Binance real-time.",
-          )
+          .note("Bukan rekomendasi trading. Evidence lengkap 6 sinyal ada di structuredContent.signals.")
           .struct("symbol", symbol)
           .struct("tier", tier)
           .struct("totalScore", totalScore)

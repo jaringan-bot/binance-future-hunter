@@ -183,6 +183,35 @@ export function parseTimeParam(value: string | undefined, label: string): number
   return ms;
 }
 
+// Konvensi bersama untuk semua tool array/history-shaped (klines, agg_trades,
+// order_book_depth, open_interest_history, funding_rate_history, dst) --
+// default "summary" (metrik turunan + <=5-10 poin terbaru, BUKAN array
+// penuh), "full" balikin array/level mentah lengkap seperti behavior lama.
+// Ini SATU-SATUNYA perubahan default-behavior yang disengaja di seluruh
+// tool: nama param lama (mis. includeCandles) tetap ada, tidak dihapus/
+// diganti nama -- lihat docs/tool_response_reference.md untuk daftar lengkap
+// tool yang kena + cara balik ke perilaku lama (detail: "full").
+export const detailParam = z
+  .enum(["summary", "full"])
+  .optional()
+  .default("summary")
+  .describe(
+    "'summary' (default): metrik turunan + <=10 poin terbaru saja, HEMAT TOKEN. 'full': array/level mentah lengkap seperti sebelumnya. Lihat docs/tool_response_reference.md.",
+  );
+
+// Buang key bernilai null/undefined dari object structuredContent sebelum
+// di-return -- dipakai tool composite (§B) supaya field yang gak relevan
+// (mis. finalRun: null waktu leverage direject) gak ikut nge-bloat payload.
+// Cuma shallow (1 level) -- struktur nested tetap dipertahankan apa adanya,
+// caller yang panggil rekursif kalau perlu.
+export function dropNulls<T extends object>(obj: T): Partial<T> {
+  const out: Partial<T> = {};
+  for (const [k, v] of Object.entries(obj) as [keyof T, unknown][]) {
+    if (v !== null && v !== undefined) out[k] = v as T[keyof T];
+  }
+  return out;
+}
+
 export function errorResult(err: unknown) {
   const message =
     err instanceof coinalyze.CoinalyzeApiError

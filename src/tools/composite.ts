@@ -33,12 +33,9 @@ export function registerCompositeTools(server: McpServer): void {
     {
       title: "Analisis Ringkas Satu Pair (Composite)",
       description:
-        "Overview cepat satu pair dalam SATU tool call: funding rate & basis, tren OI 6 jam terakhir, tren top-trader " +
-        "positioning 4 jam terakhir, tren taker volume 4 jam terakhir, snapshot order book, dan bias harga dari 24 " +
-        "candle 1 jam -- internally manggil 6 tool sekaligus lewat Promise.all. Cocok untuk pertanyaan 'gimana kondisi " +
-        "pair X sekarang' tanpa perlu panggil tool satu-satu. Untuk histori lebih panjang atau detail per-sudut, tetap " +
-        "pakai tool individual (binance_get_open_interest_history, binance_get_klines, dst) -- ini snapshot ringkas, " +
-        "bukan pengganti analisis mendalam.",
+        "Overview 1 pair dalam SATU call: funding/basis, tren OI 6h, top-trader 4h, taker volume 4h, order book, " +
+        "bias harga 24 candle 1h -- 6 tool digabung lewat Promise.all. Untuk histori lebih panjang, pakai tool " +
+        "individual (binance_get_open_interest_history, dst).",
       inputSchema: { symbol: symbolSchema },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -95,57 +92,38 @@ export function registerCompositeTools(server: McpServer): void {
         } = summarizeKlines(klines);
 
         const text = [
-          `# Analisis Ringkas — ${symbol}`,
+          `# ${symbol} — Analisis Ringkas`,
+          `Funding ${fmtPct(fundingRate, 4)} (${fundingBias}) | Basis ${fmtPct(basis, 4)}`,
+          `OI 6h: ${oiTrend} ${oiChangePct >= 0 ? "+" : ""}${oiChangePct.toFixed(2)}%`,
+          `Top Trader 4h: ${topTraderLatest.toFixed(1)}% long (${topTraderTrend})`,
+          `Taker 4h: ${takerBias} (rasio ${fmtNum(takerLatest, 4)})`,
+          `Order Book: bid ${bestBid !== null ? fmtPrice(bestBid) : "N/A"} / ask ${bestAsk !== null ? fmtPrice(bestAsk) : "N/A"} (spread ${spreadPct !== null ? spreadPct.toFixed(4) : "N/A"}%)`,
+          `Price 24h@1h: ${priceBias} ${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}% (high ${fmtPrice(swingHigh)} / low ${fmtPrice(swingLow)} / last ${fmtPrice(lastClose)})`,
           ``,
-          `## Funding & Basis`,
-          `- Funding Rate: ${fmtPct(fundingRate, 4)} (${fundingBias})`,
-          `- Basis (mark vs index): ${fmtPct(basis, 4)}`,
-          ``,
-          `## Open Interest (6 jam terakhir)`,
-          `- Tren: ${oiTrend} (${oiChangePct >= 0 ? "+" : ""}${oiChangePct.toFixed(2)}%)`,
-          `- OI Terkini: ${fmtNum(oiValues[oiValues.length - 1] ?? 0, 2)}`,
-          ``,
-          `## Top Trader Positioning (4 jam terakhir, by size posisi)`,
-          `- Long Terkini: ${topTraderLatest.toFixed(2)}%`,
-          `- Tren: ${topTraderTrend}`,
-          ``,
-          `## Taker Volume (4 jam terakhir)`,
-          `- Rasio Buy/Sell Terkini: ${fmtNum(takerLatest, 4)} → ${takerBias}`,
-          ``,
-          `## Order Book (depth 20)`,
-          `- Best Bid: ${bestBid !== null ? fmtPrice(bestBid) : "N/A"} | Best Ask: ${bestAsk !== null ? fmtPrice(bestAsk) : "N/A"}`,
-          `- Spread: ${spreadPct !== null ? spreadPct.toFixed(4) : "N/A"}%`,
-          ``,
-          `## Price Action (24 candle @1h)`,
-          `- Bias: ${priceBias} (${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}%)`,
-          `- Swing High: ${fmtPrice(swingHigh)} | Swing Low: ${fmtPrice(swingLow)}`,
-          `- Harga Terakhir: ${fmtPrice(lastClose)}`,
-          ``,
-          `_Snapshot ringkas dari 6 tool sekaligus (funding, OI history, top trader ratio, taker volume, order book, klines). ` +
-            `Untuk histori lebih panjang atau detail lebih dalam per sudut, panggil tool individual yang relevan._`,
+          `_Snapshot ringkas 6 tool. Untuk histori/detail per-sudut, pakai tool individual._`,
         ].join("\n");
 
         return {
           content: [{ type: "text", text }],
           structuredContent: {
             symbol,
-            fundingRate,
+            funding: fundingRate,
             basis,
             fundingBias,
             oiTrend,
-            oiChangePct,
-            topTraderLatest,
-            topTraderTrend,
-            takerLatest,
+            oiChg: oiChangePct,
+            ttPct: topTraderLatest,
+            ttTrend: topTraderTrend,
+            takerRatio: takerLatest,
             takerBias,
             bestBid,
             bestAsk,
             spreadPct,
             priceBias,
-            changePct,
-            swingHigh,
-            swingLow,
-            lastClose,
+            chg: changePct,
+            high: swingHigh,
+            low: swingLow,
+            last: lastClose,
           },
         };
       } catch (err) {
@@ -267,10 +245,8 @@ export function registerCompositeTools(server: McpServer): void {
     {
       title: "Composite Index Symbol Information",
       description:
-        "Mengambil komposisi base asset (beserta bobot kuantitas/persentase) sebuah COMPOSITE INDEX symbol " +
-        "(mis. DEFIUSDT — index multi-aset, bukan pair single-asset biasa). " +
-        "PENTING: cuma relevan untuk symbol composite index — kebanyakan pair biasa (BTCUSDT, ETHUSDT, dst) TIDAK " +
-        "punya data ini dan akan balik kosong/error karena bukan composite index.",
+        "Komposisi base asset + bobot sebuah COMPOSITE INDEX symbol (mis. DEFIUSDT). PENTING: cuma relevan untuk " +
+        "symbol composite index -- pair biasa (BTCUSDT, dst) balik kosong/error.",
       inputSchema: {
         symbol: symbolSchema.optional().describe("Symbol composite index tertentu -- opsional, kosongkan untuk semua composite index."),
       },
@@ -314,12 +290,9 @@ export function registerCompositeTools(server: McpServer): void {
     {
       title: "Index Price Constituents",
       description:
-        "Mengambil daftar exchange spot + harga + bobot yang menyusun INDEX PRICE sebuah pair (dasar perhitungan " +
-        "index price yang dipakai binance_get_index_price_klines/premium index/funding rate). " +
-        "Berlaku untuk pair biasa (mis. BTCUSDT, ETHUSDT — index price-nya blended dari beberapa exchange spot " +
-        "seperti Binance/OKX/Coinbase/dst), BUKAN cuma untuk composite index symbol. " +
-        "Kalau harga di satu exchange menyimpang jauh dari yang lain, itu bisa jadi indikasi anomali data di " +
-        "exchange tersebut (bukan berarti index price Binance salah).",
+        "Daftar exchange spot + harga + bobot penyusun INDEX PRICE sebuah pair (dasar index_price_klines/premium " +
+        "index/funding rate). Berlaku untuk pair biasa, bukan cuma composite index. Harga menyimpang jauh di 1 " +
+        "exchange = indikasi anomali data di exchange itu.",
       inputSchema: { symbol: symbolSchema },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },

@@ -95,7 +95,7 @@ const CATALOG_METADATA: Record<string, CatalogMetadata> = {
   whalescope_full_pipeline: {
     category: "composite",
     tokenCost: "high",
-    useCase: "Decision chain penuh Grid Bot Futures (hard screen -> Tier-1 intel -> grid bounds -> risk sizing -> TRADE/WATCH/NO_TRADE) untuk 1-20 symbol sekaligus, plus parameter Grid Bot siap copy-paste",
+    useCase: "Decision chain penuh Grid Bot Futures (hard screen -> Tier-1 intel -> grid bounds -> risk -> keputusan) untuk 1-20 symbol",
     dependencies: ["funding", "oi", "ratios", "orderbook", "trades", "technical", "risk", "composite"],
   },
 };

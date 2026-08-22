@@ -3,7 +3,7 @@ import { z } from "zod";
 import { registerSafeTool } from "../toolWrapper.js";
 import * as binanceProxy from "../binanceProxyClient.js";
 import { fmtNum, fmtTime, trendDirection } from "../format.js";
-import { symbolSchema, FUTURES_DATA_PERIOD_ENUM, errorResult } from "../shared.js";
+import { symbolSchema, FUTURES_DATA_PERIOD_ENUM, errorResult, detailParam } from "../shared.js";
 import { truncateRows } from "../toolHelpers.js";
 
 export function registerRatiosTools(server: McpServer): void {
@@ -17,11 +17,10 @@ export function registerRatiosTools(server: McpServer): void {
     {
       title: "Long/Short Ratio",
       description:
-        "Mengambil rasio posisi long vs short agregat (semua akun/global) untuk sebuah pair Binance Futures, beserta tren dari " +
-        "waktu ke waktu (LANGSUNG dari Binance native globalLongShortAccountRatio, bukan lewat Coinalyze — source of truth). " +
-        "Ratio > 1 berarti lebih banyak/besar posisi long dibanding short. " +
-        "KETERBATASAN: ini rasio agregat BLENDED, BUKAN breakdown terpisah retail-vs-top-trader — untuk breakdown top-trader " +
-        "murni, pakai binance_get_top_trader_ratio.",
+        "Rasio posisi long vs short agregat (semua akun/global) + tren, LANGSUNG dari Binance native " +
+        "globalLongShortAccountRatio. Ratio > 1 = lebih banyak/besar posisi long. KETERBATASAN: rasio BLENDED, bukan " +
+        "breakdown top-trader (pakai binance_get_top_trader_ratio untuk itu). Default ringkas (snapshot + tren + " +
+        "<=10 poin terbaru); `detail: \"full\"` untuk histori lengkap.",
       inputSchema: {
         symbol: symbolSchema,
         period: z
@@ -29,10 +28,11 @@ export function registerRatiosTools(server: McpServer): void {
           .default("15m")
           .describe("Interval antar data poin: 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d"),
         limit: z.number().int().min(1).max(500).default(10).describe("Jumlah data poin terakhir"),
+        detail: detailParam,
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ symbol, period, limit }) => {
+    async ({ symbol, period, limit, detail }) => {
       try {
         const points = await binanceProxy.getGlobalAccountRatio(symbol, period, limit);
         if (points.length === 0) {
@@ -75,8 +75,6 @@ export function registerRatiosTools(server: McpServer): void {
           `| Waktu | Long % | Short % | Ratio |`,
           `|---|---|---|---|`,
           rows,
-          ``,
-          `_Ini rasio agregat semua trader (blended), bukan breakdown top-trader/whale terpisah dari retail — pakai binance_get_top_trader_ratio untuk breakdown murni. Data LANGSUNG dari Binance native._`,
         ].join("\n");
 
         return {
@@ -87,6 +85,8 @@ export function registerRatiosTools(server: McpServer): void {
             shortPct: latestShortPct,
             ratio: latestRatio,
             bias,
+            direction,
+            ...(detail === "full" ? { points } : { recent: points.slice(-10) }),
           },
         };
       } catch (err) {
@@ -107,16 +107,11 @@ export function registerRatiosTools(server: McpServer): void {
     {
       title: "Top-Trader Long/Short Ratio (Breakdown Murni)",
       description:
-        "Rasio long/short KHUSUS TOP TRADER (posisi/margin terbesar di Binance Futures), TERPISAH dari retail — " +
-        "LANGSUNG dari Binance (proxy relay, bukan Coinalyze), gak ter-blend akun kecil. Proxy lebih dekat ke 'whale " +
-        "positioning' dibanding binance_get_long_short_ratio (blended). mode='account' = breakdown JUMLAH akun top " +
-        "trader long vs short. mode='position' = breakdown SIZE POSISI (lebih relevan buat dominasi modal besar — " +
-        "1 akun besar tetap terhitung 1 di mode='account' tapi bobotnya besar di mode='position'). " +
-        "KETERBATASAN: threshold 'top trader' gak dipublikasikan Binance, data snapshot periodik (bukan tick-by-tick). " +
-        "Untuk deteksi divergence smart-money vs retail (docs/mm_detection_framework.md Section 4.2): JANGAN pakai " +
-        "threshold absolut universal (misal '15%') — tervalidasi data riil, pair likuid (BTC/ETH) cuma bergerak " +
-        "<2.5 poin/2 jam. Bandingkan RELATIF ke histori pendek pair sendiri (~5-30 hari tergantung resolusi, retensi " +
-        "Binance terbatas), fokus ARAH pergerakan berlawanan dari binance_get_long_short_ratio, bukan magnitude absolut.",
+        "Rasio long/short KHUSUS TOP TRADER, terpisah dari retail, LANGSUNG dari Binance (bukan Coinalyze). " +
+        "mode='account' = breakdown jumlah akun; mode='position' = breakdown size posisi (lebih relevan buat modal " +
+        "besar). KETERBATASAN: threshold 'top trader' tidak dipublikasikan Binance; bandingkan RELATIF ke histori " +
+        "pendek pair sendiri, jangan pakai threshold absolut universal (docs/mm_detection_framework.md Section 4.2). " +
+        "Default ringkas (snapshot + tren + <=10 poin terbaru); `detail: \"full\"` untuk histori lengkap.",
       inputSchema: {
         symbol: symbolSchema,
         mode: z
@@ -128,10 +123,11 @@ export function registerRatiosTools(server: McpServer): void {
           .default("1h")
           .describe("Interval antar data poin: 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d"),
         limit: z.number().int().min(1).max(500).default(10).describe("Jumlah data poin terakhir"),
+        detail: detailParam,
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ symbol, mode, period, limit }) => {
+    async ({ symbol, mode, period, limit, detail }) => {
       try {
         const points =
           mode === "position"
@@ -174,13 +170,20 @@ export function registerRatiosTools(server: McpServer): void {
           `| Waktu | Long % | Short % | Ratio |`,
           `|---|---|---|---|`,
           rows,
-          ``,
-          `_Data LANGSUNG dari Binance (bukan Coinalyze), khusus akun TOP TRADER — lebih dekat ke proxy whale dibanding binance_get_long_short_ratio yang blended semua trader. Threshold 'top trader' tidak dipublikasikan Binance secara pasti._`,
         ].join("\n");
 
         return {
           content: [{ type: "text", text }],
-          structuredContent: { symbol, mode, longPct, shortPct, ratio, bias },
+          structuredContent: {
+            symbol,
+            mode,
+            longPct,
+            shortPct,
+            ratio,
+            bias,
+            direction,
+            ...(detail === "full" ? { points } : { recent: points.slice(-10) }),
+          },
         };
       } catch (err) {
         return errorResult(err);

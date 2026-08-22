@@ -687,20 +687,11 @@ export function registerFullPipelineTools(server: McpServer): void {
     {
       title: "Full Pipeline: Hard Screen → Tier-1 Intel → Grid Bounds → Risk Sizing → Keputusan",
       description:
-        "Jalankan SELURUH decision chain Grid Bot Futures dalam SATU tool call, untuk satu atau banyak symbol " +
-        "sekaligus (maks 20): (1) hard screen (tradability, volume minimum, funding rate, regime breakout) -- " +
-        "symbol yang gagal LANGSUNG short-circuit ke NO_TRADE tanpa fetch lanjutan (hemat call proxy); (2) " +
-        "Tier-1 intelligence (smart money divergence, 6 skor MM composite, order book imbalance, CVD, regime " +
-        "1h+4h) digabung jadi rankingScore 0-100; (3) hitung bound grid Compass-equivalent (upper/lower/SL/TP/ " +
-        "gridCount/gridType) dari ATR + swing high/low, TANPA reverse-engineer algoritma Compass Binance yang " +
-        "tidak publik -- murni heuristik terdokumentasi; (4) capital-solve EXACT (bukan iteratif) buat tiap opsi " +
-        "leverage supaya rugi maksimum ke stop-loss persis sama dengan risk_usd, pilih leverage tertinggi yang " +
-        "SAFE/MODERATE dengan likuidasi aman; (5) keputusan akhir TRADE/WATCH/NO_TRADE plus parameter Grid Bot " +
-        "siap copy-paste. Menggantikan ~8 tool call manual (binance_market_regime x2, binance_analyze_smart_money, " +
-        "binance_detect_mm_activity, binance_get_order_book_imbalance, analyze_futures_grid_risk, dst.) + kalkulasi " +
-        "manual bound grid yang sebelumnya TIDAK ADA tool-nya sama sekali. Token cost TINGGI (banyak fetch per " +
-        "symbol) -- pakai untuk keputusan akhir, bukan eksplorasi awal (lihat binance_get_tool_catalog untuk tool " +
-        "lebih murah kalau cuma butuh 1-2 sinyal spesifik). Known limitations lengkap: docs/full_pipeline_framework.md.",
+        "Decision chain Grid Bot Futures penuh dalam 1 call, 1-20 symbol: hard screen -> Tier-1 intel (rankingScore " +
+        "0-100) -> grid bounds (ATR + swing high/low) -> capital-solve exact per leverage -> TRADE/WATCH/NO_TRADE " +
+        "+ parameter Grid Bot siap-pakai. Gantikan ~8 tool call manual. Token cost TINGGI -- pakai untuk keputusan " +
+        "akhir, bukan eksplorasi (binance_get_tool_catalog untuk tool lebih murah). Known limitations lengkap: " +
+        "docs/full_pipeline_framework.md.",
       inputSchema: fullPipelineInputSchema,
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -750,14 +741,14 @@ export function registerFullPipelineTools(server: McpServer): void {
           hardScreenRejected: sorted.filter((r) => !r.hardScreen.passed).length,
         };
 
+        // Text dibatasi ke ringkasan + ranking table + reasoning singkat buat
+        // kandidat TRADE saja (maks 5 symbol, 3 alasan/symbol) -- detail penuh
+        // per symbol (gridBotConfig, reasoning lengkap, hardScreen, tier1,
+        // risk.evaluatedLeverages) TETAP ada di structuredContent.results[i],
+        // gak ada yang hilang, cuma gak dinarasikan panjang di teks lagi.
         const builder = new ToolResponseBuilder()
           .header(`Full Pipeline — ${sorted.length} symbol`)
-          .row("Total", String(summary.total))
-          .row("TRADE", String(summary.traded))
-          .row("WATCH", String(summary.watch))
-          .row("NO_TRADE", String(summary.noTrade))
-          .row("Ditolak Hard Screen", String(summary.hardScreenRejected))
-          .subheader("Ringkasan")
+          .row("Total/TRADE/WATCH/NO_TRADE/Rejected", `${summary.total} / ${summary.traded} / ${summary.watch} / ${summary.noTrade} / ${summary.hardScreenRejected}`)
           .table(
             ["Symbol", "Keputusan", "Skor", "Leverage", "Lower", "Upper", "Grid Type"],
             sorted.map((r) => [
@@ -771,29 +762,12 @@ export function registerFullPipelineTools(server: McpServer): void {
             ]),
           );
 
-        for (const r of sorted) {
-          builder.subheader(`${r.symbol} — ${r.decision} (skor ${r.rankingScore.toFixed(1)}/100)`);
-
-          if (r.gridBotConfig) {
-            builder.table(
-              ["Parameter", "Nilai"],
-              [
-                ["Lower", fmtPrice(r.gridBotConfig.lower)],
-                ["Upper", fmtPrice(r.gridBotConfig.upper)],
-                ["Grid Count (N)", String(r.gridBotConfig.gridCount)],
-                ["Grid Type", r.gridBotConfig.gridType],
-                ["Leverage", r.gridBotConfig.leverage != null ? `${r.gridBotConfig.leverage}x` : "Tidak ada leverage yang layak"],
-                ["Margin Mode", r.gridBotConfig.marginMode],
-                ["Stop Loss", fmtPrice(r.gridBotConfig.stopLoss)],
-                ["Take Profit", fmtPrice(r.gridBotConfig.takeProfit)],
-              ],
-            );
-            builder.note(r.gridBotConfig.marginModeCaveat);
-          }
-
-          for (const reason of r.reasoning) builder.row("Alasan", reason);
-          if (r.error) builder.warning(`Error: ${r.error}`);
+        const tradeCandidates = sorted.filter((r) => r.decision === "TRADE").slice(0, 5);
+        for (const r of tradeCandidates) {
+          builder.row(r.symbol, r.reasoning.slice(0, 3).join(" | ") || "-");
         }
+
+        builder.note("Detail lengkap per symbol (gridBotConfig, reasoning, hardScreen, tier1, risk) ada di structuredContent.results[i].");
 
         const built = builder.build();
 

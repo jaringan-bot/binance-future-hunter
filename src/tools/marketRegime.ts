@@ -113,14 +113,10 @@ export function registerMarketRegimeTools(server: McpServer): void {
     {
       title: "Deteksi Regime Pasar (Trending/Ranging/Breakout/Accumulation/Distribution)",
       description:
-        "Klasifikasi kondisi pasar saat ini jadi salah satu dari 6 regime: TRENDING_UP, TRENDING_DOWN, RANGING, " +
-        "BREAKOUT, ACCUMULATION, DISTRIBUTION -- pakai ADX(14) dari klines timeframe pilihan (default 1 jam, bisa " +
-        "diganti lewat parameter interval, mis. '4h'), tren OI, CVD dari agg trades, dan rasio spike " +
-        "volatilitas/volume (10 candle terakhir vs 10 sebelumnya PADA TIMEFRAME YANG SAMA, BUKAN baseline " +
-        "historis persisten -- belum ada penyimpanan time-series general per pair). PENTING: memanggil tool ini " +
-        "dua kali dengan interval berbeda (mis. '1h' lalu '4h') menghasilkan DUA regime independen -- masing-masing " +
-        "punya window candle, ADX, OI-change, dan CVD sendiri, bukan derivasi satu dari yang lain. Cocok untuk " +
-        "kebutuhan multi-timeframe (mis. cross-check regime 1H vs 4H) tanpa perlu tool terpisah.",
+        "Klasifikasi 1 dari 6 regime (TRENDING_UP/DOWN, RANGING, BREAKOUT, ACCUMULATION, DISTRIBUTION) dari ADX(14), " +
+        "tren OI, CVD, dan spike volatilitas/volume (10 candle terakhir vs 10 sebelumnya PADA TIMEFRAME YANG SAMA, " +
+        "bukan baseline historis persisten). Panggil ulang dengan `interval` beda (mis. 1h lalu 4h) untuk regime " +
+        "independen per timeframe.",
       inputSchema: {
         symbol: symbolSchema,
         interval: z
@@ -128,9 +124,7 @@ export function registerMarketRegimeTools(server: McpServer): void {
           .default("1h")
           .describe(
             "Timeframe candle untuk analisis regime (ADX, OI-change, CVD, volatility/volume spike): 1m, 5m, 15m, " +
-              "30m, 1h, 2h, 4h, 6h, 12h, 1d. Default '1h' (perilaku lama, tidak ada breaking change). Gunakan '4h' " +
-              "untuk regime 4-jam yang sepenuhnya independen dari hasil 1h -- masing-masing dihitung dari window " +
-              "candle miliknya sendiri, bukan agregasi dari interval lain.",
+              "30m, 1h, 2h, 4h, 6h, 12h, 1d. Default '1h'.",
           ),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
