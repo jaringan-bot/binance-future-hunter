@@ -1,9 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { z } from "zod";
 import { registerSafeTool } from "../toolWrapper.js";
 import { fmtPct, fmtTime } from "../format.js";
-import { errorResult, SNAPSHOT_WATCHLIST, detailParam } from "../shared.js";
+import { errorResult, symbolSchema, SNAPSHOT_WATCHLIST, detailParam } from "../shared.js";
 import { queryMarketSnapshots } from "../d1Client.js";
+import { recordNonWatchlistQuery, MIN_QUERY_COUNT, TOP_N_NON_WATCHLIST } from "../queryFrequency.js";
+import { z } from "zod";
 
 export function registerBasisHistoryTools(server: McpServer): void {
   registerSafeTool(
@@ -13,13 +14,13 @@ export function registerBasisHistoryTools(server: McpServer): void {
       title: "Histori Basis Futures-vs-Spot (Time-Series)",
       description:
         "Histori basis futures-vs-spot dari snapshot Cron tiap 5 menit (BUKAN live seperti binance_get_spot_price) -- " +
-        "deteksi 'basis melebar lalu kembali' (docs/mm_detection_framework.md Section 5.1). HANYA tersedia untuk " +
-        `watchlist tetap (${SNAPSHOT_WATCHLIST.length} pair). Default ringkas (current/avg/range + <=10 poin ` +
-        "terbaru); `detail: \"full\"` untuk semua snapshot.",
+        "deteksi 'basis melebar lalu kembali' (docs/mm_detection_framework.md Section 5.1). Histori TERJAMIN untuk " +
+        `watchlist tetap (${SNAPSHOT_WATCHLIST.length} pair). Symbol LAIN juga bisa dipanggil (bukan lagi hard-reject) ` +
+        `-- histori mulai terkumpul best-effort begitu symbol itu di-query >=${MIN_QUERY_COUNT}x dalam ~24 jam DAN ` +
+        `masuk top-${TOP_N_NON_WATCHLIST} pair non-watchlist paling sering di-query (lihat src/queryFrequency.ts). ` +
+        "Default ringkas (current/avg/range + <=10 poin terbaru); `detail: \"full\"` untuk semua snapshot.",
       inputSchema: {
-        symbol: z
-          .enum(SNAPSHOT_WATCHLIST)
-          .describe(`Symbol dari watchlist tetap: ${SNAPSHOT_WATCHLIST.join(", ")}`),
+        symbol: symbolSchema,
         hours: z
           .number()
           .int()
@@ -33,16 +34,17 @@ export function registerBasisHistoryTools(server: McpServer): void {
     },
     async ({ symbol, hours, detail }) => {
       try {
+        const isWatchlist = (SNAPSHOT_WATCHLIST as readonly string[]).includes(symbol);
+        if (!isWatchlist) {
+          await recordNonWatchlistQuery(symbol);
+        }
+
         const points = await queryMarketSnapshots(symbol, hours);
         if (points.length === 0) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Belum ada data histori basis untuk ${symbol} dalam ${hours} jam terakhir. Cron snapshot jalan tiap 5 menit -- kalau fitur ini baru di-deploy, tunggu beberapa siklus dulu sebelum histori berguna.`,
-              },
-            ],
-          };
+          const text = isWatchlist
+            ? `Belum ada data histori basis untuk ${symbol} dalam ${hours} jam terakhir. Cron snapshot jalan tiap 5 menit -- kalau fitur ini baru di-deploy, tunggu beberapa siklus dulu sebelum histori berguna.`
+            : `Belum ada data histori basis untuk ${symbol} -- pair ini BUKAN bagian watchlist tetap (${SNAPSHOT_WATCHLIST.length} pair dengan histori terjamin). Histori pair non-watchlist cuma mulai terkumpul kalau di-query >=${MIN_QUERY_COUNT}x dalam ~24 jam DAN masuk top-${TOP_N_NON_WATCHLIST} pair non-watchlist paling sering di-query -- cron 5 menit baru snapshot pair ini setelah kondisi itu terpenuhi. Coba panggil tool ini beberapa kali lalu cek lagi nanti.`;
+          return { content: [{ type: "text", text }] };
         }
 
         const basisValues = points.map((p) => p.basis ?? 0);

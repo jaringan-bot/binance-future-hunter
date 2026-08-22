@@ -4,14 +4,15 @@
 //
 // ADAPTASI dari desain awal (dicatat di sini biar jujur soal batasannya,
 // konsisten sama gaya "keterbatasan yang jujur" di README):
-// - Spoofing & stop-hunt di desain awal butuh 2 snapshot order book <3 detik
-//   dan data liquidation. Proxy ini cuma 1 snapshot per call (latency proxy
-//   ~485ms bikin 2-snapshot gak reliable), dan liquidation history
-//   (dulu via Coinalyze) sudah dihapus total 2026-08-22 -- gak ada data
-//   liquidation sama sekali sekarang (lihat docs/mm_detection_framework.md
-//   Section 4.1). Jadi dua skor ini heuristik dari 1 snapshot order book /
-//   klines aja, BUKAN true detection -- ini didokumentasikan eksplisit di
-//   description tool & evidence text.
+// - Spoofing SEKARANG pakai 2 snapshot order book ~1.5 detik terpisah
+//   (fetchOrderBookDelta, orderbookDelta.ts) -- wall yang hilang/menyusut
+//   >70% TANPA harga crossing level itu = indikasi spoofing riil, bukan
+//   proxy 1-snapshot lagi.
+// - Stop-hunt sekarang simetris (cek upper DAN lower wick) + OI-drop proxy
+//   (reuse OI history fetch) buat proxy forced-liquidation cascade. TETAP
+//   tanpa data liquidation riil -- liquidation history (dulu via Coinalyze)
+//   sudah dihapus total 2026-08-22, WAF-blocked, gak tersedia lagi secara
+//   permanen (lihat docs/mm_detection_framework.md Section 4.1).
 // - Basis arbitrage pakai z-score kalau symbol ada di watchlist (SNAPSHOT_WATCHLIST,
 //   shared.ts) yang punya histori di D1 (market_snapshots), fallback ke
 //   threshold sederhana untuk pair lain.
@@ -29,6 +30,8 @@ import { queryMarketSnapshots } from "../d1Client.js";
 import { registerSafeTool } from "../toolWrapper.js";
 import { ToolResponseBuilder } from "../responseBuilder.js";
 import { fmtPct, fmtNum } from "../format.js";
+import { fetchOrderBookDelta, calculateSpoofingScoreFromDelta } from "./orderbookDelta.js";
+import { recordNonWatchlistQuery } from "../queryFrequency.js";
 
 export interface SignalScore {
   score: number; // 0-1
@@ -62,6 +65,11 @@ export function calculateAbsorptionScore(params: {
   return { score: 0.1, evidence: `Tidak ada pola absorption jelas (CVD buy ${cvdBuyPct.toFixed(1)}%, OI ${oiChangePct >= 0 ? "+" : ""}${oiChangePct.toFixed(2)}%).` };
 }
 
+// LEGACY 1-snapshot proxy -- computeMmSignals() TIDAK PAKAI ini lagi (lihat
+// calculateSpoofingScoreFromDelta di orderbookDelta.ts buat versi 2-snapshot
+// riil). Dipertahankan HANYA karena fullPipeline.ts sengaja reuse 1 snapshot
+// yang sudah di-fetch buat menghindari fetch tambahan di fan-out-nya (sampai
+// 20 symbol) -- upgrade fullPipeline.ts ke delta-based di luar scope ini.
 export function calculateSpoofingScore(params: {
   bestBidQty: number;
   bestAskQty: number;
@@ -81,6 +89,15 @@ export function calculateSpoofingScore(params: {
   return { score: 0.1, evidence: `Tidak ada anomali wall/spread signifikan (spread ${spreadPct.toFixed(4)}%).` };
 }
 
+// OI turun >=2% berbarengan sama wick candle ini = proxy forced-liquidation
+// cascade (mass stop-out ngurangin OI) -- BUKAN data liquidation riil (itu
+// TIDAK TERSEDIA, WAF-blocked, lihat docs/mm_detection_framework.md Section
+// 4.1). Cuma menaikkan confidence tier yang SUDAH lolos wick+body+reversal,
+// tidak pernah jadi syarat tunggal. -2% dipilih (bukan -3%) biar lebih
+// sensitif nangkep cascade parsial; TIDAK dikalibrasi ke data OI historis
+// riil -- kalau false-positive tinggi di produksi, naikkan ke -3%.
+const OI_DROP_THRESHOLD_PCT = -2;
+
 export function calculateStopHuntScore(params: {
   high: number;
   low: number;
@@ -88,21 +105,49 @@ export function calculateStopHuntScore(params: {
   close: number;
   prevOpen: number;
   prevClose: number;
+  oiDropPct?: number; // % perubahan OI window yang sama, REUSE dari oiHist fetch (computeMmSignals) -- bukan fetch baru
 }): SignalScore {
-  const { high, low, open, close, prevOpen, prevClose } = params;
+  const { high, low, open, close, prevOpen, prevClose, oiDropPct } = params;
   const range = high - low || 1;
-  const wickRatio = (high - Math.max(open, close)) / range;
+  const upperWickRatio = (high - Math.max(open, close)) / range;
+  const lowerWickRatio = (Math.min(open, close) - low) / range;
   const bodyRatio = Math.abs(close - open) / range;
-  const reversal = (close > open && prevClose < prevOpen) || (close < open && prevClose > prevOpen);
+
+  // Simetris: upper wick + reversal turun = hunt of longs; lower wick +
+  // reversal naik = hunt of shorts. Dulu cuma cek upperWickRatio, jadi
+  // downside stop-hunt gak pernah kedeteksi -- bug, sekarang fixed.
+  const upperHuntOfLongs = prevClose > prevOpen && close < open;
+  const lowerHuntOfShorts = prevClose < prevOpen && close > open;
+
+  let wickRatio: number;
+  let direction: "longs" | "shorts" | null = null;
+  if (upperHuntOfLongs && upperWickRatio >= lowerWickRatio) {
+    wickRatio = upperWickRatio;
+    direction = "longs";
+  } else if (lowerHuntOfShorts && lowerWickRatio > upperWickRatio) {
+    wickRatio = lowerWickRatio;
+    direction = "shorts";
+  } else {
+    wickRatio = Math.max(upperWickRatio, lowerWickRatio);
+  }
+  const reversal = direction !== null;
+  const dirLabel = direction === "longs" ? "hunt of longs (upper wick)" : direction === "shorts" ? "hunt of shorts (lower wick)" : "";
+  const hasOiDropProxy = oiDropPct !== undefined && oiDropPct <= OI_DROP_THRESHOLD_PCT;
+  const oiNote = hasOiDropProxy
+    ? ` OI turun ${oiDropPct!.toFixed(2)}% bersamaan (proxy forced-liquidation cascade -- BUKAN data liquidation riil, tidak tersedia/WAF-blocked).`
+    : "";
 
   if (wickRatio > 0.7 && bodyRatio < 0.2 && reversal) {
     return {
-      score: 0.8,
-      evidence: `Wick panjang (${(wickRatio * 100).toFixed(0)}% dari range) + body kecil + reversal candle -- pola stop-hunt klasik. Cuma dari klines (TANPA konfirmasi data liquidation, tool liquidation history sudah dihapus).`,
+      score: hasOiDropProxy ? 0.9 : 0.8,
+      evidence: `Wick panjang (${(wickRatio * 100).toFixed(0)}% dari range, ${dirLabel}) + body kecil + reversal candle -- pola stop-hunt klasik.${oiNote} Dari klines${hasOiDropProxy ? " + OI history" : ""}, TANPA data liquidation-by-price riil (tidak tersedia, WAF-blocked).`,
     };
   }
   if (wickRatio > 0.6) {
-    return { score: 0.5, evidence: `Wick cukup panjang (${(wickRatio * 100).toFixed(0)}% dari range) tapi belum full pola stop-hunt (butuh body kecil + reversal).` };
+    return {
+      score: hasOiDropProxy ? 0.6 : 0.5,
+      evidence: `Wick cukup panjang (${(wickRatio * 100).toFixed(0)}% dari range) tapi belum full pola stop-hunt (butuh body kecil + reversal searah wick).${oiNote}`,
+    };
   }
   return { score: 0.1, evidence: `Tidak ada wick signifikan (${(wickRatio * 100).toFixed(0)}% dari range).` };
 }
@@ -182,16 +227,20 @@ export interface MmSignals {
 }
 
 export async function computeMmSignals(symbol: string): Promise<MmSignals> {
-  const [orderBook, aggTrades, ticker24hr, oiCurrent, oiHist, funding, klines, threshold] = await Promise.all([
-    binanceProxy.getOrderBookDepth(symbol, 20),
+  // fetchOrderBookDelta butuh ~1-2 detik (2 fetch + jeda) -- dimulai DULUAN
+  // biar jalan PARALEL sama fetch independen lain di bawah, bukan
+  // diserialize di belakangnya (yang bakal bikin computeMmSignals total
+  // ~2x lebih lambat).
+  const orderBookDeltaPromise = fetchOrderBookDelta(symbol);
+  const [aggTrades, oiCurrent, oiHist, funding, klines, threshold] = await Promise.all([
     binanceProxy.getAggTrades(symbol, 100),
-    binanceProxy.getTicker24hrNative(symbol),
     binanceProxy.getOpenInterestNative(symbol),
     binanceProxy.getOpenInterestHistNative(symbol, "1h", 2),
     binanceProxy.getCurrentFundingRateNative(symbol),
     binanceProxy.getKlinesNative(symbol, "1h", 20),
     getPairThreshold(symbol),
   ]);
+  const orderBookDelta = await orderBookDeltaPromise;
 
   // Basis: butuh harga spot, TANPA harga spot skor basis fallback ke
   // "tidak tersedia" (0.1) dan dicatat di evidence -- banyak pair
@@ -229,16 +278,9 @@ export async function computeMmSignals(symbol: string): Promise<MmSignals> {
     }
   }
 
-  const bestBidQty = orderBook.bids[0] ? parseFloat(orderBook.bids[0][1]) : 0;
-  const bestAskQty = orderBook.asks[0] ? parseFloat(orderBook.asks[0][1]) : 0;
-  const bestBidPrice = orderBook.bids[0] ? parseFloat(orderBook.bids[0][0]) : 0;
-  const bestAskPrice = orderBook.asks[0] ? parseFloat(orderBook.asks[0][0]) : 0;
-  const spreadPct = bestBidPrice > 0 ? ((bestAskPrice - bestBidPrice) / bestBidPrice) * 100 : 0;
-  const volume24h = parseFloat(ticker24hr.volume);
-
   return {
     absorption: calculateAbsorptionScore({ cvdBuyPct: cvd.buyPct, priceChangePct, oiChangePct }),
-    spoofing: calculateSpoofingScore({ bestBidQty, bestAskQty, spreadPct, volume24h }),
+    spoofing: calculateSpoofingScoreFromDelta({ wallDeltas: orderBookDelta.wallDeltas }),
     stopHunt: lastCandle && prevCandle
       ? calculateStopHuntScore({
           high: lastCandle.high,
@@ -247,6 +289,10 @@ export async function computeMmSignals(symbol: string): Promise<MmSignals> {
           close: lastCandle.close,
           prevOpen: prevCandle.open,
           prevClose: prevCandle.close,
+          // REUSE oiChangePct (dihitung dari oiHist fetch buat oiDivergence)
+          // -- gak fetch baru. Window OI (getOpenInterestHistNative 1h x2)
+          // gak persis align ke candle wick ini, cuma approksimasi.
+          oiDropPct: oiChangePct,
         })
       : { score: 0.1, evidence: "Candle tidak cukup untuk analisis stop-hunt." },
     basisArb: calculateBasisArbScore({
@@ -272,14 +318,18 @@ export function registerMmDetectionTools(server: McpServer): void {
       description:
         "Gabungkan 6 sinyal (absorption, spoofing, stop-hunt, basis arbitrage, OI divergence, funding extreme) jadi " +
         "1 skor + tier (Weak/Moderate/Strong/Extreme) -- ganti 5-6 tool call manual. BUKAN rekomendasi trading. " +
-        "PENTING: spoofing & stop-hunt heuristik 1-snapshot (confidence lebih rendah dari 4 sinyal lain) -- lihat " +
-        "docs/mm_detection_framework.md untuk batasan lengkap. Snapshot juga disimpan tiap 5 menit ke D1 " +
-        "(binance_backtest_signal untuk validasi empiris).",
+        "Spoofing pakai 2-snapshot order book riil (~1-2 detik lebih lambat dari tool lain karenanya). Stop-hunt " +
+        "cek wick simetris + OI-drop proxy, TETAP TANPA data liquidation riil (tidak tersedia, WAF-blocked, " +
+        "permanen) -- lihat docs/mm_detection_framework.md untuk batasan lengkap. Snapshot juga disimpan tiap 5 " +
+        "menit ke D1 (binance_backtest_signal untuk validasi empiris).",
       inputSchema: { symbol: symbolSchema },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ symbol }) => {
       try {
+        if (!(SNAPSHOT_WATCHLIST as readonly string[]).includes(symbol)) {
+          await recordNonWatchlistQuery(symbol); // sudah self-swallow error, cuma belt-and-suspenders
+        }
         const signals = await computeMmSignals(symbol);
         const totalScore = Object.values(signals).reduce((sum, s) => sum + s.score, 0);
         const tier = classifyTier(totalScore);

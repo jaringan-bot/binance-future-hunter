@@ -7,6 +7,7 @@ import { SNAPSHOT_WATCHLIST } from "./shared.js";
 import { computeMmSignals } from "./tools/detectMmActivity.js";
 import { isAuthorized } from "./adminUsage.js";
 import { scanWallCandidates } from "./cron/wallTrackingCron.js";
+import { snapshotBasisForSymbol, snapshotNonWatchlistBasis } from "./cron/marketSnapshotCron.js";
 
 interface Env {
   PROXY_URL?: string;
@@ -217,7 +218,11 @@ export default {
   //   lewat computeMmSignals() (dibaca binance_backtest_signal). Satu symbol
   //   gagal TIDAK menggagalkan symbol lain (try/catch per-symbol, dan
   //   basis-snapshot terpisah dari signal-snapshot supaya satu gagal gak
-  //   gugurin yang lain). Prune request_log & wall_tracking juga di sini.
+  //   gugurin yang lain). SETELAH watchlist selesai, juga snapshot basis
+  //   (SAJA -- bukan computeMmSignals/signal_history) buat top-5 pair
+  //   NON-watchlist paling sering di-query (snapshotNonWatchlistBasis, lihat
+  //   src/queryFrequency.ts) -- TIDAK menyentuh wall tracking (cron 1-menit)
+  //   sama sekali. Prune request_log & wall_tracking juga di sini.
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     binanceProxy.setProxyConfig(
       env.PROXY_URL,
@@ -250,23 +255,7 @@ export default {
           const timestamp = Date.now();
 
           try {
-            const [spot, futures, oi] = await Promise.all([
-              binanceProxy.getSpotPrice(symbol),
-              binanceProxy.getCurrentFundingRateNative(symbol),
-              binanceProxy.getOpenInterestNative(symbol),
-            ]);
-            const spotPrice = parseFloat(spot.price);
-            const markPrice = parseFloat(futures.markPrice);
-            const basis = (markPrice - spotPrice) / spotPrice;
-            await d1Client.insertMarketSnapshot({
-              symbol,
-              timestamp,
-              spotPrice,
-              markPrice,
-              basis,
-              fundingRate: parseFloat(futures.lastFundingRate),
-              openInterest: parseFloat(oi.openInterest),
-            });
+            await snapshotBasisForSymbol(symbol, timestamp);
           } catch (err) {
             console.error(`[cron] gagal market snapshot ${symbol}:`, (err as Error)?.message ?? String(err));
           }
@@ -286,6 +275,14 @@ export default {
             console.error(`[cron] gagal signal snapshot ${symbol}:`, (err as Error)?.message ?? String(err));
           }
         }),
+      ),
+    );
+
+    // Basis snapshot (SAJA, bukan signal_history) buat pair NON-watchlist
+    // yang sering di-query -- lihat komentar di atas scheduled().
+    ctx.waitUntil(
+      snapshotNonWatchlistBasis().catch((err) =>
+        console.error("[cron] gagal snapshot non-watchlist:", (err as Error)?.message ?? String(err)),
       ),
     );
 

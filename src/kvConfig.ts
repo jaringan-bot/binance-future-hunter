@@ -32,6 +32,15 @@ export async function getJson<T>(key: string): Promise<T | null> {
   return JSON.parse(raw) as T;
 }
 
-export async function putJson(key: string, value: unknown): Promise<void> {
-  await requireKv().put(key, JSON.stringify(value));
+export async function putJson(key: string, value: unknown, options?: { expirationTtl?: number }): Promise<void> {
+  await requireKv().put(key, JSON.stringify(value), options);
+}
+
+// Cloudflare KV list() default page size (1000) TIDAK di-paginate di sini --
+// volume key yang diharapkan (query-frequency counter, lihat queryFrequency.ts)
+// jauh di bawah itu. Kalau suatu saat melebihi, hasil silently terpotong --
+// dicatat sebagai batasan yang diterima di skala saat ini, bukan bug.
+export async function listKeys(prefix: string): Promise<string[]> {
+  const result = await requireKv().list({ prefix });
+  return result.keys.map((k) => k.name);
 }

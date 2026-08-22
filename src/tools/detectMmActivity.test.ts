@@ -1,4 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { z } from "zod";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   calculateAbsorptionScore,
   calculateSpoofingScore,
@@ -7,7 +9,12 @@ import {
   calculateOiDivergenceScore,
   calculateFundingExtremeScore,
   classifyTier,
+  registerMmDetectionTools,
 } from "./detectMmActivity.js";
+import * as binanceProxy from "../binanceProxyClient.js";
+import * as orderbookDelta from "./orderbookDelta.js";
+import * as queryFrequency from "../queryFrequency.js";
+import type { KlineTuple } from "../binanceProxyClient.js";
 
 describe("calculateAbsorptionScore", () => {
   it("scores high when CVD buy-dominant, price flat, OI spiking", () => {
@@ -31,6 +38,9 @@ describe("calculateAbsorptionScore", () => {
   });
 });
 
+// LEGACY 1-snapshot function -- computeMmSignals() no longer calls this,
+// still used by fullPipeline.ts (see comment above the export). Delta-based
+// spoofing tests live in orderbookDelta.test.ts.
 describe("calculateSpoofingScore", () => {
   it("flags anomaly when spread wide and wall large relative to volume", () => {
     const result = calculateSpoofingScore({ bestBidQty: 1000, bestAskQty: 50, spreadPct: 0.3, volume24h: 50000 });
@@ -71,6 +81,31 @@ describe("calculateStopHuntScore", () => {
   it("doesn't divide by zero when high equals low", () => {
     const result = calculateStopHuntScore({ high: 100, low: 100, open: 100, close: 100, prevOpen: 100, prevClose: 100 });
     expect(Number.isFinite(result.score)).toBe(true);
+  });
+
+  it("scores high for long LOWER wick + small body + reversal up (downside hunt of shorts)", () => {
+    // lowerWickRatio = (99.5-85)/20 = 0.725 > 0.7; bodyRatio = 0.5/20 = 0.025 < 0.2;
+    // close(100) > open(99.5) is an up candle, previous was down (prevClose<prevOpen) -> reversal.
+    const result = calculateStopHuntScore({ high: 105, low: 85, open: 99.5, close: 100, prevOpen: 101, prevClose: 99 });
+    expect(result.score).toBe(0.8);
+    expect(result.evidence).toContain("hunt of shorts");
+  });
+
+  it("raises score to 0.9 when OI-drop proxy present alongside classic upper-wick stop-hunt", () => {
+    const result = calculateStopHuntScore({ high: 115, low: 95, open: 100.5, close: 100, prevOpen: 99, prevClose: 101, oiDropPct: -3 });
+    expect(result.score).toBe(0.9);
+    expect(result.evidence).toContain("forced-liquidation cascade");
+    expect(result.evidence).toContain("BUKAN data liquidation riil");
+  });
+
+  it("does not raise score when oiDropPct is above threshold (-1%, not a drop)", () => {
+    const result = calculateStopHuntScore({ high: 115, low: 95, open: 100.5, close: 100, prevOpen: 99, prevClose: 101, oiDropPct: -1 });
+    expect(result.score).toBe(0.8);
+  });
+
+  it("raises the moderate tier (0.5 -> 0.6) with OI-drop proxy when wick is long but not full pattern", () => {
+    const result = calculateStopHuntScore({ high: 115, low: 95, open: 100.5, close: 100, prevOpen: 101, prevClose: 99, oiDropPct: -5 });
+    expect(result.score).toBe(0.6);
   });
 });
 
@@ -146,5 +181,95 @@ describe("classifyTier", () => {
     expect(classifyTier(4.9)).toBe("Strong");
     expect(classifyTier(5)).toBe("Extreme");
     expect(classifyTier(6)).toBe("Extreme");
+  });
+});
+
+vi.mock("../binanceProxyClient.js", () => ({
+  getAggTrades: vi.fn(),
+  getOpenInterestNative: vi.fn(),
+  getOpenInterestHistNative: vi.fn(),
+  getCurrentFundingRateNative: vi.fn(),
+  getKlinesNative: vi.fn(),
+  getSpotPrice: vi.fn(),
+}));
+
+vi.mock("./orderbookDelta.js", () => ({
+  fetchOrderBookDelta: vi.fn(),
+  calculateSpoofingScoreFromDelta: vi.fn(() => ({ score: 0.1, evidence: "no spoofing" })),
+}));
+
+vi.mock("../queryFrequency.js", () => ({
+  recordNonWatchlistQuery: vi.fn(),
+}));
+
+type MmToolResult = { content: [{ type: "text"; text: string }]; structuredContent: Record<string, unknown> };
+type MmToolHandler = (args: { symbol: string }) => Promise<MmToolResult>;
+
+function makeKlines(count: number): KlineTuple[] {
+  return Array.from({ length: count }, (_, i) => {
+    const open = 100 + i * 0.1;
+    return [
+      i * 3_600_000,
+      open.toFixed(2),
+      (open + 1).toFixed(2),
+      (open - 1).toFixed(2),
+      (open + 0.5).toFixed(2),
+      String(1000 + i),
+      i * 3_600_000 + 3_599_999,
+      "0",
+      10,
+      "0",
+      "0",
+      "0",
+    ] as unknown as KlineTuple;
+  });
+}
+
+describe("binance_detect_mm_activity tool handler (query-frequency tracking, H3)", () => {
+  let handler: MmToolHandler;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+
+    vi.mocked(binanceProxy.getAggTrades).mockResolvedValue([]);
+    vi.mocked(binanceProxy.getOpenInterestNative).mockResolvedValue({ symbol: "X", openInterest: "1000", time: 0 });
+    vi.mocked(binanceProxy.getOpenInterestHistNative).mockResolvedValue([
+      { symbol: "X", sumOpenInterest: "1000", sumOpenInterestValue: "0", timestamp: 0 },
+    ]);
+    vi.mocked(binanceProxy.getCurrentFundingRateNative).mockResolvedValue({
+      symbol: "X",
+      markPrice: "100",
+      lastFundingRate: "0.0001",
+    } as never);
+    vi.mocked(binanceProxy.getKlinesNative).mockResolvedValue(makeKlines(20));
+    vi.mocked(binanceProxy.getSpotPrice).mockRejectedValue(new Error("no spot"));
+    vi.mocked(orderbookDelta.fetchOrderBookDelta).mockResolvedValue({
+      wallDeltas: [],
+      bestBid1: 100,
+      bestAsk1: 100.1,
+      bestBid2: 100,
+      bestAsk2: 100.1,
+      spreadPct1: 0.1,
+      spreadPct2: 0.1,
+    });
+
+    const fakeServer = {
+      registerTool: (_name: string, _config: unknown, cb: unknown) => {
+        handler = cb as MmToolHandler;
+        return {};
+      },
+    } as unknown as McpServer;
+
+    registerMmDetectionTools(fakeServer);
+  });
+
+  it("calls recordNonWatchlistQuery for a non-watchlist symbol", async () => {
+    await handler({ symbol: "PEPEUSDT" });
+    expect(queryFrequency.recordNonWatchlistQuery).toHaveBeenCalledWith("PEPEUSDT");
+  });
+
+  it("does not call recordNonWatchlistQuery for a watchlist symbol", async () => {
+    await handler({ symbol: "BTCUSDT" });
+    expect(queryFrequency.recordNonWatchlistQuery).not.toHaveBeenCalled();
   });
 });

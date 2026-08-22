@@ -91,39 +91,43 @@
 | **Extreme imbalance at depth 5-10** not followed by price movement | MM is holding the price |
 | **Spread suddenly widens** then returns to normal within seconds | MM withdrawing liquidity |
 
+> ✅ **Update 2026-08-22: now automated via `binance_get_orderbook_delta`.** This tool takes 2 order book snapshots with an EXPLICIT gap (default 1500ms, configurable 500-5000ms) — not back-to-back polling — and compares walls (qty ≥2x same-side median) between them: a wall that disappears/shrinks >70% WITHOUT the opposite side actually trading through that price level = a real spoofing signal. Also used internally by `binance_detect_mm_activity` (see Section 11). See Section 3.2 for why this explicit gap avoids the latency-variance problem that previously ruled this approach out.
+
 ---
 
-### 3.2 Order Book Refresh Rate Anomaly — *Low Confidence*
+### 3.2 Order Book Refresh Rate Anomaly — *now Medium-High Confidence via `binance_get_orderbook_delta`*
 
 **Tools used:**
-- `binance_get_order_book_depth`
+- `binance_get_order_book_depth` (single snapshot, manual)
+- `binance_get_orderbook_delta` (2-snapshot, automated — see below)
 
 > ⚠️ **Technical limitation (validated):**
 > - Per-call latency varies significantly: **298-898ms** (average ~485ms) through the worker→Vercel→Binance proxy chain.
-> - 2 sequential calls total **~1,788ms** — right at the edge of "1-2 seconds," and can take longer under poor network conditions.
-> - **Sequential polling to detect "refresh rate" is not reliable** — the latency variance is too large to distinguish market changes from network noise.
+> - Because of that, detecting "refresh rate" via BACK-TO-BACK polling (no gap) is genuinely unreliable — the latency variance is too large to distinguish market changes from pure network-timing noise.
 
-**Detection criteria (single snapshot only):**
+**Detection criteria (2-snapshot, via `binance_get_orderbook_delta`):**
 
 | Signal | Interpretation |
 |--------|-------------|
-| **Single-snapshot anomaly**: a wall appears at an unusual level (far from mid-price) with disproportionate volume | Possible spoofing — needs confirmation from other signals (CVD, OI) |
+| **Wall disappears/shrinks >70%** between 2 snapshots WITHOUT the opposite side actually trading through that price level | Spoofing — the order was pulled, not executed |
+| **Wall disappears AND the opposite side trades through that price level** | Genuine execution (price actually moved through the level), NOT spoofing |
+| **Single-snapshot anomaly** (`binance_get_order_book_depth`): a wall at an unusual level, disproportionate volume | Possible spoofing — still needs confirmation from other signals if it's just 1 snapshot |
 
-> 💡 **Recommendation:** Don't build detection based on sequential snapshot comparison via a regular MCP tool call. Focus on single-snapshot analysis + cross-confirmation with other tools.
+> 💡 **Why an EXPLICIT gap (default 1500ms) solves the latency-variance problem:** the earlier recommendation ("don't build detection on sequential snapshot comparison") assumed 2 calls made back-to-back with NO gap, where the 298-898ms latency variance made the actual time between snapshots unpredictable (could be 300ms, could be 900ms — a large relative difference). With an explicit 1500ms gap deliberately awaited BETWEEN the 2 fetches, the per-call latency variance (~600ms max) becomes small relative to the gap itself (~1500ms) — the time between snapshots stays consistently ~1.5-2 seconds, long enough to catch typical wall-pulling (usually seconds) but not just network noise. **Trade-off**: this tool is automatically ~1-2 seconds slower than the single-snapshot tools.
 
-> ❌ **WebSocket: NOT AVAILABLE** in WhaleScope MCP. All 22 tools are discrete REST request/response. Real-time detection would require a separate stack outside this project.
+> ❌ **WebSocket: NOT AVAILABLE** in WhaleScope MCP. All tools are discrete REST request/response. Sub-second real-time detection would require a separate stack outside this project.
 
 ---
 
 ## 4. Stop Hunt Signals
 
-### 4.1 Liquidation Cluster (Time-based) Reversal — **REMOVED (2026-08-22)**
+### 4.1 Liquidation Cluster (Time-based) Reversal — **PERMANENTLY REMOVED (2026-08-22)**
 
-> ⚠️ **This section no longer applies.** `binance_get_liquidation_history` (the only liquidation data source, via Coinalyze) was removed — Binance has no public market-wide REST endpoint for this, and the real-time WebSocket route hits the same WAF block as `fapi.binance.com` (tested via a Durable Object, see
-> [`docs/superpowers/specs/2026-08-11-realtime-liquidation-stream-design.md`](superpowers/specs/2026-08-11-realtime-liquidation-stream-design.md)).
-> A fix needs a paid always-on relay (~$5-20/month), not built yet.
+> ⚠️ **This section no longer applies, and the status is FINAL — not "not built yet."** `binance_get_liquidation_history` (the only liquidation data source, via Coinalyze) was removed — Binance has no public market-wide REST endpoint for this, and the real-time WebSocket route (`!forceOrder@arr`) hits the same WAF block as `fapi.binance.com`, confirmed independently **3 times** (2026-08-11, 2026-08-12, and 2026-08-22) via real `wrangler deploy` spike tests, see
+> [`docs/superpowers/specs/2026-08-11-realtime-liquidation-stream-design.md`](superpowers/specs/2026-08-11-realtime-liquidation-stream-design.md).
+> The only fix (a paid always-on relay, ~$5-20/month, outside Cloudflare) **has been explicitly declined by the user** — real liquidation-by-price data will NOT be available in this project unless that decision changes. Don't suggest it again unless asked.
 >
-> The `stopHunt` signal in `binance_detect_mm_activity` still runs but always at **Low** confidence — from `klines` alone (long wick + small body + reversal), WITHOUT liquidation confirmation. See Section 8/9 below.
+> **Update 2026-08-22 — permanent mitigation via an OI-drop proxy:** the `stopHunt` signal in `binance_detect_mm_activity` now (1) checks the wick SYMMETRICALLY — upper wick (hunt of longs) AND lower wick (hunt of shorts); it used to only check the upper wick (a bug — downside stop-hunts were never detected), and (2) uses an **OI-drop proxy**: if open interest drops ≥2% coinciding with that wick candle (REUSING the OI-history fetch already made for the `oiDivergence` signal, not a new fetch), that's treated as a proxy for a forced-liquidation cascade (mass stop-outs reduce OI) and raises the confidence tier (0.8→0.9, 0.5→0.6). This is **NOT real liquidation data** — just an OI-drop + wick-candle correlation, STILL WITHOUT confirmation from actual liquidation-by-price data. See Section 8/11 below.
 
 ---
 
@@ -177,7 +181,7 @@
 | **Extremely positive funding rate + rising OI** | MM possibly shorting futures while buying spot (hedged) |
 | **Futures CVD and Spot CVD move in opposite directions** | Leverage pressure and real demand aren't aligned |
 
-> ⚠️ **Practical note:** `binance_get_spot_price` and `binance_get_funding_rate` only give a point-in-time SNAPSHOT — there's NO basis time-series history tool. Detecting "basis widens then reverts" must be done manually: call repeatedly and log the basis over time yourself.
+> ⚠️ **Practical note:** `binance_get_spot_price` and `binance_get_funding_rate` only give a point-in-time SNAPSHOT — not a time-series. For history, use `binance_get_basis_history` (D1, 5-minute cron snapshot): ALWAYS available for the 50-pair fixed watchlist; for other pairs, best-effort — history starts accumulating once that pair is queried ≥3x within ~24h AND ranks in the top-5 most-queried non-watchlist pairs (see `src/queryFrequency.ts`). Outside that, it's still manual: call repeatedly and log the basis over time yourself.
 
 ---
 
@@ -203,8 +207,9 @@
 │  STEP 0: Check spot listing (binance_check_spot_listing)      │
 │  → If futures-only, skip Step 4 (basis arb N/A)                │
 ├─────────────────────────────────────────────────────────────┤
-│  STEP 1: Check order book depth (single snapshot)               │
-│  → Any unusual wall?                                            │
+│  STEP 1: Check order book depth (single snapshot), OR           │
+│  binance_get_orderbook_delta (2-snapshot, real spoofing)         │
+│  → Any unusual wall / wall gone without price crossing it?       │
 ├─────────────────────────────────────────────────────────────┤
 │  STEP 2: Cross-check agg trades + CVD (BOTH futures and spot)  │
 │  → Is the wall being absorbed or pulled? Do futures/spot CVD    │
@@ -214,10 +219,11 @@
 │  → Any SHARP (not gradual) change in the derivative?             │
 ├─────────────────────────────────────────────────────────────┤
 │  STEP 4: Validate spot basis (skip if Step 0 = futures-only)    │
-│  → Any arbitrage activity? (manual repeated snapshots)          │
+│  → binance_get_basis_history (watchlist always, other pairs      │
+│  best-effort) or manual repeated snapshots                       │
 ├─────────────────────────────────────────────────────────────┤
-│  STEP 5: [REMOVED] used to check liquidation history + klines,  │
-│  now klines only (long wick), NO liquidation confirmation       │
+│  STEP 5: Klines (symmetric wick) + OI-drop proxy, STILL NO      │
+│  real liquidation data (permanently removed, WAF-blocked)        │
 ├─────────────────────────────────────────────────────────────┤
 │  STEP 6: Cross-check top trader ratio                            │
 │  → Moving opposite to the blended ratio? (baseline from that     │
@@ -256,6 +262,7 @@
 | `binance_check_spot_listing` | Prerequisite for Section 5 | — |
 | `binance_get_order_book_depth` | Spoofing, absorption, liquidity withdrawal | 298-898ms latency/call, can't detect real-time refresh rate |
 | `binance_get_order_book_imbalance` | Imbalance manipulation, price holding | Single snapshot, no history |
+| `binance_get_orderbook_delta` | Real spoofing via 2-snapshot delta (wall gone without price crossing it) | Adds ~1-2s latency/call (explicit 1500ms default gap between the 2 fetches) |
 | `binance_get_agg_trades` | CVD divergence (futures), large trade execution | — |
 | `binance_get_spot_agg_trades` | Real CVD (spot), leverage vs. real-demand comparison | — |
 | `binance_get_open_interest` | Position building, post-liquidation recovery | — |
@@ -266,7 +273,7 @@
 | `binance_get_funding_rate` | Funding manipulation, scheduled rebalancing | — |
 | `binance_get_funding_rate_history` | Funding pattern analysis | — |
 | `binance_get_klines` | Wick analysis, reversal confirmation, price mapping | — |
-| `binance_detect_mm_activity` | ALL 6 signals above at once, automated + scored (see Section 11) | Spoofing & stop-hunt are 1-snapshot heuristics, lower confidence than the other 4 signals |
+| `binance_detect_mm_activity` | ALL 6 signals above at once, automated + scored (see Section 11) | Spoofing is now real 2-snapshot (~1-2s slower). Stop-hunt is symmetric + OI-drop proxy, STILL no real liquidation data (permanently removed) |
 | `binance_backtest_signal` | Empirically validates `binance_detect_mm_activity`'s historical scores (win rate/avg return) | Forward return computed on-demand from klines, not a simulation of real execution; fixed 50-pair watchlist only |
 
 ---
@@ -281,7 +288,7 @@ This framework **does not prove** the presence of a market maker definitively �
 3. **Market context matters** — MM signals are more valid during low volume/consolidation areas.
 4. **False positives exist** — a news event or a large retail whale can trigger similar signals.
 5. **Calibrate per pair** — top-trader ratio thresholds must be built from that pair's own historical data (~5-30 days, depending on resolution), not a universal number.
-6. **Know the technical limitations** — 300-900ms latency/call, no liquidation data at all (tool removed, see Section 4.1), limited top-trader ratio historical retention, real-time refresh-rate detection not feasible via REST tool calls, no WebSocket available.
+6. **Know the technical limitations** — 300-900ms latency/call, no liquidation data at all (permanently removed, see Section 4.1; the OI-drop proxy is the best available mitigation), limited top-trader ratio historical retention, sub-second real-time detection not feasible, no WebSocket available. 2-snapshot spoofing (`binance_get_orderbook_delta`) is NOW available but adds ~1-2s latency.
 
 ---
 
@@ -337,15 +344,15 @@ checklist**, don't conflate them:
 | Granularity | Yes/no checklist (0-6 discrete) | Continuous score per signal (0-1) |
 | Signal count | 6 (order book, CVD, OI, basis, liquidation+klines, top trader) | 6 but DIFFERENT composition (see mapping below) |
 | Tier | Weak(1-2)/Moderate(3-4)/Strong(5-6) | Weak(<2)/Moderate(<3.5)/Strong(<5)/Extreme(≥5) |
-| Liquidation | Section 4.1 — **removed**, `binance_get_liquidation_history` no longer exists | NOT used — stop-hunt comes from `klines` alone (see limitations below) |
+| Liquidation | Section 4.1 — **permanently removed**, `binance_get_liquidation_history` no longer exists | NOT used — stop-hunt comes from `klines` (symmetric wick) + an OI-drop proxy (see limitations below) |
 
 ### Automated signal → manual section mapping
 
 | Signal (`src/tools/detectMmActivity.ts`) | Related section | Formula summary | Confidence |
 |---|---|---|---|
 | `absorption` | 2.1 Order Book Absorption | Dominant CVD buy% (>60%) + flat price (\|Δ\|<0.5%) + sharp OI increase (>3%) → score 0.7-1.0. CVD buy% (>55%) + falling price → 0.5 (weak). Otherwise → 0.1 | **Medium** — uses CVD+OI+price (official Binance data), BUT only a single klines snapshot window, not a spot-CVD cross-check like the manual Section 2.1 |
-| `spoofing` | 3.1 Wall Pull / Spoofing | Spread >0.2% + largest wall >1% of 24h volume → 0.6. Otherwise → 0.1 | **Low** — only 1 order-book snapshot (not the 2 snapshots <3 seconds apart that Section 3.1 calls for; see Section 10 #2, proxy latency of 298-898ms makes that unreliable). A wall-vs-volume heuristic, NOT true spoofing detection |
-| `stopHunt` | 4.1 Liquidation Cluster Reversal (removed) | Wick >70% of range + body <20% + reversal candle → 0.8. Wick >60% alone → 0.5. Otherwise → 0.1 | **Low** — from `klines` ALONE (wick+reversal), WITHOUT liquidation confirmation (`binance_get_liquidation_history` no longer exists, see Section 4.1) |
+| `spoofing` | 3.1 Wall Pull / Spoofing | 2 order-book snapshots ~1.5s apart (internal `binance_get_orderbook_delta`). A wall (qty ≥2x median) that disappears/shrinks >70% WITHOUT the opposite side trading through that price level → 0.9 (the LARGEST wall was spoofed) or 0.5 (a secondary wall). Otherwise → 0.1 | **High** (largest wall spoofed) / **Medium** (secondary wall) — now real 2-snapshot detection, no longer a 1-snapshot proxy (see Section 3.1/3.2, `src/tools/orderbookDelta.ts`) |
+| `stopHunt` | 4.1 Liquidation Cluster Reversal (permanently removed) | Symmetric wick (upper=hunt of longs OR lower=hunt of shorts, used to be upper-only — a bug) >70% of range + body <20% + reversal in the wick's direction → 0.8 (0.9 if OI dropped ≥2% concurrently, a forced-liquidation proxy). Wick >60% alone → 0.5 (0.6 with the OI-drop proxy). Otherwise → 0.1 | **Low-Medium** — from `klines` (symmetric wick) + an OI-drop proxy (REUSES the OI-history fetch, not a new call), STILL WITHOUT confirmation from real liquidation-by-price data (permanently removed, see Section 4.1) |
 | `basisArb` | 5.1 Spot-Futures Basis Arbitrage | If the symbol has D1 history (fixed 50-pair watchlist): basis z-score >2 std dev + funding >0.05% → 0.9. Without history: basis >2x threshold → 0.7 (less accurate, noted in the evidence text), >threshold → 0.5. Otherwise → 0.1 | **Medium-High** for the 50-pair watchlist (has 24h D1 historical context), **Medium** for other pairs (static threshold, no distribution context) |
 | `oiDivergence` | 2.1 (sharp OI increase) + 6.STEP3 | OI up >5% + flat price (\|Δ\|<1%) → 0.8. OI up >3% against price direction → 0.7. Otherwise → 0.1 | **Medium** — official Binance OI data, but only a 1-hour window (2 data points), not a long history |
 | `fundingExtreme` | 5.2 Funding Rate Manipulation | Funding >3x threshold → 1.0, >2x → 0.8, >threshold → 0.6, below → proportional scale | **High** — funding rate straight from Binance (`premiumIndex`), the most reliable of these 6 signals |

@@ -109,8 +109,8 @@ setup required. Per-pair custom thresholds are stored in Workers KV
 (binding `CONFIG_KV`). Time-series data (basis+funding+OI, and
 `binance_detect_mm_activity`'s 6 signal scores) is stored in D1 (binding
 `DB`) — filled in automatically by a Cron Trigger every 5 minutes for a
-fixed 10-pair watchlist (BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT,
-DOGEUSDT, ADAUSDT, AVAXUSDT, LINKUSDT, LTCUSDT).
+fixed 50-pair watchlist (`SNAPSHOT_WATCHLIST` in `src/shared.ts`, ordered
+by market cap, e.g. BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT, etc.).
 
 **Cross-exchange, no extra proxy needed.** `whalescope_compare_funding_across_exchanges`
 accesses Bybit/OKX/Hyperliquid DIRECTLY from the worker (tested from real
@@ -148,8 +148,9 @@ setup needed for those 3 exchanges.
 | `binance_compare_symbols` | Compare one metric (funding rate, 24h % change, OI, top-trader ratio, taker ratio) across 2-10 pairs at once, sorted from most extreme | Binance native |
 | `binance_set_pair_threshold` | Set a custom funding/basis threshold per pair (overrides the ±0.03%/±0.05% default), stored in Workers KV | Workers KV |
 | `binance_get_pair_threshold` | Check the custom threshold already set for a pair | Workers KV |
-| `binance_get_basis_history` | Time-series basis+funding+OI history (Cron snapshot every 5 min to D1), fixed 10-pair watchlist — detects "basis widens then reverts" without manual repeated checks | D1 + Cron Trigger |
-| `binance_detect_mm_activity` | Score + tier (Weak/Moderate/Strong/Extreme) from 6 MM/whale signals at once (absorption, spoofing heuristic, stop-hunt heuristic, basis arbitrage, OI divergence, funding extreme) — replaces 5-6 manual tool calls. **Spoofing & stop-hunt scores are 1-snapshot heuristics only**, see [Honest limitations](#honest-limitations-you-should-know) | Binance native |
+| `binance_get_basis_history` | Time-series basis+funding+OI history (Cron snapshot every 5 min to D1) — always available for the fixed 50-pair watchlist, best-effort for other frequently-queried pairs — detects "basis widens then reverts" without manual repeated checks | D1 + Cron Trigger |
+| `binance_get_orderbook_delta` | 2 order book snapshots ~1-2 seconds apart, compares walls between them for REAL spoofing detection (a wall gone without price actually trading through that level) — unlike `binance_get_order_book_depth`, which is just 1 snapshot | Binance native |
+| `binance_detect_mm_activity` | Score + tier (Weak/Moderate/Strong/Extreme) from 6 MM/whale signals at once (absorption, real 2-snapshot spoofing, symmetric stop-hunt + OI-drop proxy, basis arbitrage, OI divergence, funding extreme) — replaces 5-6 manual tool calls. Stop-hunt is STILL without real liquidation data (permanently removed), see [Honest limitations](#honest-limitations-you-should-know) | Binance native |
 | `binance_market_regime` | Classifies current market condition: TRENDING_UP/DOWN, RANGING, BREAKOUT, ACCUMULATION, DISTRIBUTION — uses ADX(14), OI trend, CVD, volatility/volume spike ratio | Binance native |
 | `binance_backtest_signal` | Empirically validates `binance_detect_mm_activity` signals: win rate/avg return/max drawdown from D1 signal history (fixed watchlist), forward return computed on-demand from historical klines | D1 + Binance native |
 | `binance_analyze_smart_money` | Smart money (top trader) vs retail (global account) divergence score from 5 variables: top trader ratio, global account ratio, OI delta, funding rate, orderbook imbalance — condition LONG_LIQUIDATION_RISK/BULLISH_ACCUMULATION/SHORT_SQUEEZE_RISK/NEUTRAL + confidenceScore. Different from `binance_detect_mm_activity` (6 absorption/spoofing/stop-hunt/basis-arb signals) — narrowly focused on top-trader-vs-retail | Binance native |
@@ -206,8 +207,8 @@ those patterns line up.
 | Signal | Main tools | Example pattern |
 |---|---|---|
 | **Absorption** | order book depth, agg trades (futures & spot), open interest | CVD flat/rising while price stalls = sell pressure being absorbed (accumulation); sharp OI spike + sideways price = a large position just opened |
-| **Spoofing** | order book depth, order book imbalance | A large wall appears then disappears before it's ever filled; spread suddenly widens then normalizes within seconds |
-| **Stop hunt** | open interest, klines | A long wick + small body reversal candle, no liquidation confirmation (removed, see Weaknesses) |
+| **Spoofing** | order book depth, `binance_get_orderbook_delta` (2-snapshot) | A large wall appears then disappears before it's ever filled without price actually trading through it; spread suddenly widens then normalizes within seconds |
+| **Stop hunt** | open interest, klines | A long wick (either direction) + small body reversal candle, boosted by an OI-drop proxy — still no real liquidation confirmation (permanently removed, see Weaknesses) |
 | **Basis arbitrage** | spot price, funding rate, open interest | Spot-futures basis widens then quickly reverts; extreme funding + rising OI (suggests a short-futures/long-spot hedge) |
 
 **Rule of thumb:** if **≥3 signals align** within the same timeframe, the
@@ -285,9 +286,11 @@ Full detail (including raw test data per claim): Section 10,
 - **Funding rate basis can be noisy for small/newly-listed pairs** —
   Binance's index price is a weighted average across several spot
   exchanges, and one of them can be illiquid for such pairs.
-- **Order book depth is a point-in-time snapshot** — a large wall can
-  disappear within seconds (potential spoofing); don't over-interpret a
-  single snapshot.
+- **Order book depth (`binance_get_order_book_depth`) is a point-in-time
+  snapshot** — a large wall can disappear within seconds (potential
+  spoofing); don't over-interpret a single snapshot. For REAL spoofing
+  detection (2-snapshot), use `binance_get_orderbook_delta` or
+  `binance_detect_mm_activity` (see below).
 - **The "top trader" threshold is not precisely published by Binance**,
   and the data is a periodic snapshot, not real-time tick-by-tick.
 - OI history data (`binance_get_open_interest_history`) is limited by the
@@ -295,26 +298,34 @@ Full detail (including raw test data per claim): Section 10,
   (`/futures/data/openInterestHist`); check directly if you need a long
   range.
 - No on-chain wallet data.
-- **No liquidation history at all** (tool removed, see the Weaknesses
-  section above).
-- **`binance_detect_mm_activity`: the spoofing & stop-hunt scores are
-  1-snapshot heuristics only**, NOT true detection. The original design
-  needs 2 order-book snapshots within <3 seconds (this proxy's latency is
-  ~485ms, not reliable enough for that) and price-granular liquidation
-  data (not available at all, see the Weaknesses section). Confidence for
-  those two signals is lower than the other four in the same tool — also
-  noted in the evidence text of every response.
+- **No liquidation history at all, PERMANENTLY REMOVED** — Binance has no
+  public market-wide REST endpoint for this, and the real-time WebSocket
+  route hits the same WAF block as `fapi.binance.com` (confirmed
+  independently 3 times). The fix would need a paid relay (~$5-20/month),
+  already explicitly declined — this status is final, not "not built yet."
+- **`binance_detect_mm_activity`: spoofing is now REAL 2-snapshot
+  detection** (~1-2 seconds slower because of it, explicit 1500ms gap
+  between the 2 fetches — see `binance_get_orderbook_delta`), no longer a
+  1-snapshot heuristic. **Stop-hunt is now symmetric** (checks both upper
+  AND lower wick, used to only check upper — a bug) **+ an OI-drop proxy**
+  (reuses the OI-history fetch already made, not a new one) for a
+  forced-liquidation-cascade proxy — STILL WITHOUT real liquidation-by-price
+  data (permanent, see the point above). Stop-hunt confidence is still
+  lower than the other signals in the same tool — noted in the evidence
+  text of every response.
 - **`binance_market_regime`: volatility/volume spike ratios are computed
   relative to the same fetch window** (last 10 candles vs the prior 10),
   not a long-term historical baseline.
-- **D1 time-series (`market_snapshots`, `signal_history`) covers ONLY the
-  fixed 10-pair watchlist** — pairs outside it are never snapshotted by the
-  cron, so `binance_get_basis_history` and `binance_backtest_signal` only
-  work for those 10 pairs.
+- **D1 time-series (`market_snapshots`, read by `binance_get_basis_history`)
+  is ALWAYS available for the fixed 50-pair watchlist, best-effort for
+  other pairs** — a non-watchlist pair gets history once it's queried >=3
+  times within ~24h AND ranks in the top-5 most-queried non-watchlist pairs
+  (KV counter, `src/queryFrequency.ts`); the 5-minute cron only snapshots
+  it once that condition is met. `signal_history` (read by
+  `binance_backtest_signal`) remains watchlist-only, not extended.
 - **No pruning/retention for D1 rows yet** — rows grow unbounded over time
-  (at 10 pairs, roughly ~6,048 combined rows/day across both tables; D1's
-  free tier of 5M writes/day and 5GB storage has plenty of headroom for a
-  long while, but this isn't a permanent solution).
+  (at 50 pairs, D1's free tier of 5M writes/day and 5GB storage has
+  headroom for a long while, but this isn't a permanent solution).
 - **The KV→D1 basis-history migration does NOT backfill old data** — basis
   history that was stored in Workers KV before this migration is gone; the
   24-hour window refills naturally a few hours after deploy.
@@ -601,9 +612,12 @@ capability at all.
 
 ## Manual testing before registering with Claude (recommended)
 
-There's no automated test suite in this repo — `npm run typecheck` is the
-only automated check. New/changed tools are verified manually via
-`wrangler dev` + curl JSON-RPC.
+`npm test` (vitest) + `npm run typecheck` are the automated checks in this
+repo — but both only cover pure logic (scoring functions, D1/KV wrappers,
+tool handlers via a fake `McpServer`), NOT the real Workers `fetch`/
+`scheduled` handlers (no `@cloudflare/vitest-pool-workers` setup). New/
+changed tools still need manual verification via `wrangler dev` + curl
+JSON-RPC for that.
 
 ```bash
 npm install

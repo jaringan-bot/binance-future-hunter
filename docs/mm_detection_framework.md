@@ -91,39 +91,43 @@
 | **Imbalance ekstrem di depth 5–10** yang tidak diikuti pergerakan harga | MM sedang menahan harga |
 | **Spread tiba-tiba melebar** lalu kembali normal dalam detik | MM withdraw liquidity |
 
+> ✅ **Update 2026-08-22: sekarang otomatis via `binance_get_orderbook_delta`.** Tool ini AMBIL 2 snapshot order book dengan jeda EKSPLISIT (default 1500ms, bisa diatur 500-5000ms) — bukan polling secepat mungkin — lalu bandingkan wall (qty ≥2x median sisi yang sama) antar snapshot: wall yang hilang/menyusut >70% TANPA harga (sisi lawan) benar-benar crossing level itu = indikasi spoofing riil. Dipakai juga otomatis di dalam `binance_detect_mm_activity` (lihat Section 11). Lihat Section 3.2 untuk kenapa jeda eksplisit ini menghindari masalah latency-variance yang sempat bikin pendekatan ini ditolak sebelumnya.
+
 ---
 
-### 3.2 Order Book Refresh Rate Anomaly — *Low Confidence*
+### 3.2 Order Book Refresh Rate Anomaly — *sekarang Medium-High Confidence lewat `binance_get_orderbook_delta`*
 
 **Tool yang digunakan:**
-- `binance_get_order_book_depth`
+- `binance_get_order_book_depth` (snapshot tunggal, manual)
+- `binance_get_orderbook_delta` (2-snapshot, otomatis — lihat di bawah)
 
 > ⚠️ **Batasan teknis (tervalidasi):**
 > - Latensi per call bervariasi besar: **298–898ms** (rata-rata ~485ms) lewat proxy chain worker→Vercel→Binance.
-> - 2× call berurutan total **~1,788ms** — di ujung batas "1-2 detik", bisa lebih lama saat network buruk.
-> - **Polling berurutan untuk deteksi "refresh rate" tidak reliable** — variasi latency terlalu besar untuk membedakan perubahan pasar vs noise jaringan.
+> - Karena itu, deteksi "refresh rate" via POLLING SECEPAT MUNGKIN (back-to-back tanpa jeda) memang tidak reliable — variasi latency antar-call terlalu besar untuk membedakan perubahan pasar vs noise jaringan murni dari timing.
 
-**Kriteria deteksi (hanya snapshot tunggal):**
+**Kriteria deteksi (2-snapshot, via `binance_get_orderbook_delta`):**
 
 | Sinyal | Interpretasi |
 |--------|-------------|
-| **Anomali di snapshot tunggal**: wall muncul di level yang tidak wajar (jauh dari mid-price) dengan volume tidak proporsional | Kemungkinan spoofing — butuh konfirmasi dari sinyal lain (CVD, OI) |
+| **Wall hilang/menyusut >70%** antar 2 snapshot TANPA sisi lawan (opposite side) benar-benar crossing harga level itu | Spoofing — order ditarik, bukan dieksekusi |
+| **Wall hilang DAN sisi lawan crossing harga level itu** | Eksekusi wajar (harga beneran bergerak lewat level itu), BUKAN spoofing |
+| **Anomali di snapshot tunggal** (`binance_get_order_book_depth`): wall di level tidak wajar, volume tidak proporsional | Kemungkinan spoofing — masih butuh konfirmasi sinyal lain kalau cuma 1 snapshot |
 
-> 💡 **Rekomendasi:** Jangan pakai deteksi berbasis perbandingan snapshot berurutan lewat tool call MCP biasa. Fokus pada analisis snapshot tunggal + konfirmasi silang dengan tool lain.
+> 💡 **Kenapa jeda EKSPLISIT (default 1500ms) menyelesaikan masalah latency-variance:** rekomendasi versi sebelumnya ("jangan pakai perbandingan snapshot berurutan") berasumsi 2 call dilakukan back-to-back TANPA jeda, di mana variasi latency 298-898ms bikin jarak waktu antar snapshot tidak terprediksi (bisa 300ms, bisa 900ms — beda jauh secara relatif). Dengan jeda eksplisit 1500ms yang sengaja ditunggu DI ANTARA 2 fetch, variasi latency per-call (~600ms max) jadi kecil dibanding jeda itu sendiri (~1500ms) — jarak waktu antar snapshot tetap konsisten ~1.5-2 detik, cukup buat wall spoofing (biasanya ditarik dalam hitungan detik) tapi bukan noise jaringan murni. **Trade-off**: tool ini otomatis lebih lambat ~1-2 detik dari tool 1-snapshot lain.
 
-> ❌ **WebSocket: TIDAK TERSEDIA** di WhaleScope MCP. Semua 22 tool berbasis REST request/response diskrit. Deteksi real-time butuh stack terpisah di luar project ini.
+> ❌ **WebSocket: TIDAK TERSEDIA** di WhaleScope MCP. Semua tool berbasis REST request/response diskrit. Deteksi real-time sub-detik butuh stack terpisah di luar project ini.
 
 ---
 
 ## 4. Sinyal Stop Hunt
 
-### 4.1 Liquidation Cluster (Waktu) Reversal — **DIHAPUS (2026-08-22)**
+### 4.1 Liquidation Cluster (Waktu) Reversal — **DIHAPUS PERMANEN (2026-08-22)**
 
-> ⚠️ **Section ini gak berlaku lagi.** `binance_get_liquidation_history` (satu-satunya sumber liquidation, via Coinalyze) dihapus — Binance gak punya REST publik market-wide buat data ini, dan jalur WebSocket real-time kena WAF block yang sama kayak `fapi.binance.com` (dites via Durable Object, lihat
-> [`docs/superpowers/specs/2026-08-11-realtime-liquidation-stream-design.md`](superpowers/specs/2026-08-11-realtime-liquidation-stream-design.md)).
-> Solusi butuh relay always-on berbayar (~$5-20/bulan), belum dibangun.
+> ⚠️ **Section ini gak berlaku lagi, dan statusnya FINAL — bukan "belum dibangun".** `binance_get_liquidation_history` (satu-satunya sumber liquidation, via Coinalyze) dihapus — Binance gak punya REST publik market-wide buat data ini, dan jalur WebSocket real-time (`!forceOrder@arr`) kena WAF block yang sama kayak `fapi.binance.com`, dikonfirmasi independen **3 kali** (2026-08-11, 2026-08-12, dan 2026-08-22) lewat `wrangler deploy` spike test riil, lihat
+> [`docs/superpowers/specs/2026-08-11-realtime-liquidation-stream-design.md`](superpowers/specs/2026-08-11-realtime-liquidation-stream-design.md).
+> Satu-satunya solusi (relay always-on berbayar, ~$5-20/bulan, di luar Cloudflare) **sudah ditolak eksplisit oleh user** — data liquidation-by-price riil TIDAK AKAN tersedia di project ini kecuali keputusan itu berubah. Jangan disarankan lagi tanpa diminta ulang.
 >
-> Sinyal `stopHunt` di `binance_detect_mm_activity` TETAP jalan tapi selalu di confidence **Low** — cuma dari `klines` (wick panjang + body kecil + reversal), TANPA konfirmasi liquidation. Lihat Section 8/9 di bawah.
+> **Update 2026-08-22 — mitigasi permanen via OI-drop proxy:** sinyal `stopHunt` di `binance_detect_mm_activity` sekarang (1) cek wick SIMETRIS — upper wick (hunt of longs) DAN lower wick (hunt of shorts), dulu cuma upper wick (bug, downside stop-hunt gak pernah kedeteksi), dan (2) pakai **OI-drop proxy**: kalau open interest turun ≥2% berbarengan sama candle wick itu (REUSE OI-history fetch yang sudah ada buat sinyal `oiDivergence`, bukan fetch baru), itu jadi proxy forced-liquidation cascade (mass stop-out ngurangin OI) dan menaikkan confidence tier (0.8→0.9, 0.5→0.6). Ini **BUKAN data liquidation riil** — cuma korelasi OI-drop + wick candle, TETAP TANPA konfirmasi liquidation-by-price yang sesungguhnya. Lihat Section 8/11 di bawah.
 
 ---
 
@@ -177,7 +181,7 @@
 | **Funding rate positif ekstrem + OI naik** | MM mungkin short futures sambil buy spot (hedged) |
 | **CVD futures dan CVD spot berlawanan arah** | Tekanan leverage vs demand riil tidak selaras |
 
-> ⚠️ **Catatan praktis:** `binance_get_spot_price` dan `binance_get_funding_rate` cuma kasih SNAPSHOT sesaat — TIDAK ADA tool histori basis time-series. Deteksi "basis melebar lalu kembali" harus manual: panggil berkali-kali dan catat sendiri basis per waktu.
+> ⚠️ **Catatan praktis:** `binance_get_spot_price` dan `binance_get_funding_rate` cuma kasih SNAPSHOT sesaat — bukan time-series. Untuk histori, pakai `binance_get_basis_history` (D1, snapshot cron 5 menit): SELALU tersedia untuk 50-pair watchlist tetap; untuk pair lain, best-effort — histori mulai terkumpul begitu pair itu di-query ≥3x dalam ~24 jam DAN masuk top-5 pair non-watchlist paling sering di-query (lihat `src/queryFrequency.ts`). Kalau pair di luar itu, tetap manual: panggil berkali-kali dan catat sendiri basis per waktu.
 
 ---
 
@@ -203,8 +207,9 @@
 │  STEP 0: Cek listing spot (binance_check_spot_listing)        │
 │  → Kalau futures-only, skip Step 4 (basis arb N/A)            │
 ├─────────────────────────────────────────────────────────────┤
-│  STEP 1: Cek order book depth (snapshot tunggal)               │
-│  → Ada wall tidak wajar?                                       │
+│  STEP 1: Cek order book depth (snapshot tunggal), ATAU          │
+│  binance_get_orderbook_delta (2-snapshot, spoofing riil)        │
+│  → Ada wall tidak wajar / wall hilang tanpa harga crossing?     │
 ├─────────────────────────────────────────────────────────────┤
 │  STEP 2: Cross-check agg trades + CVD (futures DAN spot)       │
 │  → Wall-nya diabsorb atau dipull? CVD futures vs spot selaras? │
@@ -213,10 +218,11 @@
 │  → Ada perubahan TAJAM (bukan gradual) di derivative?          │
 ├─────────────────────────────────────────────────────────────┤
 │  STEP 4: Validasi spot basis (skip kalau Step 0 = futures-only)│
-│  → Ada aktivitas arbitrage? (snapshot manual berkali-kali)     │
+│  → binance_get_basis_history (watchlist selalu, pair lain      │
+│  best-effort) atau snapshot manual berkali-kali                │
 ├─────────────────────────────────────────────────────────────┤
-│  STEP 5: [DIHAPUS] dulu liquidation history + klines, sekarang  │
-│  cuma klines (wick panjang), TANPA konfirmasi liquidation       │
+│  STEP 5: Klines (wick simetris) + OI-drop proxy, TETAP TANPA    │
+│  data liquidation riil (dihapus permanen, WAF-blocked)          │
 ├─────────────────────────────────────────────────────────────┤
 │  STEP 6: Cross-check top trader ratio                          │
 │  → Arah berlawanan blended ratio? (baseline ~5-30 hari pair    │
@@ -255,6 +261,7 @@
 | `binance_check_spot_listing` | Prasyarat Section 5 | — |
 | `binance_get_order_book_depth` | Spoofing, absorption, liquidity withdrawal | Latensi 298-898ms/call, tidak bisa deteksi refresh rate real-time |
 | `binance_get_order_book_imbalance` | Imbalance manipulation, price holding | Snapshot tunggal, tidak ada historis |
+| `binance_get_orderbook_delta` | Spoofing riil via 2-snapshot delta (wall hilang tanpa harga crossing) | Menambah latency ~1-2 detik/call (jeda eksplisit 1500ms default antar 2 fetch) |
 | `binance_get_agg_trades` | CVD divergence (futures), large trade execution | — |
 | `binance_get_spot_agg_trades` | CVD riil (spot), pembanding leverage vs demand riil | — |
 | `binance_get_open_interest` | Position building, post-liquidation recovery | — |
@@ -265,7 +272,7 @@
 | `binance_get_funding_rate` | Funding manipulation, scheduled rebalancing | — |
 | `binance_get_funding_rate_history` | Funding pattern analysis | — |
 | `binance_get_klines` | Wick analysis, reversal confirmation, harga mapping | — |
-| `binance_detect_mm_activity` | SEMUA 6 sinyal di atas sekaligus, otomatis + skor (lihat Section 11) | Spoofing & stop-hunt heuristik 1-snapshot, confidence lebih rendah dari 4 sinyal lain |
+| `binance_detect_mm_activity` | SEMUA 6 sinyal di atas sekaligus, otomatis + skor (lihat Section 11) | Spoofing sekarang 2-snapshot riil (~1-2 detik lebih lambat). Stop-hunt simetris + OI-drop proxy, TETAP tanpa data liquidation riil (dihapus permanen) |
 | `binance_backtest_signal` | Validasi empiris skor `binance_detect_mm_activity` historis (win rate/avg return) | Forward return on-demand dari klines, bukan simulasi eksekusi riil; watchlist tetap 50 pair saja |
 
 ---
@@ -280,7 +287,7 @@ Framework ini **tidak membuktikan** keberadaan market maker secara definitif, me
 3. **Konteks pasar penting** — sinyal MM lebih valid di volume rendah/area konsolidasi.
 4. **False positive ada** — news event atau whale retail bisa memicu sinyal serupa.
 5. **Kalibrasi per-pair** — threshold top-trader ratio harus dibangun dari data historis pair sendiri (~5-30 hari, tergantung resolusi), bukan angka universal.
-6. **Kenali batasan teknis** — latency 300-900ms/call, tidak ada data liquidation sama sekali (tool dihapus, lihat Section 4.1), retensi historis top-trader ratio terbatas, refresh-rate real-time tidak feasible via REST tool call, WebSocket tidak tersedia.
+6. **Kenali batasan teknis** — latency 300-900ms/call, tidak ada data liquidation sama sekali (dihapus permanen, lihat Section 4.1; OI-drop proxy jadi mitigasi terbaik yang tersedia), retensi historis top-trader ratio terbatas, refresh-rate real-time sub-detik tidak feasible, WebSocket tidak tersedia. Spoofing 2-snapshot (`binance_get_orderbook_delta`) SEKARANG tersedia tapi menambah latency ~1-2 detik.
 
 ---
 
@@ -336,15 +343,15 @@ disamain:
 | Granularitas | Checklist ya/tidak (0-6 diskrit) | Skor kontinu tiap sinyal (0-1) |
 | Jumlah sinyal | 6 (order book, CVD, OI, basis, liquidation+klines, top trader) | 6 tapi BEDA komposisi (lihat mapping di bawah) |
 | Tier | Weak(1-2)/Moderate(3-4)/Strong(5-6) | Weak(<2)/Moderate(<3.5)/Strong(<5)/Extreme(≥5) |
-| Liquidation | Section 4.1 — **dihapus**, tool `binance_get_liquidation_history` sudah tidak ada | TIDAK dipakai — stop-hunt cuma dari `klines` (lihat batasan di bawah) |
+| Liquidation | Section 4.1 — **dihapus permanen**, tool `binance_get_liquidation_history` sudah tidak ada | TIDAK dipakai — stop-hunt dari `klines` (wick simetris) + OI-drop proxy (lihat batasan di bawah) |
 
 ### Mapping sinyal otomatis → section manual
 
 | Sinyal (`src/tools/detectMmActivity.ts`) | Section terkait | Formula ringkas | Confidence |
 |---|---|---|---|
 | `absorption` | 2.1 Order Book Absorption | CVD buy% dominan (>60%) + harga flat (\|Δ\|<0.5%) + OI naik tajam (>3%) → skor 0.7-1.0. CVD buy% (>55%) + harga turun → 0.5 (lemah). Selain itu → 0.1 | **Medium** — pakai CVD+OI+harga (data resmi Binance), TAPI cuma window 1 snapshot klines, bukan cross-check spot CVD kayak Section 2.1 manual |
-| `spoofing` | 3.1 Wall Pull / Spoofing | Spread >0.2% + wall terbesar >1% dari volume 24h → 0.6. Selain itu → 0.1 | **Low** — cuma 1 snapshot order book (bukan 2 snapshot <3 detik yang Section 3.1 minta; lihat Section 10 #2, latency proxy 298-898ms bikin itu gak reliable). Heuristik wall-vs-volume, BUKAN true spoofing detection |
-| `stopHunt` | 4.1 Liquidation Cluster Reversal (dihapus) | Wick >70% dari range + body <20% + reversal candle → 0.8. Wick >60% doang → 0.5. Selain itu → 0.1 | **Low** — CUMA dari `klines` (wick+reversal), TANPA konfirmasi liquidation (tool `binance_get_liquidation_history` sudah dihapus, lihat Section 4.1) |
+| `spoofing` | 3.1 Wall Pull / Spoofing | 2 snapshot order book ~1.5 detik terpisah (`binance_get_orderbook_delta` internal). Wall (qty ≥2x median) yang hilang/menyusut >70% TANPA sisi lawan crossing harga level itu → 0.9 (wall TERBESAR yang spoofed) atau 0.5 (wall sekunder). Selain itu → 0.1 | **High** (wall terbesar spoofed) / **Medium** (wall sekunder) — sekarang 2-snapshot RIIL, bukan proxy 1-snapshot lagi (lihat Section 3.1/3.2, `src/tools/orderbookDelta.ts`) |
+| `stopHunt` | 4.1 Liquidation Cluster Reversal (dihapus permanen) | Wick simetris (upper=hunt of longs ATAU lower=hunt of shorts, dulu cuma upper — bug) >70% dari range + body <20% + reversal searah wick → 0.8 (0.9 kalau OI turun ≥2% berbarengan, proxy forced-liquidation). Wick >60% doang → 0.5 (0.6 dgn OI-drop proxy). Selain itu → 0.1 | **Low-Medium** — dari `klines` (wick simetris) + OI-drop proxy (REUSE fetch OI history, bukan panggilan baru), TETAP TANPA konfirmasi liquidation-by-price riil (dihapus permanen, lihat Section 4.1) |
 | `basisArb` | 5.1 Spot-Futures Basis Arbitrage | Kalau symbol ada histori D1 (50 pair watchlist tetap): z-score basis >2 std dev + funding >0.05% → 0.9. Tanpa histori: basis >2x threshold → 0.7 (kurang akurat, dicatat di evidence), >threshold → 0.5. Selain itu → 0.1 | **Medium-High** untuk 50 pair watchlist (ada konteks histori D1 24 jam), **Medium** untuk pair lain (threshold statis, gak ada konteks distribusi) |
 | `oiDivergence` | 2.1 (OI naik tajam) + 6.STEP3 | OI naik >5% + harga flat (\|Δ\|<1%) → 0.8. OI naik >3% berlawanan arah harga → 0.7. Selain itu → 0.1 | **Medium** — data OI resmi Binance, tapi window cuma 1 jam (2 titik data), bukan histori panjang |
 | `fundingExtreme` | 5.2 Funding Rate Manipulation | Funding >3x threshold → 1.0, >2x → 0.8, >threshold → 0.6, di bawah → skala proporsional | **High** — funding rate langsung dari Binance (`premiumIndex`), paling reliable dari 6 sinyal ini |

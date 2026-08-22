@@ -144,8 +144,9 @@ kredensial atau setup tambahan buat 3 exchange itu.
 | `binance_compare_symbols` | Bandingkan 1 metrik (funding rate, %change 24h, OI, top trader ratio, taker ratio) across 2-10 pair sekaligus, diurutkan dari paling ekstrem | Binance native |
 | `binance_set_pair_threshold` | Set threshold funding/basis custom per-pair (override default ±0.03%/±0.05%), tersimpan di Workers KV | Workers KV |
 | `binance_get_pair_threshold` | Cek threshold custom yang sudah di-set untuk sebuah pair | Workers KV |
-| `binance_get_basis_history` | Histori basis+funding+OI time-series (snapshot Cron tiap 5 menit ke D1), watchlist tetap 50 pair — deteksi "basis melebar lalu kembali" tanpa cek manual berkali-kali | D1 + Cron Trigger |
-| `binance_detect_mm_activity` | Skor + tier (Weak/Moderate/Strong/Extreme) dari 6 sinyal MM/whale sekaligus (absorption, spoofing heuristic, stop-hunt heuristic, basis arbitrage, OI divergence, funding extreme) — ganti 5-6 tool call manual. **Skor spoofing & stop-hunt cuma heuristik 1-snapshot**, lihat [Keterbatasan](#keterbatasan-yang-jujur-perlu-diketahui) | Binance native |
+| `binance_get_basis_history` | Histori basis+funding+OI time-series (snapshot Cron tiap 5 menit ke D1) — selalu tersedia untuk watchlist tetap 50 pair, best-effort untuk pair lain yang sering di-query — deteksi "basis melebar lalu kembali" tanpa cek manual berkali-kali | D1 + Cron Trigger |
+| `binance_get_orderbook_delta` | 2 snapshot order book ~1-2 detik terpisah, bandingkan wall antar snapshot untuk deteksi spoofing RIIL (wall hilang tanpa harga crossing level itu) — beda dari `binance_get_order_book_depth` yang cuma 1 snapshot | Binance native |
+| `binance_detect_mm_activity` | Skor + tier (Weak/Moderate/Strong/Extreme) dari 6 sinyal MM/whale sekaligus (absorption, spoofing 2-snapshot RIIL, stop-hunt simetris + OI-drop proxy, basis arbitrage, OI divergence, funding extreme) — ganti 5-6 tool call manual. Stop-hunt TETAP tanpa data liquidation riil (dihapus permanen), lihat [Keterbatasan](#keterbatasan-yang-jujur-perlu-diketahui) | Binance native |
 | `binance_market_regime` | Klasifikasi kondisi pasar: TRENDING_UP/DOWN, RANGING, BREAKOUT, ACCUMULATION, DISTRIBUTION — pakai ADX(14), tren OI, CVD, spike volatilitas/volume | Binance native |
 | `binance_backtest_signal` | Validasi empiris sinyal `binance_detect_mm_activity`: win rate/avg return/max drawdown dari histori sinyal D1 (watchlist tetap), forward return dihitung on-demand dari klines historis | D1 + Binance native |
 | `binance_analyze_smart_money` | Skor divergensi smart money (top trader) vs retail (global account) dari 5 variabel: top trader ratio, global account ratio, delta OI, funding rate, orderbook imbalance — kondisi LONG_LIQUIDATION_RISK/BULLISH_ACCUMULATION/SHORT_SQUEEZE_RISK/NEUTRAL + confidenceScore. Beda dari `binance_detect_mm_activity` (6 sinyal absorption/spoofing/stop-hunt/basis-arb) — fokus khusus top-trader-vs-retail | Binance native |
@@ -201,8 +202,8 @@ atas, lalu menghitung skor indikasi dari pola yang muncul.
 | Sinyal | Tool utama | Contoh pola |
 |---|---|---|
 | **Absorption** | order book depth, agg trades (futures & spot), open interest | CVD flat/naik tapi harga stagnan = sell pressure sedang diserap (accumulation); OI spike tajam + harga sideways = posisi besar baru dibuka |
-| **Spoofing** | order book depth, order book imbalance | Wall besar muncul lalu hilang sebelum sempat tereksekusi; spread tiba-tiba melebar lalu normal lagi dalam hitungan detik |
-| **Stop hunt** | open interest, klines | Wick panjang + body kecil candle reversal, TANPA konfirmasi liquidation (dihapus, lihat Kekurangan) |
+| **Spoofing** | order book depth, `binance_get_orderbook_delta` (2-snapshot) | Wall besar muncul lalu hilang sebelum sempat tereksekusi TANPA harga benar-benar crossing level itu; spread tiba-tiba melebar lalu normal lagi dalam hitungan detik |
+| **Stop hunt** | open interest, klines | Wick panjang (arah manapun) + body kecil candle reversal, dibantu OI-drop proxy — TETAP tanpa konfirmasi liquidation riil (dihapus permanen, lihat Kekurangan) |
 | **Basis arbitrage** | spot price, funding rate, open interest | Basis spot-futures melebar lalu kembali cepat; funding ekstrem + OI naik (indikasi hedge short futures / long spot) |
 
 **Rule of thumb:** kalau **≥3 sinyal align** dalam timeframe yang sama,
@@ -280,30 +281,41 @@ Detail penuh (termasuk raw data test per klaim): Section 10,
 - **Basis funding rate bisa noisy untuk pair kecil/baru listing** — index
   price Binance adalah rata-rata tertimbang dari beberapa exchange spot,
   salah satunya bisa illikuid untuk pair semacam itu.
-- **Order book depth adalah snapshot sesaat** — wall besar bisa hilang dalam
-  hitungan detik (potensi spoofing), jangan overinterpretasi satu snapshot.
+- **Order book depth (`binance_get_order_book_depth`) adalah snapshot
+  sesaat** — wall besar bisa hilang dalam hitungan detik (potensi
+  spoofing), jangan overinterpretasi satu snapshot. Untuk deteksi spoofing
+  RIIL (2-snapshot), pakai `binance_get_orderbook_delta` atau
+  `binance_detect_mm_activity` (lihat di bawah).
 - **Threshold "top trader" tidak dipublikasikan Binance secara pasti**, dan
   datanya snapshot periodik, bukan real-time tick-by-tick.
 - Data histori OI (`binance_get_open_interest_history`) dibatasi retensi
   endpoint resmi Binance (`/futures/data/openInterestHist`), cek langsung
   kalau butuh rentang panjang.
 - Tidak ada data wallet on-chain.
-- **Tidak ada histori liquidation sama sekali** (tool dihapus, lihat bagian
-  Kekurangan di atas).
-- **`binance_detect_mm_activity`: skor spoofing & stop-hunt cuma heuristik
-  1-snapshot**, BUKAN true detection. Desain aslinya butuh 2 snapshot order
-  book dalam <3 detik (proxy ini latency-nya ~485ms, belum reliable untuk
-  itu) dan data liquidation granular-harga (tidak tersedia sama sekali,
-  lihat bagian Kekurangan). Confidence 2 sinyal itu lebih rendah dari 4
-  sinyal lain di tool yang sama — dicatat juga di evidence text tiap
-  response.
+- **Tidak ada histori liquidation sama sekali, DIHAPUS PERMANEN** — Binance
+  gak punya REST publik market-wide buat data ini, dan jalur WebSocket
+  real-time kena WAF block yang sama kayak `fapi.binance.com` (dikonfirmasi
+  independen 3x). Solusinya butuh relay berbayar (~$5-20/bulan) yang sudah
+  ditolak eksplisit — status ini final, bukan "belum dibangun".
+- **`binance_detect_mm_activity`: spoofing sekarang 2-snapshot RIIL**
+  (~1-2 detik lebih lambat dari tool lain karenanya, jeda eksplisit 1500ms
+  antar 2 fetch — lihat `binance_get_orderbook_delta`), bukan heuristik
+  1-snapshot lagi. **Stop-hunt sekarang simetris** (cek upper DAN lower
+  wick, dulu cuma upper — bug lama) **+ OI-drop proxy** (reuse fetch OI
+  history yang sudah ada, bukan fetch baru) buat proxy forced-liquidation
+  cascade — TETAP TANPA data liquidation-by-price riil (permanen, lihat
+  poin di atas). Confidence stop-hunt masih lebih rendah dari sinyal lain
+  di tool yang sama — dicatat di evidence text tiap response.
 - **`binance_market_regime`: spike volatilitas/volume dihitung relatif ke
   window fetch yang sama** (10 candle terakhir vs 10 sebelumnya), bukan
   baseline historis jangka panjang.
-- **Time-series D1 (`market_snapshots`, `signal_history`) HANYA untuk
-  watchlist tetap 50 pair** — pair lain di luar itu tidak pernah di-snapshot
-  cron sama sekali, `binance_get_basis_history` dan `binance_backtest_signal`
-  cuma bisa dipanggil untuk 50 pair itu.
+- **Time-series D1 (`market_snapshots`, dibaca `binance_get_basis_history`)
+  SELALU tersedia untuk watchlist tetap 50 pair, best-effort untuk pair
+  lain** — pair non-watchlist dapat histori kalau di-query >=3x dalam ~24
+  jam DAN masuk top-5 pair non-watchlist paling sering di-query (KV
+  counter, `src/queryFrequency.ts`), cron 5 menit baru snapshot pair itu
+  setelah kondisi terpenuhi. `signal_history` (dibaca
+  `binance_backtest_signal`) TETAP watchlist-only, tidak ikut diperluas.
 - **Belum ada pruning/retention buat row D1** — row nambah terus tanpa batas
   seiring waktu (di 50 pair x ~6.048 row/hari gabungan kedua tabel, D1 free
   tier 5 juta write/hari & 5GB storage masih longgar untuk waktu yang lama,
@@ -583,9 +595,12 @@ sekali.
 
 ## Uji coba manual sebelum daftar ke Claude (disarankan)
 
-Tidak ada test suite otomatis di repo ini — `npm run typecheck` adalah satu-
-satunya automated check. Verifikasi tool baru/berubah dilakukan manual lewat
-`wrangler dev` + curl JSON-RPC.
+`npm test` (vitest) + `npm run typecheck` adalah automated check di repo ini
+— tapi keduanya cuma nge-cover pure logic (scoring functions, D1/KV
+wrapper, tool handler lewat fake `McpServer`), BUKAN Workers `fetch`/
+`scheduled` handler beneran (gak ada `@cloudflare/vitest-pool-workers`).
+Verifikasi tool baru/berubah TETAP butuh manual lewat `wrangler dev` + curl
+JSON-RPC buat itu.
 
 ```bash
 npm install
