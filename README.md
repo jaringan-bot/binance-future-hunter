@@ -169,6 +169,32 @@ kredensial atau setup tambahan buat 3 exchange itu.
 | `binance_get_index_constituents` | Daftar exchange+harga+bobot penyusun index price sebuah pair | Binance native |
 | `whalescope_full_pipeline` | Decision chain PENUH Grid Bot Futures (composite tertinggi): hard screen → Tier-1 intelligence (smart money, MM composite, regime 1h+4h, order book) → hitung bound grid Compass-equivalent (ATR + swing high/low) → capital-solve EXACT ke budget rugi (`risk_usd`) per opsi leverage → keputusan TRADE/WATCH/NO_TRADE + parameter Grid Bot siap copy-paste, untuk 1-20 symbol sekaligus. Token cost TINGGI — lihat [`docs/full_pipeline_framework.md`](docs/full_pipeline_framework.md) | Binance native |
 
+## Konvensi `detail`: summary vs full (hemat token)
+
+Semua tool di atas yang balikin data array/histori (klines, agg trades,
+order book, open interest/funding/liquidation/basis history, long-short &
+top-trader ratio) punya parameter opsional `detail: "summary" | "full"`,
+default `"summary"`. Ini **satu-satunya perubahan default-behavior yang
+disengaja** di pembaruan token-efficiency 2026-08 — bukan penghapusan
+parameter, cuma default baru:
+
+- `detail: "summary"` (default) — cuma metrik turunan (bias, tren, CVD,
+  dominance, dst — yang memang sudah dihitung tool-nya) + maksimal 10 poin
+  data terbaru. Ini yang dipakai kalau kamu tidak mengirim `detail` sama
+  sekali, TERMASUK untuk caller lama yang belum tahu param ini ada.
+- `detail: "full"` — array/level mentah penuh, perilaku identik dengan
+  sebelum pembaruan ini.
+
+Tool composite (`binance_analyze_pair`, `binance_analyze_smart_money`,
+`binance_detect_mm_activity`, `analyze_futures_grid_risk`,
+`whalescope_full_pipeline`) juga dirapikan: teks dipotong ~8-12 baris,
+`structuredContent` jadi payload utama dengan key lebih pendek/flat, field
+kosong (null/undefined) dibuang. **Tidak ada sinyal/metrik yang hilang** —
+semua tetap reachable via `structuredContent` atau `detail: "full"`.
+
+Detail lengkap + mapping field yang berganti nama:
+[`docs/tool_response_reference.md`](docs/tool_response_reference.md).
+
 ## Framework Analisis: Deteksi Market Maker & Whale
 
 Tidak ada tool yang bisa melihat identitas atau posisi spesifik market

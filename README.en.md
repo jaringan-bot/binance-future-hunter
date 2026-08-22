@@ -173,6 +173,33 @@ setup needed for those 3 exchanges.
 | `binance_get_index_constituents` | List of exchanges+prices+weights making up a pair's index price | Binance native |
 | `whalescope_full_pipeline` | The FULL Futures Grid Bot decision chain (highest-level composite tool): hard screen → Tier-1 intelligence (smart money, MM composite, 1h+4h regime, order book) → Compass-equivalent grid bound calculation (ATR + swing high/low) → EXACT capital-solve against a loss budget (`risk_usd`) per leverage option → TRADE/WATCH/NO_TRADE decision + copy-paste-ready Grid Bot config, for 1-20 symbols at once. HIGH token cost — see [`docs/full_pipeline_framework.md`](docs/full_pipeline_framework.md) (`docs/full_pipeline_framework.en.md` for the English mirror) | Binance native |
 
+## The `detail` convention: summary vs full (token efficiency)
+
+Every tool above that returns array/history data (klines, agg trades, order
+book, open interest/funding/liquidation/basis history, long-short &
+top-trader ratio) has an optional `detail: "summary" | "full"` parameter,
+defaulting to `"summary"`. This is the **only intentional default-behavior
+change** in the 2026-08 token-efficiency update — not a parameter removal,
+just a new default:
+
+- `detail: "summary"` (default) — only derived metrics (bias, trend, CVD,
+  dominance, etc. — whatever the tool already computes internally) + up to
+  10 most recent data points. This is what you get if you don't send
+  `detail` at all, INCLUDING for existing callers that don't know this
+  param exists yet.
+- `detail: "full"` — the full raw array/levels, identical to the
+  pre-update behavior.
+
+Composite tools (`binance_analyze_pair`, `binance_analyze_smart_money`,
+`binance_detect_mm_activity`, `analyze_futures_grid_risk`,
+`whalescope_full_pipeline`) were also tightened: text capped to ~8-12 lines,
+`structuredContent` is now the primary payload with shorter/flatter keys,
+empty (null/undefined) fields dropped. **No signal or metric was lost** —
+everything stays reachable via `structuredContent` or `detail: "full"`.
+
+Full details + renamed-field mapping:
+[`docs/tool_response_reference.en.md`](docs/tool_response_reference.en.md).
+
 ## Analysis Framework: Market Maker & Whale Detection
 
 No tool can see a market maker (MM)/whale's identity or specific position
