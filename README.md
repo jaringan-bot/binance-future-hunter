@@ -146,7 +146,7 @@ kredensial atau setup tambahan buat 3 exchange itu.
 | `binance_get_pair_threshold` | Cek threshold custom yang sudah di-set untuk sebuah pair | Workers KV |
 | `binance_get_basis_history` | Histori basis+funding+OI time-series (snapshot Cron tiap 5 menit ke D1) — selalu tersedia untuk watchlist tetap 50 pair, best-effort untuk pair lain yang sering di-query — deteksi "basis melebar lalu kembali" tanpa cek manual berkali-kali | D1 + Cron Trigger |
 | `binance_get_orderbook_delta` | 2 snapshot order book ~1-2 detik terpisah, bandingkan wall antar snapshot untuk deteksi spoofing RIIL (wall hilang tanpa harga crossing level itu) — beda dari `binance_get_order_book_depth` yang cuma 1 snapshot | Binance native |
-| `binance_detect_mm_activity` | Skor + tier (Weak/Moderate/Strong/Extreme) dari 6 sinyal MM/whale sekaligus (absorption, spoofing 2-snapshot RIIL, stop-hunt simetris + OI-drop proxy, basis arbitrage, OI divergence, funding extreme) — ganti 5-6 tool call manual. Stop-hunt TETAP tanpa data liquidation riil (dihapus permanen), lihat [Keterbatasan](#keterbatasan-yang-jujur-perlu-diketahui) | Binance native |
+| `binance_detect_mm_activity` | Skor + tier (Weak/Moderate/Strong/Extreme) dari 6 sinyal MM/whale sekaligus (absorption, spoofing 2-snapshot RIIL, stop-hunt simetris + OI-drop proxy + trade-volume-concentration proxy, basis arbitrage, OI divergence, funding extreme) — ganti 5-6 tool call manual. Stop-hunt TETAP tanpa data liquidation riil (dihapus permanen), lihat [Keterbatasan](#keterbatasan-yang-jujur-perlu-diketahui) | Binance native |
 | `binance_market_regime` | Klasifikasi kondisi pasar: TRENDING_UP/DOWN, RANGING, BREAKOUT, ACCUMULATION, DISTRIBUTION — pakai ADX(14), tren OI, CVD, spike volatilitas/volume | Binance native |
 | `binance_backtest_signal` | Validasi empiris sinyal `binance_detect_mm_activity`: win rate/avg return/max drawdown dari histori sinyal D1 (watchlist tetap), forward return dihitung on-demand dari klines historis | D1 + Binance native |
 | `binance_analyze_smart_money` | Skor divergensi smart money (top trader) vs retail (global account) dari 5 variabel: top trader ratio, global account ratio, delta OI, funding rate, orderbook imbalance — kondisi LONG_LIQUIDATION_RISK/BULLISH_ACCUMULATION/SHORT_SQUEEZE_RISK/NEUTRAL + confidenceScore. Beda dari `binance_detect_mm_activity` (6 sinyal absorption/spoofing/stop-hunt/basis-arb) — fokus khusus top-trader-vs-retail | Binance native |
@@ -203,7 +203,7 @@ atas, lalu menghitung skor indikasi dari pola yang muncul.
 |---|---|---|
 | **Absorption** | order book depth, agg trades (futures & spot), open interest | CVD flat/naik tapi harga stagnan = sell pressure sedang diserap (accumulation); OI spike tajam + harga sideways = posisi besar baru dibuka |
 | **Spoofing** | order book depth, `binance_get_orderbook_delta` (2-snapshot) | Wall besar muncul lalu hilang sebelum sempat tereksekusi TANPA harga benar-benar crossing level itu; spread tiba-tiba melebar lalu normal lagi dalam hitungan detik |
-| **Stop hunt** | open interest, klines | Wick panjang (arah manapun) + body kecil candle reversal, dibantu OI-drop proxy — TETAP tanpa konfirmasi liquidation riil (dihapus permanen, lihat Kekurangan) |
+| **Stop hunt** | open interest, agg trades, klines | Wick panjang (arah manapun) + body kecil candle reversal, dibantu OI-drop proxy + konsentrasi trade agresif per harga — TETAP tanpa konfirmasi liquidation riil (dihapus permanen, lihat Kekurangan) |
 | **Basis arbitrage** | spot price, funding rate, open interest | Basis spot-futures melebar lalu kembali cepat; funding ekstrem + OI naik (indikasi hedge short futures / long spot) |
 
 **Rule of thumb:** kalau **≥3 sinyal align** dalam timeframe yang sama,
@@ -301,11 +301,15 @@ Detail penuh (termasuk raw data test per klaim): Section 10,
   (~1-2 detik lebih lambat dari tool lain karenanya, jeda eksplisit 1500ms
   antar 2 fetch — lihat `binance_get_orderbook_delta`), bukan heuristik
   1-snapshot lagi. **Stop-hunt sekarang simetris** (cek upper DAN lower
-  wick, dulu cuma upper — bug lama) **+ OI-drop proxy** (reuse fetch OI
-  history yang sudah ada, bukan fetch baru) buat proxy forced-liquidation
-  cascade — TETAP TANPA data liquidation-by-price riil (permanen, lihat
-  poin di atas). Confidence stop-hunt masih lebih rendah dari sinyal lain
-  di tool yang sama — dicatat di evidence text tiap response.
+  wick, dulu cuma upper — bug lama) **+ 2 proxy independen** (reuse fetch
+  yang sudah ada, bukan fetch baru): OI turun >=2% berbarengan sama wick
+  candle, dan/atau volume trade agresif >=30% terkonsentrasi tepat di zona
+  harga wick itu (dari 100 aggTrades terakhir, sama data yang dipakai
+  CVD). Confidence naik bertahap: 0 proxy aktif = base, 1 proxy = lebih
+  tinggi, 2 proxy sekaligus = tertinggi — TETAP TANPA data
+  liquidation-by-price riil (permanen, lihat poin di atas). Confidence
+  stop-hunt masih lebih rendah dari sinyal lain di tool yang sama —
+  dicatat di evidence text tiap response.
 - **`binance_market_regime`: spike volatilitas/volume dihitung relatif ke
   window fetch yang sama** (10 candle terakhir vs 10 sebelumnya), bukan
   baseline historis jangka panjang.

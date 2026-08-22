@@ -127,7 +127,11 @@
 > [`docs/superpowers/specs/2026-08-11-realtime-liquidation-stream-design.md`](superpowers/specs/2026-08-11-realtime-liquidation-stream-design.md).
 > Satu-satunya solusi (relay always-on berbayar, ~$5-20/bulan, di luar Cloudflare) **sudah ditolak eksplisit oleh user** — data liquidation-by-price riil TIDAK AKAN tersedia di project ini kecuali keputusan itu berubah. Jangan disarankan lagi tanpa diminta ulang.
 >
-> **Update 2026-08-22 — mitigasi permanen via OI-drop proxy:** sinyal `stopHunt` di `binance_detect_mm_activity` sekarang (1) cek wick SIMETRIS — upper wick (hunt of longs) DAN lower wick (hunt of shorts), dulu cuma upper wick (bug, downside stop-hunt gak pernah kedeteksi), dan (2) pakai **OI-drop proxy**: kalau open interest turun ≥2% berbarengan sama candle wick itu (REUSE OI-history fetch yang sudah ada buat sinyal `oiDivergence`, bukan fetch baru), itu jadi proxy forced-liquidation cascade (mass stop-out ngurangin OI) dan menaikkan confidence tier (0.8→0.9, 0.5→0.6). Ini **BUKAN data liquidation riil** — cuma korelasi OI-drop + wick candle, TETAP TANPA konfirmasi liquidation-by-price yang sesungguhnya. Lihat Section 8/11 di bawah.
+> **Update 2026-08-22 — mitigasi permanen via 2 proxy independen:** sinyal `stopHunt` di `binance_detect_mm_activity` sekarang (1) cek wick SIMETRIS — upper wick (hunt of longs) DAN lower wick (hunt of shorts), dulu cuma upper wick (bug, downside stop-hunt gak pernah kedeteksi), dan (2) pakai **2 proxy forced-liquidation independen**, masing-masing bisa menaikkan confidence tier sendiri-sendiri (dan keduanya sekaligus naikkan lebih tinggi lagi):
+> - **OI-drop proxy**: open interest turun ≥2% berbarengan sama candle wick itu (REUSE OI-history fetch yang sudah ada buat sinyal `oiDivergence`, bukan fetch baru) — mass stop-out ngurangin OI.
+> - **Trade-volume concentration proxy** (baru): dari 100 aggTrades terakhir yang SUDAH di-fetch buat CVD (REUSE, bukan fetch baru), cek apakah volume trade AGRESIF searah arah hunt (sell buat hunt-of-longs, buy buat hunt-of-shorts) terkonsentrasi ≥30% TEPAT di zona harga wick candle itu (bukan tersebar di seluruh range) — proxy "ada eksekusi besar persis di level itu", dari data trade PUBLIK Binance (bukan liquidation-tagged, tapi price-anchored).
+>
+> Tier: 0 proxy → 0.8/0.5 (base), 1 proxy → 0.9/0.6, 2 proxy sekaligus → 0.95/0.65. Keduanya **BUKAN data liquidation riil** — cuma korelasi (OI-drop + wick) dan (konsentrasi trade + wick), TETAP TANPA konfirmasi liquidation-by-price yang sesungguhnya (Binance gak expose trade mana yang liquidation-triggered). Lihat Section 8/11 di bawah.
 
 ---
 
@@ -221,8 +225,9 @@
 │  → binance_get_basis_history (watchlist selalu, pair lain      │
 │  best-effort) atau snapshot manual berkali-kali                │
 ├─────────────────────────────────────────────────────────────┤
-│  STEP 5: Klines (wick simetris) + OI-drop proxy, TETAP TANPA    │
-│  data liquidation riil (dihapus permanen, WAF-blocked)          │
+│  STEP 5: Klines (wick simetris) + OI-drop proxy + konsentrasi   │
+│  trade agresif per harga, TETAP TANPA data liquidation riil     │
+│  (dihapus permanen, WAF-blocked)                                │
 ├─────────────────────────────────────────────────────────────┤
 │  STEP 6: Cross-check top trader ratio                          │
 │  → Arah berlawanan blended ratio? (baseline ~5-30 hari pair    │
@@ -272,7 +277,7 @@
 | `binance_get_funding_rate` | Funding manipulation, scheduled rebalancing | — |
 | `binance_get_funding_rate_history` | Funding pattern analysis | — |
 | `binance_get_klines` | Wick analysis, reversal confirmation, harga mapping | — |
-| `binance_detect_mm_activity` | SEMUA 6 sinyal di atas sekaligus, otomatis + skor (lihat Section 11) | Spoofing sekarang 2-snapshot riil (~1-2 detik lebih lambat). Stop-hunt simetris + OI-drop proxy, TETAP tanpa data liquidation riil (dihapus permanen) |
+| `binance_detect_mm_activity` | SEMUA 6 sinyal di atas sekaligus, otomatis + skor (lihat Section 11) | Spoofing sekarang 2-snapshot riil (~1-2 detik lebih lambat). Stop-hunt simetris + OI-drop proxy + konsentrasi trade agresif per harga, TETAP tanpa data liquidation riil (dihapus permanen) |
 | `binance_backtest_signal` | Validasi empiris skor `binance_detect_mm_activity` historis (win rate/avg return) | Forward return on-demand dari klines, bukan simulasi eksekusi riil; watchlist tetap 50 pair saja |
 
 ---
@@ -287,7 +292,7 @@ Framework ini **tidak membuktikan** keberadaan market maker secara definitif, me
 3. **Konteks pasar penting** — sinyal MM lebih valid di volume rendah/area konsolidasi.
 4. **False positive ada** — news event atau whale retail bisa memicu sinyal serupa.
 5. **Kalibrasi per-pair** — threshold top-trader ratio harus dibangun dari data historis pair sendiri (~5-30 hari, tergantung resolusi), bukan angka universal.
-6. **Kenali batasan teknis** — latency 300-900ms/call, tidak ada data liquidation sama sekali (dihapus permanen, lihat Section 4.1; OI-drop proxy jadi mitigasi terbaik yang tersedia), retensi historis top-trader ratio terbatas, refresh-rate real-time sub-detik tidak feasible, WebSocket tidak tersedia. Spoofing 2-snapshot (`binance_get_orderbook_delta`) SEKARANG tersedia tapi menambah latency ~1-2 detik.
+6. **Kenali batasan teknis** — latency 300-900ms/call, tidak ada data liquidation sama sekali (dihapus permanen, lihat Section 4.1; OI-drop + trade-volume-concentration proxy jadi mitigasi terbaik yang tersedia), retensi historis top-trader ratio terbatas, refresh-rate real-time sub-detik tidak feasible, WebSocket tidak tersedia. Spoofing 2-snapshot (`binance_get_orderbook_delta`) SEKARANG tersedia tapi menambah latency ~1-2 detik.
 
 ---
 
@@ -343,7 +348,7 @@ disamain:
 | Granularitas | Checklist ya/tidak (0-6 diskrit) | Skor kontinu tiap sinyal (0-1) |
 | Jumlah sinyal | 6 (order book, CVD, OI, basis, liquidation+klines, top trader) | 6 tapi BEDA komposisi (lihat mapping di bawah) |
 | Tier | Weak(1-2)/Moderate(3-4)/Strong(5-6) | Weak(<2)/Moderate(<3.5)/Strong(<5)/Extreme(≥5) |
-| Liquidation | Section 4.1 — **dihapus permanen**, tool `binance_get_liquidation_history` sudah tidak ada | TIDAK dipakai — stop-hunt dari `klines` (wick simetris) + OI-drop proxy (lihat batasan di bawah) |
+| Liquidation | Section 4.1 — **dihapus permanen**, tool `binance_get_liquidation_history` sudah tidak ada | TIDAK dipakai — stop-hunt dari `klines` (wick simetris) + OI-drop proxy + trade-volume-concentration proxy (lihat batasan di bawah) |
 
 ### Mapping sinyal otomatis → section manual
 
@@ -351,7 +356,7 @@ disamain:
 |---|---|---|---|
 | `absorption` | 2.1 Order Book Absorption | CVD buy% dominan (>60%) + harga flat (\|Δ\|<0.5%) + OI naik tajam (>3%) → skor 0.7-1.0. CVD buy% (>55%) + harga turun → 0.5 (lemah). Selain itu → 0.1 | **Medium** — pakai CVD+OI+harga (data resmi Binance), TAPI cuma window 1 snapshot klines, bukan cross-check spot CVD kayak Section 2.1 manual |
 | `spoofing` | 3.1 Wall Pull / Spoofing | 2 snapshot order book ~1.5 detik terpisah (`binance_get_orderbook_delta` internal). Wall (qty ≥2x median) yang hilang/menyusut >70% TANPA sisi lawan crossing harga level itu → 0.9 (wall TERBESAR yang spoofed) atau 0.5 (wall sekunder). Selain itu → 0.1 | **High** (wall terbesar spoofed) / **Medium** (wall sekunder) — sekarang 2-snapshot RIIL, bukan proxy 1-snapshot lagi (lihat Section 3.1/3.2, `src/tools/orderbookDelta.ts`) |
-| `stopHunt` | 4.1 Liquidation Cluster Reversal (dihapus permanen) | Wick simetris (upper=hunt of longs ATAU lower=hunt of shorts, dulu cuma upper — bug) >70% dari range + body <20% + reversal searah wick → 0.8 (0.9 kalau OI turun ≥2% berbarengan, proxy forced-liquidation). Wick >60% doang → 0.5 (0.6 dgn OI-drop proxy). Selain itu → 0.1 | **Low-Medium** — dari `klines` (wick simetris) + OI-drop proxy (REUSE fetch OI history, bukan panggilan baru), TETAP TANPA konfirmasi liquidation-by-price riil (dihapus permanen, lihat Section 4.1) |
+| `stopHunt` | 4.1 Liquidation Cluster Reversal (dihapus permanen) | Wick simetris (upper=hunt of longs ATAU lower=hunt of shorts, dulu cuma upper — bug) >70% dari range + body <20% + reversal searah wick → 0.8, +0.05/proxy aktif (OI-drop ≥2% dan/atau konsentrasi trade agresif ≥30% di zona wick) → 0.9 (1 proxy) / 0.95 (2 proxy). Wick >60% doang → 0.5, sama pola +proxy → 0.6/0.65. Selain itu → 0.1 | **Low-Medium** — dari `klines` (wick simetris) + 2 proxy independen (REUSE fetch OI history & aggTrades yang sudah ada, TANPA panggilan baru), TETAP TANPA konfirmasi liquidation-by-price riil (dihapus permanen, lihat Section 4.1) |
 | `basisArb` | 5.1 Spot-Futures Basis Arbitrage | Kalau symbol ada histori D1 (50 pair watchlist tetap): z-score basis >2 std dev + funding >0.05% → 0.9. Tanpa histori: basis >2x threshold → 0.7 (kurang akurat, dicatat di evidence), >threshold → 0.5. Selain itu → 0.1 | **Medium-High** untuk 50 pair watchlist (ada konteks histori D1 24 jam), **Medium** untuk pair lain (threshold statis, gak ada konteks distribusi) |
 | `oiDivergence` | 2.1 (OI naik tajam) + 6.STEP3 | OI naik >5% + harga flat (\|Δ\|<1%) → 0.8. OI naik >3% berlawanan arah harga → 0.7. Selain itu → 0.1 | **Medium** — data OI resmi Binance, tapi window cuma 1 jam (2 titik data), bukan histori panjang |
 | `fundingExtreme` | 5.2 Funding Rate Manipulation | Funding >3x threshold → 1.0, >2x → 0.8, >threshold → 0.6, di bawah → skala proporsional | **High** — funding rate langsung dari Binance (`premiumIndex`), paling reliable dari 6 sinyal ini |

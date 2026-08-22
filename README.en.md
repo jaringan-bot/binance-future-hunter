@@ -150,7 +150,7 @@ setup needed for those 3 exchanges.
 | `binance_get_pair_threshold` | Check the custom threshold already set for a pair | Workers KV |
 | `binance_get_basis_history` | Time-series basis+funding+OI history (Cron snapshot every 5 min to D1) — always available for the fixed 50-pair watchlist, best-effort for other frequently-queried pairs — detects "basis widens then reverts" without manual repeated checks | D1 + Cron Trigger |
 | `binance_get_orderbook_delta` | 2 order book snapshots ~1-2 seconds apart, compares walls between them for REAL spoofing detection (a wall gone without price actually trading through that level) — unlike `binance_get_order_book_depth`, which is just 1 snapshot | Binance native |
-| `binance_detect_mm_activity` | Score + tier (Weak/Moderate/Strong/Extreme) from 6 MM/whale signals at once (absorption, real 2-snapshot spoofing, symmetric stop-hunt + OI-drop proxy, basis arbitrage, OI divergence, funding extreme) — replaces 5-6 manual tool calls. Stop-hunt is STILL without real liquidation data (permanently removed), see [Honest limitations](#honest-limitations-you-should-know) | Binance native |
+| `binance_detect_mm_activity` | Score + tier (Weak/Moderate/Strong/Extreme) from 6 MM/whale signals at once (absorption, real 2-snapshot spoofing, symmetric stop-hunt + OI-drop proxy + trade-volume-concentration proxy, basis arbitrage, OI divergence, funding extreme) — replaces 5-6 manual tool calls. Stop-hunt is STILL without real liquidation data (permanently removed), see [Honest limitations](#honest-limitations-you-should-know) | Binance native |
 | `binance_market_regime` | Classifies current market condition: TRENDING_UP/DOWN, RANGING, BREAKOUT, ACCUMULATION, DISTRIBUTION — uses ADX(14), OI trend, CVD, volatility/volume spike ratio | Binance native |
 | `binance_backtest_signal` | Empirically validates `binance_detect_mm_activity` signals: win rate/avg return/max drawdown from D1 signal history (fixed watchlist), forward return computed on-demand from historical klines | D1 + Binance native |
 | `binance_analyze_smart_money` | Smart money (top trader) vs retail (global account) divergence score from 5 variables: top trader ratio, global account ratio, OI delta, funding rate, orderbook imbalance — condition LONG_LIQUIDATION_RISK/BULLISH_ACCUMULATION/SHORT_SQUEEZE_RISK/NEUTRAL + confidenceScore. Different from `binance_detect_mm_activity` (6 absorption/spoofing/stop-hunt/basis-arb signals) — narrowly focused on top-trader-vs-retail | Binance native |
@@ -208,7 +208,7 @@ those patterns line up.
 |---|---|---|
 | **Absorption** | order book depth, agg trades (futures & spot), open interest | CVD flat/rising while price stalls = sell pressure being absorbed (accumulation); sharp OI spike + sideways price = a large position just opened |
 | **Spoofing** | order book depth, `binance_get_orderbook_delta` (2-snapshot) | A large wall appears then disappears before it's ever filled without price actually trading through it; spread suddenly widens then normalizes within seconds |
-| **Stop hunt** | open interest, klines | A long wick (either direction) + small body reversal candle, boosted by an OI-drop proxy — still no real liquidation confirmation (permanently removed, see Weaknesses) |
+| **Stop hunt** | open interest, agg trades, klines | A long wick (either direction) + small body reversal candle, boosted by an OI-drop proxy + aggressive trade-price concentration proxy — still no real liquidation confirmation (permanently removed, see Weaknesses) |
 | **Basis arbitrage** | spot price, funding rate, open interest | Spot-futures basis widens then quickly reverts; extreme funding + rising OI (suggests a short-futures/long-spot hedge) |
 
 **Rule of thumb:** if **≥3 signals align** within the same timeframe, the
@@ -307,12 +307,16 @@ Full detail (including raw test data per claim): Section 10,
   detection** (~1-2 seconds slower because of it, explicit 1500ms gap
   between the 2 fetches — see `binance_get_orderbook_delta`), no longer a
   1-snapshot heuristic. **Stop-hunt is now symmetric** (checks both upper
-  AND lower wick, used to only check upper — a bug) **+ an OI-drop proxy**
-  (reuses the OI-history fetch already made, not a new one) for a
-  forced-liquidation-cascade proxy — STILL WITHOUT real liquidation-by-price
-  data (permanent, see the point above). Stop-hunt confidence is still
-  lower than the other signals in the same tool — noted in the evidence
-  text of every response.
+  AND lower wick, used to only check upper — a bug) **+ 2 independent
+  proxies** (reuse existing fetches, no new calls): OI dropping >=2%
+  coinciding with the wick candle, and/or aggressive trade volume >=30%
+  concentrated right in the wick's price zone (from the last 100
+  aggTrades, the same data already used for CVD). Confidence scales with
+  how many proxies confirm: 0 active = base, 1 = higher, both at once =
+  highest — STILL WITHOUT real liquidation-by-price data (permanent, see
+  the point above). Stop-hunt confidence is still lower than the other
+  signals in the same tool — noted in the evidence text of every
+  response.
 - **`binance_market_regime`: volatility/volume spike ratios are computed
   relative to the same fetch window** (last 10 candles vs the prior 10),
   not a long-term historical baseline.

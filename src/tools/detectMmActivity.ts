@@ -8,11 +8,13 @@
 //   (fetchOrderBookDelta, orderbookDelta.ts) -- wall yang hilang/menyusut
 //   >70% TANPA harga crossing level itu = indikasi spoofing riil, bukan
 //   proxy 1-snapshot lagi.
-// - Stop-hunt sekarang simetris (cek upper DAN lower wick) + OI-drop proxy
-//   (reuse OI history fetch) buat proxy forced-liquidation cascade. TETAP
-//   tanpa data liquidation riil -- liquidation history (dulu via Coinalyze)
-//   sudah dihapus total 2026-08-22, WAF-blocked, gak tersedia lagi secara
-//   permanen (lihat docs/mm_detection_framework.md Section 4.1).
+// - Stop-hunt sekarang simetris (cek upper DAN lower wick) + 2 proxy
+//   independen buat forced-liquidation: OI-drop (reuse OI history fetch)
+//   dan konsentrasi trade agresif di zona wick (reuse aggTrades fetch yang
+//   sama dipakai CVD). TETAP tanpa data liquidation-by-price riil --
+//   liquidation history (dulu via Coinalyze) sudah dihapus total
+//   2026-08-22, WAF-blocked, gak tersedia lagi secara permanen (lihat
+//   docs/mm_detection_framework.md Section 4.1).
 // - Basis arbitrage pakai z-score kalau symbol ada di watchlist (SNAPSHOT_WATCHLIST,
 //   shared.ts) yang punya histori di D1 (market_snapshots), fallback ke
 //   threshold sederhana untuk pair lain.
@@ -98,6 +100,50 @@ export function calculateSpoofingScore(params: {
 // riil -- kalau false-positive tinggi di produksi, naikkan ke -3%.
 const OI_DROP_THRESHOLD_PCT = -2;
 
+// Porsi volume trade AGRESIF (searah arah hunt) yang terkonsentrasi di ZONA
+// WICK (bukan seluruh range candle) -- proxy "ada eksekusi besar TEPAT di
+// level wick", bukan liquidation asli. Binance gak expose liquidation-by-
+// price sama sekali (WAF-blocked, permanen, lihat Section 4.1) -- ini
+// pendekatan terbaik yang achievable TANPA infra baru: reuse 100 aggTrades
+// terakhir yang SUDAH di-fetch buat CVD (computeCvdFromTrades), bukan fetch
+// baru. >=30% dianggap terkonsentrasi -- TIDAK dikalibrasi ke data riil,
+// heuristik disengaja sama seperti OI_DROP_THRESHOLD_PCT di atas.
+const WICK_ZONE_VOLUME_CONCENTRATION_THRESHOLD = 0.3;
+
+export interface WickZoneVolumeConcentration {
+  zoneVolume: number;
+  totalDirectionalVolume: number;
+  concentrationRatio: number; // zoneVolume / totalDirectionalVolume, 0 kalau totalDirectionalVolume 0
+}
+
+// Pure, testable tanpa network. "Arah" match sisi taker: hunt of longs ->
+// agresif SELL (m=true, konsisten sama forced-sell liquidasi long); hunt of
+// shorts -> agresif BUY (m=false, konsisten sama forced-buy cover short).
+// Trade sisi yang gak relevan (buy waktu cek longs, atau sebaliknya)
+// diabaikan sama sekali -- BUKAN dihitung sebagai "encer"-kan konsentrasi.
+export function computeWickZoneVolumeConcentration(
+  trades: { p: string; q: string; m: boolean }[],
+  zoneLow: number,
+  zoneHigh: number,
+  direction: "longs" | "shorts",
+): WickZoneVolumeConcentration {
+  let zoneVolume = 0;
+  let totalDirectionalVolume = 0;
+  for (const t of trades) {
+    const isDirectionalTrade = direction === "longs" ? t.m : !t.m;
+    if (!isDirectionalTrade) continue;
+    const qty = parseFloat(t.q);
+    totalDirectionalVolume += qty;
+    const price = parseFloat(t.p);
+    if (price >= zoneLow && price <= zoneHigh) zoneVolume += qty;
+  }
+  return {
+    zoneVolume,
+    totalDirectionalVolume,
+    concentrationRatio: totalDirectionalVolume > 0 ? zoneVolume / totalDirectionalVolume : 0,
+  };
+}
+
 export function calculateStopHuntScore(params: {
   high: number;
   low: number;
@@ -106,8 +152,9 @@ export function calculateStopHuntScore(params: {
   prevOpen: number;
   prevClose: number;
   oiDropPct?: number; // % perubahan OI window yang sama, REUSE dari oiHist fetch (computeMmSignals) -- bukan fetch baru
+  trades?: { p: string; q: string; m: boolean }[]; // REUSE 100 aggTrades terakhir (computeMmSignals) -- bukan fetch baru
 }): SignalScore {
-  const { high, low, open, close, prevOpen, prevClose, oiDropPct } = params;
+  const { high, low, open, close, prevOpen, prevClose, oiDropPct, trades } = params;
   const range = high - low || 1;
   const upperWickRatio = (high - Math.max(open, close)) / range;
   const lowerWickRatio = (Math.min(open, close) - low) / range;
@@ -132,21 +179,44 @@ export function calculateStopHuntScore(params: {
   }
   const reversal = direction !== null;
   const dirLabel = direction === "longs" ? "hunt of longs (upper wick)" : direction === "shorts" ? "hunt of shorts (lower wick)" : "";
+
   const hasOiDropProxy = oiDropPct !== undefined && oiDropPct <= OI_DROP_THRESHOLD_PCT;
   const oiNote = hasOiDropProxy
     ? ` OI turun ${oiDropPct!.toFixed(2)}% bersamaan (proxy forced-liquidation cascade -- BUKAN data liquidation riil, tidak tersedia/WAF-blocked).`
     : "";
 
+  // Zona wick = bagian candle yang jadi "tusukan" (upper: dari body atas ke
+  // high; lower: dari low ke body bawah) -- cuma dihitung kalau arah hunt
+  // ketauan (direction != null), gak masuk akal cek konsentrasi tanpa arah.
+  let hasVolumeProxy = false;
+  let volumeConcentration: WickZoneVolumeConcentration | undefined;
+  if (direction !== null && trades && trades.length > 0) {
+    const zoneLow = direction === "longs" ? Math.max(open, close) : low;
+    const zoneHigh = direction === "longs" ? high : Math.min(open, close);
+    volumeConcentration = computeWickZoneVolumeConcentration(trades, zoneLow, zoneHigh, direction);
+    hasVolumeProxy = volumeConcentration.concentrationRatio >= WICK_ZONE_VOLUME_CONCENTRATION_THRESHOLD;
+  }
+  const volumeNote = hasVolumeProxy
+    ? ` Konsentrasi trade agresif ${(volumeConcentration!.concentrationRatio * 100).toFixed(0)}% di zona wick (proxy eksekusi besar tepat di level itu -- BUKAN data liquidation riil, tidak tersedia/WAF-blocked).`
+    : "";
+
+  const confirmCount = (hasOiDropProxy ? 1 : 0) + (hasVolumeProxy ? 1 : 0);
+  const proxyLabel = [hasOiDropProxy ? "OI history" : null, hasVolumeProxy ? "trade-volume concentration" : null]
+    .filter((v): v is string => v !== null)
+    .join(" + ");
+
   if (wickRatio > 0.7 && bodyRatio < 0.2 && reversal) {
+    const score = confirmCount === 2 ? 0.95 : confirmCount === 1 ? 0.9 : 0.8;
     return {
-      score: hasOiDropProxy ? 0.9 : 0.8,
-      evidence: `Wick panjang (${(wickRatio * 100).toFixed(0)}% dari range, ${dirLabel}) + body kecil + reversal candle -- pola stop-hunt klasik.${oiNote} Dari klines${hasOiDropProxy ? " + OI history" : ""}, TANPA data liquidation-by-price riil (tidak tersedia, WAF-blocked).`,
+      score,
+      evidence: `Wick panjang (${(wickRatio * 100).toFixed(0)}% dari range, ${dirLabel}) + body kecil + reversal candle -- pola stop-hunt klasik.${oiNote}${volumeNote} Dari klines${proxyLabel ? ` + ${proxyLabel}` : ""}, TANPA data liquidation-by-price riil (tidak tersedia, WAF-blocked).`,
     };
   }
   if (wickRatio > 0.6) {
+    const score = confirmCount === 2 ? 0.65 : confirmCount === 1 ? 0.6 : 0.5;
     return {
-      score: hasOiDropProxy ? 0.6 : 0.5,
-      evidence: `Wick cukup panjang (${(wickRatio * 100).toFixed(0)}% dari range) tapi belum full pola stop-hunt (butuh body kecil + reversal searah wick).${oiNote}`,
+      score,
+      evidence: `Wick cukup panjang (${(wickRatio * 100).toFixed(0)}% dari range) tapi belum full pola stop-hunt (butuh body kecil + reversal searah wick).${oiNote}${volumeNote}`,
     };
   }
   return { score: 0.1, evidence: `Tidak ada wick signifikan (${(wickRatio * 100).toFixed(0)}% dari range).` };
@@ -293,6 +363,10 @@ export async function computeMmSignals(symbol: string): Promise<MmSignals> {
           // -- gak fetch baru. Window OI (getOpenInterestHistNative 1h x2)
           // gak persis align ke candle wick ini, cuma approksimasi.
           oiDropPct: oiChangePct,
+          // REUSE aggTrades yang sama persis dipakai buat CVD (computeCvdFromTrades
+          // di atas) -- gak fetch baru. 100 trade terakhir juga cuma approksimasi
+          // window candle wick ini (bukan time-bounded ke candle itu spesifik).
+          trades: aggTrades,
         })
       : { score: 0.1, evidence: "Candle tidak cukup untuk analisis stop-hunt." },
     basisArb: calculateBasisArbScore({
@@ -318,10 +392,15 @@ export function registerMmDetectionTools(server: McpServer): void {
       description:
         "Gabungkan 6 sinyal (absorption, spoofing, stop-hunt, basis arbitrage, OI divergence, funding extreme) jadi " +
         "1 skor + tier (Weak/Moderate/Strong/Extreme) -- ganti 5-6 tool call manual. BUKAN rekomendasi trading. " +
-        "Spoofing pakai 2-snapshot order book riil (~1-2 detik lebih lambat dari tool lain karenanya). Stop-hunt " +
-        "cek wick simetris + OI-drop proxy, TETAP TANPA data liquidation riil (tidak tersedia, WAF-blocked, " +
-        "permanen) -- lihat docs/mm_detection_framework.md untuk batasan lengkap. Snapshot juga disimpan tiap 5 " +
-        "menit ke D1 (binance_backtest_signal untuk validasi empiris).",
+        "Spoofing pakai 2-snapshot order book RIIL (~1-2 detik lebih lambat dari tool lain karenanya, sama " +
+        "mekanisme dengan binance_get_orderbook_delta) -- BUKAN heuristik 1-snapshot lagi. Stop-hunt cek wick " +
+        "simetris + 2 proxy independen (OI-drop dan konsentrasi trade agresif per level harga di zona wick, " +
+        "reuse fetch yang sudah ada) buat confidence forced-liquidation lebih tinggi, TETAP TANPA data " +
+        "liquidation-by-price riil (tidak tersedia, WAF-blocked, permanen) -- lihat docs/mm_detection_framework.md " +
+        "untuk batasan lengkap. Confidence tiap sinyal beda-beda: spoofing/basisArb/fundingExtreme pakai data " +
+        "resmi Binance langsung (lebih tinggi), stop-hunt masih proxy tak-langsung (lebih rendah, evidence text " +
+        "tiap response bilang proxy mana yang aktif). Snapshot juga disimpan tiap 5 menit ke D1 " +
+        "(binance_backtest_signal untuk validasi empiris).",
       inputSchema: { symbol: symbolSchema },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },

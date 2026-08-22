@@ -107,6 +107,72 @@ describe("calculateStopHuntScore", () => {
     const result = calculateStopHuntScore({ high: 115, low: 95, open: 100.5, close: 100, prevOpen: 101, prevClose: 99, oiDropPct: -5 });
     expect(result.score).toBe(0.6);
   });
+
+  function tradeAt(price: number, qty: number, isSell: boolean) {
+    return { a: 0, p: String(price), q: String(qty), f: 0, l: 0, T: 0, m: isSell };
+  }
+
+  it("raises score to 0.9 when aggressive sell volume is concentrated in the upper wick zone (trade-volume proxy, no OI-drop)", () => {
+    // Wick zone for the upper-wick/hunt-of-longs fixture is [100.5, 115].
+    // Sell volume (m:true) mostly inside that zone -> concentrationRatio >= 0.3.
+    const trades = [
+      tradeAt(110, 5, true), // sell, in zone
+      tradeAt(112, 5, true), // sell, in zone
+      tradeAt(96, 2, true), // sell, OUTSIDE zone
+      tradeAt(105, 3, false), // buy, irrelevant to "longs" direction
+    ];
+    const result = calculateStopHuntScore({
+      high: 115, low: 95, open: 100.5, close: 100, prevOpen: 99, prevClose: 101,
+      trades,
+    });
+    expect(result.score).toBe(0.9);
+    expect(result.evidence).toContain("Konsentrasi trade agresif");
+    expect(result.evidence).toContain("BUKAN data liquidation riil");
+  });
+
+  it("does not raise score when aggressive sell volume is spread out, not concentrated in the wick zone", () => {
+    const trades = [
+      tradeAt(96, 5, true),
+      tradeAt(97, 5, true),
+      tradeAt(98, 5, true),
+      tradeAt(112, 2, true), // small amount in zone, rest spread outside
+    ];
+    const result = calculateStopHuntScore({
+      high: 115, low: 95, open: 100.5, close: 100, prevOpen: 99, prevClose: 101,
+      trades,
+    });
+    expect(result.score).toBe(0.8);
+  });
+
+  it("raises score to 0.95 when BOTH OI-drop proxy AND trade-volume concentration confirm together", () => {
+    const trades = [tradeAt(110, 5, true), tradeAt(112, 5, true)];
+    const result = calculateStopHuntScore({
+      high: 115, low: 95, open: 100.5, close: 100, prevOpen: 99, prevClose: 101,
+      oiDropPct: -3,
+      trades,
+    });
+    expect(result.score).toBe(0.95);
+  });
+
+  it("raises the moderate tier via trade-volume concentration alone (0.5 -> 0.6)", () => {
+    // wickRatio = (113-101.3)/18 = 0.65 -- in (0.6, 0.7], partial tier, but
+    // direction IS determined (reversal true) so the volume-zone check applies.
+    const trades = [tradeAt(110, 5, true), tradeAt(112, 5, true)];
+    const result = calculateStopHuntScore({
+      high: 113, low: 95, open: 101.3, close: 100, prevOpen: 99, prevClose: 100.5,
+      trades,
+    });
+    expect(result.score).toBe(0.6);
+  });
+
+  it("ignores trades when direction can't be determined (no reversal) -- no crash, base score unaffected", () => {
+    const trades = [tradeAt(110, 5, true)];
+    const result = calculateStopHuntScore({
+      high: 102, low: 99, open: 100, close: 101.5, prevOpen: 99, prevClose: 100,
+      trades,
+    });
+    expect(result.score).toBe(0.1);
+  });
 });
 
 describe("calculateBasisArbScore", () => {

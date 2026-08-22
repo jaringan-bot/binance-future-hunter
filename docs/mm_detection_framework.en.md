@@ -127,7 +127,11 @@
 > [`docs/superpowers/specs/2026-08-11-realtime-liquidation-stream-design.md`](superpowers/specs/2026-08-11-realtime-liquidation-stream-design.md).
 > The only fix (a paid always-on relay, ~$5-20/month, outside Cloudflare) **has been explicitly declined by the user** — real liquidation-by-price data will NOT be available in this project unless that decision changes. Don't suggest it again unless asked.
 >
-> **Update 2026-08-22 — permanent mitigation via an OI-drop proxy:** the `stopHunt` signal in `binance_detect_mm_activity` now (1) checks the wick SYMMETRICALLY — upper wick (hunt of longs) AND lower wick (hunt of shorts); it used to only check the upper wick (a bug — downside stop-hunts were never detected), and (2) uses an **OI-drop proxy**: if open interest drops ≥2% coinciding with that wick candle (REUSING the OI-history fetch already made for the `oiDivergence` signal, not a new fetch), that's treated as a proxy for a forced-liquidation cascade (mass stop-outs reduce OI) and raises the confidence tier (0.8→0.9, 0.5→0.6). This is **NOT real liquidation data** — just an OI-drop + wick-candle correlation, STILL WITHOUT confirmation from actual liquidation-by-price data. See Section 8/11 below.
+> **Update 2026-08-22 — permanent mitigation via 2 independent proxies:** the `stopHunt` signal in `binance_detect_mm_activity` now (1) checks the wick SYMMETRICALLY — upper wick (hunt of longs) AND lower wick (hunt of shorts); it used to only check the upper wick (a bug — downside stop-hunts were never detected), and (2) uses **2 independent forced-liquidation proxies**, each able to raise the confidence tier on its own (and both together raise it further):
+> - **OI-drop proxy**: open interest drops ≥2% coinciding with that wick candle (REUSING the OI-history fetch already made for the `oiDivergence` signal, not a new fetch) — mass stop-outs reduce OI.
+> - **Trade-volume concentration proxy** (new): from the last 100 aggTrades already fetched for CVD (REUSED, not a new fetch), checks whether AGGRESSIVE trade volume in the hunt's direction (sells for hunt-of-longs, buys for hunt-of-shorts) is ≥30% concentrated RIGHT in that wick candle's price zone (rather than spread across the whole range) — a proxy for "a large execution happened right at that level," from Binance's public trade data (not liquidation-tagged, but price-anchored).
+>
+> Tier: 0 proxies → 0.8/0.5 (base), 1 proxy → 0.9/0.6, both proxies → 0.95/0.65. Neither is **real liquidation data** — just a correlation (OI-drop + wick) or (trade concentration + wick), STILL WITHOUT confirmation from actual liquidation-by-price data (Binance doesn't expose which trades were liquidation-triggered). See Section 8/11 below.
 
 ---
 
@@ -222,8 +226,9 @@
 │  → binance_get_basis_history (watchlist always, other pairs      │
 │  best-effort) or manual repeated snapshots                       │
 ├─────────────────────────────────────────────────────────────┤
-│  STEP 5: Klines (symmetric wick) + OI-drop proxy, STILL NO      │
-│  real liquidation data (permanently removed, WAF-blocked)        │
+│  STEP 5: Klines (symmetric wick) + OI-drop proxy + aggressive   │
+│  trade-price concentration, STILL NO real liquidation data       │
+│  (permanently removed, WAF-blocked)                              │
 ├─────────────────────────────────────────────────────────────┤
 │  STEP 6: Cross-check top trader ratio                            │
 │  → Moving opposite to the blended ratio? (baseline from that     │
@@ -273,7 +278,7 @@
 | `binance_get_funding_rate` | Funding manipulation, scheduled rebalancing | — |
 | `binance_get_funding_rate_history` | Funding pattern analysis | — |
 | `binance_get_klines` | Wick analysis, reversal confirmation, price mapping | — |
-| `binance_detect_mm_activity` | ALL 6 signals above at once, automated + scored (see Section 11) | Spoofing is now real 2-snapshot (~1-2s slower). Stop-hunt is symmetric + OI-drop proxy, STILL no real liquidation data (permanently removed) |
+| `binance_detect_mm_activity` | ALL 6 signals above at once, automated + scored (see Section 11) | Spoofing is now real 2-snapshot (~1-2s slower). Stop-hunt is symmetric + OI-drop proxy + aggressive trade-price concentration proxy, STILL no real liquidation data (permanently removed) |
 | `binance_backtest_signal` | Empirically validates `binance_detect_mm_activity`'s historical scores (win rate/avg return) | Forward return computed on-demand from klines, not a simulation of real execution; fixed 50-pair watchlist only |
 
 ---
@@ -288,7 +293,7 @@ This framework **does not prove** the presence of a market maker definitively �
 3. **Market context matters** — MM signals are more valid during low volume/consolidation areas.
 4. **False positives exist** — a news event or a large retail whale can trigger similar signals.
 5. **Calibrate per pair** — top-trader ratio thresholds must be built from that pair's own historical data (~5-30 days, depending on resolution), not a universal number.
-6. **Know the technical limitations** — 300-900ms latency/call, no liquidation data at all (permanently removed, see Section 4.1; the OI-drop proxy is the best available mitigation), limited top-trader ratio historical retention, sub-second real-time detection not feasible, no WebSocket available. 2-snapshot spoofing (`binance_get_orderbook_delta`) is NOW available but adds ~1-2s latency.
+6. **Know the technical limitations** — 300-900ms latency/call, no liquidation data at all (permanently removed, see Section 4.1; the OI-drop + trade-volume-concentration proxies are the best available mitigation), limited top-trader ratio historical retention, sub-second real-time detection not feasible, no WebSocket available. 2-snapshot spoofing (`binance_get_orderbook_delta`) is NOW available but adds ~1-2s latency.
 
 ---
 
@@ -344,7 +349,7 @@ checklist**, don't conflate them:
 | Granularity | Yes/no checklist (0-6 discrete) | Continuous score per signal (0-1) |
 | Signal count | 6 (order book, CVD, OI, basis, liquidation+klines, top trader) | 6 but DIFFERENT composition (see mapping below) |
 | Tier | Weak(1-2)/Moderate(3-4)/Strong(5-6) | Weak(<2)/Moderate(<3.5)/Strong(<5)/Extreme(≥5) |
-| Liquidation | Section 4.1 — **permanently removed**, `binance_get_liquidation_history` no longer exists | NOT used — stop-hunt comes from `klines` (symmetric wick) + an OI-drop proxy (see limitations below) |
+| Liquidation | Section 4.1 — **permanently removed**, `binance_get_liquidation_history` no longer exists | NOT used — stop-hunt comes from `klines` (symmetric wick) + an OI-drop proxy + a trade-volume-concentration proxy (see limitations below) |
 
 ### Automated signal → manual section mapping
 
@@ -352,7 +357,7 @@ checklist**, don't conflate them:
 |---|---|---|---|
 | `absorption` | 2.1 Order Book Absorption | Dominant CVD buy% (>60%) + flat price (\|Δ\|<0.5%) + sharp OI increase (>3%) → score 0.7-1.0. CVD buy% (>55%) + falling price → 0.5 (weak). Otherwise → 0.1 | **Medium** — uses CVD+OI+price (official Binance data), BUT only a single klines snapshot window, not a spot-CVD cross-check like the manual Section 2.1 |
 | `spoofing` | 3.1 Wall Pull / Spoofing | 2 order-book snapshots ~1.5s apart (internal `binance_get_orderbook_delta`). A wall (qty ≥2x median) that disappears/shrinks >70% WITHOUT the opposite side trading through that price level → 0.9 (the LARGEST wall was spoofed) or 0.5 (a secondary wall). Otherwise → 0.1 | **High** (largest wall spoofed) / **Medium** (secondary wall) — now real 2-snapshot detection, no longer a 1-snapshot proxy (see Section 3.1/3.2, `src/tools/orderbookDelta.ts`) |
-| `stopHunt` | 4.1 Liquidation Cluster Reversal (permanently removed) | Symmetric wick (upper=hunt of longs OR lower=hunt of shorts, used to be upper-only — a bug) >70% of range + body <20% + reversal in the wick's direction → 0.8 (0.9 if OI dropped ≥2% concurrently, a forced-liquidation proxy). Wick >60% alone → 0.5 (0.6 with the OI-drop proxy). Otherwise → 0.1 | **Low-Medium** — from `klines` (symmetric wick) + an OI-drop proxy (REUSES the OI-history fetch, not a new call), STILL WITHOUT confirmation from real liquidation-by-price data (permanently removed, see Section 4.1) |
+| `stopHunt` | 4.1 Liquidation Cluster Reversal (permanently removed) | Symmetric wick (upper=hunt of longs OR lower=hunt of shorts, used to be upper-only — a bug) >70% of range + body <20% + reversal in the wick's direction → 0.8, +0.05/active proxy (OI dropped ≥2%, and/or aggressive trade volume ≥30% concentrated in the wick zone) → 0.9 (1 proxy) / 0.95 (both). Wick >60% alone → 0.5, same +proxy pattern → 0.6/0.65. Otherwise → 0.1 | **Low-Medium** — from `klines` (symmetric wick) + 2 independent proxies (REUSES the existing OI-history & aggTrades fetches, no new calls), STILL WITHOUT confirmation from real liquidation-by-price data (permanently removed, see Section 4.1) |
 | `basisArb` | 5.1 Spot-Futures Basis Arbitrage | If the symbol has D1 history (fixed 50-pair watchlist): basis z-score >2 std dev + funding >0.05% → 0.9. Without history: basis >2x threshold → 0.7 (less accurate, noted in the evidence text), >threshold → 0.5. Otherwise → 0.1 | **Medium-High** for the 50-pair watchlist (has 24h D1 historical context), **Medium** for other pairs (static threshold, no distribution context) |
 | `oiDivergence` | 2.1 (sharp OI increase) + 6.STEP3 | OI up >5% + flat price (\|Δ\|<1%) → 0.8. OI up >3% against price direction → 0.7. Otherwise → 0.1 | **Medium** — official Binance OI data, but only a 1-hour window (2 data points), not a long history |
 | `fundingExtreme` | 5.2 Funding Rate Manipulation | Funding >3x threshold → 1.0, >2x → 0.8, >threshold → 0.6, below → proportional scale | **High** — funding rate straight from Binance (`premiumIndex`), the most reliable of these 6 signals |
