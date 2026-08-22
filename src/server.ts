@@ -21,5 +21,34 @@ import { registerSmartMoneyTools } from "./tools/smartMoney.js";
 import { registerFuturesGridRiskTool } from "./tools/futuresGridRisk.js";
 import { registerRiskTools } from "./tools/risk.js";
 import { registerFullPipelineTools } from "./tools/fullPipeline.js";
+import { registerNativeExtrasTools } from "./tools/nativeExtras.js";
 import { resetToolRegistry } from "./toolWrapper.js";
-export function createServer(): McpServer { const server = new McpServer({ name:'whalescope-mcp', version:'1.0.0'}); resetToolRegistry(); registerFundingTools(server); registerOpenInterestTools(server); registerRatiosTools(server); registerOrderbookTools(server); registerOrderbookDeltaTools(server); registerTradesTools(server); registerPriceTools(server); registerSpotTools(server); registerCompositeTools(server); registerConfigTools(server); registerBasisHistoryTools(server); registerBasisTools(server); registerWallPersistenceTools(server); registerMmDetectionTools(server); registerMarketRegimeTools(server); registerCatalogTools(server); registerBacktestTools(server); registerCrossExchangeTools(server); registerSmartMoneyTools(server); registerFuturesGridRiskTool(server); registerRiskTools(server); registerFullPipelineTools(server); return server;}
+
+export function createServer(): McpServer {
+  const server = new McpServer({ name: "whalescope-mcp", version: "1.0.0" });
+  resetToolRegistry();
+  registerFundingTools(server);
+  registerOpenInterestTools(server);
+  registerRatiosTools(server);
+  registerOrderbookTools(server);
+  registerOrderbookDeltaTools(server);
+  registerTradesTools(server);
+  registerPriceTools(server);
+  registerSpotTools(server);
+  registerCompositeTools(server);
+  registerConfigTools(server);
+  registerBasisHistoryTools(server);
+  registerBasisTools(server);
+  registerWallPersistenceTools(server);
+  registerMmDetectionTools(server);
+  registerMarketRegimeTools(server);
+  registerCatalogTools(server);
+  registerBacktestTools(server);
+  registerCrossExchangeTools(server);
+  registerSmartMoneyTools(server);
+  registerFuturesGridRiskTool(server);
+  registerRiskTools(server);
+  registerFullPipelineTools(server);
+  registerNativeExtrasTools(server);
+  return server;
+}
