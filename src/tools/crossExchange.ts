@@ -65,13 +65,9 @@ export function registerCrossExchangeTools(server: McpServer): void {
     {
       title: "Bandingkan Funding Rate Antar Exchange (Binance/Bybit/OKX/Hyperliquid)",
       description:
-        "Bandingkan funding rate, last price, open interest, dan 24h change satu pair across Binance, Bybit, OKX, " +
-        "dan Hyperliquid dalam SATU tool call -- deteksi divergensi funding (indikasi arbitrase atau sentimen " +
-        "beda antar platform), lihat DI MANA leverage paling menumpuk (OI per exchange), dan cross-confirm sinyal " +
-        "binance_detect_mm_activity (sinyal kuat di Binance doang vs muncul di semua exchange = confidence beda). " +
-        "Symbol pakai format Binance (BTCUSDT), otomatis di-mapping ke format masing-masing exchange -- kalau pair " +
-        "gak listed di exchange tertentu (umum buat altcoin kecil), baris itu ditandai gagal/gak tersedia TANPA " +
-        "gagalin exchange lain.",
+        "Bandingkan funding rate, last price, OI, 24h change 1 pair across Binance/Bybit/OKX/Hyperliquid -- deteksi " +
+        "divergensi funding, lihat di mana leverage menumpuk. Symbol format Binance (BTCUSDT), auto-mapped. Pair " +
+        "yang gak listed di exchange tertentu ditandai gagal TANPA gagalin exchange lain.",
       inputSchema: { symbol: symbolSchema },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },

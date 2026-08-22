@@ -14,12 +14,9 @@ export function registerRiskTools(server: McpServer): void {
     {
       title: "ADL Risk Rating",
       description:
-        "Mengambil rating risiko Auto-Deleveraging (ADL) untuk sebuah pair (LANGSUNG dari Binance native, endpoint " +
-        "publik). Rating LOW/MEDIUM/HIGH nunjukin seberapa besar risiko posisi di pair itu bakal kena ADL duluan " +
-        "kalau ada liquidation besar dan insurance fund gak cukup nutup -- makin tinggi rating, makin besar risiko " +
-        "sistem-wide di pair tersebut (bukan spesifik posisi kamu sendiri, ini agregat di level symbol). " +
-        "PENTING: nilai ini di-update Binance tiap 30 MENIT, BUKAN real-time -- jangan dipakai untuk keputusan " +
-        "eksekusi presisi detik, cuma buat konteks risiko umum pair itu.",
+        "Rating risiko Auto-Deleveraging (ADL) LOW/MEDIUM/HIGH per pair (agregat level symbol, bukan posisi kamu), " +
+        "LANGSUNG dari Binance native. PENTING: di-update tiap 30 MENIT, bukan real-time -- konteks risiko umum, " +
+        "bukan keputusan eksekusi presisi detik.",
       inputSchema: { symbol: symbolSchema },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
