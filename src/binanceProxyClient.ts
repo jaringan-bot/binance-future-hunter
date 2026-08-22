@@ -6,36 +6,27 @@
 // dasar — sudah dites & dikonfirmasi). Vercel di region Singapura (sin1)
 // tidak kena block WAF itu DAN tidak kena geo-restriction Binance (yang
 // memblokir region US/iad1, region default Vercel).
-//
-// Proxy ini expose data yang TIDAK tersedia atau tidak akurat presisinya
-// lewat Coinalyze:
-// - Order book depth (bid/ask real-time dengan size per level)
-// - Top-trader long/short ratio (breakdown akun TOP TRADER, terpisah dari
-//   retail/global account — ini yang Coinalyze TIDAK punya, cuma versi
-//   blended semua trader)
-// - Aggregate trades (untuk hitung CVD granular per-trade, bukan per-jam)
-// - Funding rate (history & terkini) dan klines/OHLCV — ditambahkan karena
-//   Coinalyze terbukti salah skala untuk pair kecil (funding rate DODOXUSDT
-//   dilaporkan -57% padahal Binance asli 0.005%) dan harga dibulatkan
-//   terlalu kasar (2 desimal fixed, menghancurkan presisi pair < $1).
-//   Binance native adalah source of truth untuk keduanya.
-// - Open interest (snapshot & histori), long/short ratio blended (global
-//   account), dan taker buy/sell volume ratio — dipindah dari Coinalyze
-//   karena Binance punya endpoint publik resmi untuk ketiganya, jadi tidak
-//   perlu lagi bergantung ke agregator pihak ketiga untuk data ini.
-//
-// Lihat proxy/README.md untuk detail whitelist path yang diizinkan proxy ini.
 
 import { fetchWithRetry } from "./retry.js";
 import { withCache } from "./cache.js";
 import { checkAndRecordRequest } from "./rateLimiter.js";
 
-const NO_CACHE_PATHS = new Set(["/fapi/v1/depth", "/fapi/v1/aggTrades", "/api/v3/depth", "/api/v3/aggTrades"]);
+const NO_CACHE_PATHS = new Set([
+  "/fapi/v1/depth",
+  "/fapi/v1/aggTrades",
+  "/fapi/v1/trades",
+  "/fapi/v1/rpiDepth",
+  "/fapi/v1/allForceOrders",
+  "/api/v3/depth",
+  "/api/v3/aggTrades",
+]);
 
 const SHORT_CACHE_PATHS = new Set([
   "/fapi/v1/premiumIndex",
   "/fapi/v1/openInterest",
   "/fapi/v1/ticker/24hr",
+  "/fapi/v1/ticker/bookTicker",
+  "/fapi/v2/ticker/price",
   "/api/v3/ticker/price",
   "/api/v3/ticker/24hr",
   "/api/v3/ticker/bookTicker",
@@ -52,6 +43,7 @@ const MEDIUM_CACHE_PATHS = new Set([
   "/fapi/v1/indexPriceKlines",
   "/fapi/v1/premiumIndexKlines",
   "/fapi/v1/continuousKlines",
+  "/fapi/v1/fundingInfo",
 ]);
 const MEDIUM_CACHE_TTL_SECONDS = 60;
 
@@ -64,6 +56,7 @@ const LONG_CACHE_PATHS = new Set([
   "/futures/data/takerlongshortRatio",
   "/futures/data/delivery-price",
   "/futures/data/basis",
+  "/fapi/v1/tradingSchedule",
 ]);
 const LONG_CACHE_TTL_SECONDS = 300;
 
@@ -116,6 +109,14 @@ const PROXY_ALLOWED_PATHS = new Set([
   "/futures/data/delivery-price",
   "/fapi/v1/constituents",
   "/fapi/v1/exchangeInfo",
+  // NEW native extras
+  "/fapi/v1/trades",
+  "/fapi/v1/ticker/bookTicker",
+  "/fapi/v2/ticker/price",
+  "/fapi/v1/fundingInfo",
+  "/fapi/v1/rpiDepth",
+  "/fapi/v1/tradingSchedule",
+  "/fapi/v1/allForceOrders",
 ]);
 
 interface ProxyEndpoint {
@@ -483,10 +484,10 @@ export async function getSpotExchangeInfo(symbol: string): Promise<SpotSymbolInf
 export interface FuturesLotSizeFilter { filterType: "LOT_SIZE"; minQty: string; stepSize: string; }
 export interface FuturesMinNotionalFilter { filterType: "MIN_NOTIONAL"; notional: string; }
 type FuturesSymbolFilter = FuturesLotSizeFilter | FuturesMinNotionalFilter | { filterType: string; [key: string]: unknown };
-export interface FuturesExchangeInfoSymbol { symbol: string; filters: FuturesSymbolFilter[]; }
+export interface FuturesExchangeInfoSymbol { symbol: string; filters: FuturesSymbolFilter[]; status?: string; contractType?: string; }
 export interface FuturesExchangeInfoResponse { symbols: FuturesExchangeInfoSymbol[]; }
-export async function getFuturesExchangeInfo(symbol: string): Promise<FuturesExchangeInfoResponse> {
-  return callProxy<FuturesExchangeInfoResponse>("/fapi/v1/exchangeInfo", { symbol: symbol.toUpperCase() });
+export async function getFuturesExchangeInfo(symbol?: string): Promise<FuturesExchangeInfoResponse> {
+  return callProxy<FuturesExchangeInfoResponse>("/fapi/v1/exchangeInfo", symbol ? { symbol: symbol.toUpperCase() } : {});
 }
 
 export interface AdlRiskEntry { symbol: string; adlRisk: string; updateTime: number; }
@@ -555,4 +556,90 @@ export async function getBasisNative(
     period,
     limit,
   });
+}
+
+// === NEW NATIVE EXTRAS (2026-08-22) ===
+
+export interface RecentTrade {
+  id: number;
+  price: string;
+  qty: string;
+  quoteQty: string;
+  time: number;
+  isBuyerMaker: boolean;
+}
+
+export async function getRecentTrades(symbol: string, limit: number): Promise<RecentTrade[]> {
+  return callProxy<RecentTrade[]>("/fapi/v1/trades", { symbol: symbol.toUpperCase(), limit });
+}
+
+export interface BookTicker {
+  symbol: string;
+  bidPrice: string;
+  bidQty: string;
+  askPrice: string;
+  askQty: string;
+  time?: number;
+}
+
+export async function getBookTicker(symbol?: string): Promise<BookTicker | BookTicker[]> {
+  return callProxy<BookTicker | BookTicker[]>("/fapi/v1/ticker/bookTicker", symbol ? { symbol: symbol.toUpperCase() } : {});
+}
+
+export interface PriceTicker {
+  symbol: string;
+  price: string;
+  time?: number;
+}
+
+export async function getPriceTicker(symbol?: string): Promise<PriceTicker | PriceTicker[]> {
+  return callProxy<PriceTicker | PriceTicker[]>("/fapi/v2/ticker/price", symbol ? { symbol: symbol.toUpperCase() } : {});
+}
+
+export interface FundingInfoEntry {
+  symbol: string;
+  adjustedFundingRateCap?: string;
+  adjustedFundingRateFloor?: string;
+  fundingIntervalHours?: number;
+  interestRate?: string;
+  [key: string]: unknown;
+}
+
+export async function getFundingInfo(symbol?: string): Promise<FundingInfoEntry | FundingInfoEntry[]> {
+  return callProxy<FundingInfoEntry | FundingInfoEntry[]>("/fapi/v1/fundingInfo", symbol ? { symbol: symbol.toUpperCase() } : {});
+}
+
+export async function getRpiDepth(symbol: string, limit: number): Promise<OrderBookDepth> {
+  return callProxy<OrderBookDepth>("/fapi/v1/rpiDepth", { symbol: symbol.toUpperCase(), limit });
+}
+
+export async function getTradingSchedule(): Promise<unknown[]> {
+  return callProxy<unknown[]>("/fapi/v1/tradingSchedule", {});
+}
+
+export interface ForceOrder {
+  symbol: string;
+  price: string;
+  origQty: string;
+  executedQty?: string;
+  averagePrice?: string;
+  status: string;
+  time: number;
+  side: string;
+  [key: string]: unknown;
+}
+
+export async function getAllForceOrders(params: {
+  symbol?: string;
+  limit?: number;
+  startTime?: number;
+  endTime?: number;
+}): Promise<ForceOrder[]> {
+  const q: Record<string, string | number | undefined> = {
+    limit: params.limit,
+    startTime: params.startTime,
+    endTime: params.endTime,
+  };
+  if (params.symbol) q.symbol = params.symbol.toUpperCase();
+  return callProxy<ForceOrder[]>("/fapi/v1/allForceOrders", q);
 }

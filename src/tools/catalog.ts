@@ -98,6 +98,15 @@ const CATALOG_METADATA: Record<string, CatalogMetadata> = {
     useCase: "Decision chain penuh Grid Bot Futures (hard screen -> Tier-1 intel -> grid bounds -> risk -> keputusan) untuk 1-20 symbol",
     dependencies: ["funding", "oi", "ratios", "orderbook", "trades", "technical", "risk", "composite"],
   },
+  // Native extras (2026-08-22)
+  binance_get_exchange_info: { category: "config", tokenCost: "medium", useCase: "Trading rules, tick size, min qty, status pair sebelum order/grid", dependencies: [] },
+  binance_get_recent_trades: { category: "trades", tokenCost: "medium", useCase: "Trade individual mentah (bukan aggregate) + CVD micro-structure", dependencies: [] },
+  binance_get_book_ticker: { category: "orderbook", tokenCost: "low", useCase: "Best bid/ask + qty saja, sangat ringan dibanding full depth", dependencies: [] },
+  binance_get_price_ticker: { category: "technical", tokenCost: "low", useCase: "Harga terakhir saja (endpoint ringan)", dependencies: [] },
+  binance_get_funding_info: { category: "funding", tokenCost: "low", useCase: "Interval funding + cap/floor + interest rate per symbol", dependencies: [] },
+  binance_get_rpi_depth: { category: "orderbook", tokenCost: "medium", useCase: "Order book termasuk RPI orders (beda dari depth biasa)", dependencies: [] },
+  binance_get_trading_schedule: { category: "config", tokenCost: "low", useCase: "Jadwal sesi trading TradFi underlying assets", dependencies: [] },
+  binance_get_all_force_orders: { category: "risk", tokenCost: "medium", useCase: "Histori force orders / liquidations market-wide", dependencies: [] },
 };
 
 function truncateUseCase(description: string | undefined): string {
