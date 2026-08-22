@@ -57,6 +57,8 @@ const ALLOWED_PATHS_BY_MARKET: Record<string, Set<string>> = {
     "/futures/data/globalLongShortAccountRatio",
     "/futures/data/openInterestHist",
     "/futures/data/takerlongshortRatio",
+    // Histori basis resmi index vs futures (period 5m–1d)
+    "/futures/data/basis",
     // 9 endpoint publik (security NONE) tambahan dari gap-analysis vs
     // katalog resmi Market Data - Futures (USDS-M) REST API Binance.
     "/fapi/v1/symbolAdlRisk",
