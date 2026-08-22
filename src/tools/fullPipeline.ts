@@ -49,6 +49,7 @@ import { mapWithConcurrency } from "../concurrency.js";
 import { registerSafeTool } from "../toolWrapper.js";
 import { ToolResponseBuilder } from "../responseBuilder.js";
 import { fmtPrice } from "../format.js";
+import { computeGridVelocity, type GridVelocityResult } from "../gridVelocity.js";
 
 const REFERENCE_CAPITAL = 1000;
 
@@ -140,6 +141,8 @@ export interface SymbolPipelineResult {
   gridSetup?: GridBoundResult;
   risk?: RiskSection;
   gridBotConfig?: GridBotConfigSection;
+  /** Non-gate informational: matches needed + estimated time to breakeven. */
+  breakevenInfo?: GridVelocityResult;
   reasoning: string[];
   error?: string;
 }
@@ -588,6 +591,21 @@ export async function runPipelineForSymbol(symbol: string, opts: PipelineOpts): 
       gridRisk: chosenFinalRun,
     };
 
+    // ─── Non-gate: Matches Needed + Estimated Time to Breakeven ───
+    // Reuse candles1h yang sudah di-fetch Wave 1 (tidak ada call ekstra).
+    // minBreakevenCycles dari gridRisk adalah sumber matchesNeeded.
+    // Angka ini HANYA informasi tambahan — tidak mempengaruhi keputusan.
+    const matchesNeeded = chosenFinalRun?.minBreakevenCycles ?? 0;
+    const breakevenInfo = computeGridVelocity({
+      candles: candles1h,
+      lowerPrice: gridSetup.lowerPrice,
+      upperPrice: gridSetup.upperPrice,
+      gridCount: gridSetup.gridCount,
+      gridType: gridSetup.gridType,
+      matchesNeeded,
+      candleDurationHours: 1, // bounds berbasis TF 1h
+    });
+
     if (chosenLeverage === null) {
       preHardScreenNotes.push(
         `Tidak ada opsi leverage (${opts.maxLeverageOptions.join(", ")}) yang menghasilkan status SAFE/MODERATE dengan likuidasi aman di bawah stop-loss -- gridBotConfig.leverage null, lihat risk.evaluatedLeverages untuk detail tiap opsi yang dicoba.`,
@@ -603,6 +621,7 @@ export async function runPipelineForSymbol(symbol: string, opts: PipelineOpts): 
       gridSetup,
       risk: riskSection,
       gridBotConfig,
+      breakevenInfo,
       reasoning: [...preHardScreenNotes, ...tier1Score.notes, ...outcome.reasoning],
     };
   } catch (err) {
@@ -689,9 +708,9 @@ export function registerFullPipelineTools(server: McpServer): void {
       description:
         "Decision chain Grid Bot Futures penuh dalam 1 call, 1-20 symbol: hard screen -> Tier-1 intel (rankingScore " +
         "0-100) -> grid bounds (ATR + swing high/low) -> capital-solve exact per leverage -> TRADE/WATCH/NO_TRADE " +
-        "+ parameter Grid Bot siap-pakai. Gantikan ~8 tool call manual. Token cost TINGGI -- pakai untuk keputusan " +
-        "akhir, bukan eksplorasi (binance_get_tool_catalog untuk tool lebih murah). Known limitations lengkap: " +
-        "docs/full_pipeline_framework.md.",
+        "+ parameter Grid Bot siap-pakai. Juga mengembalikan Matches Needed + Estimasi Durasi ke Impas sebagai " +
+        "informasi non-gate. Gantikan ~8 tool call manual. Token cost TINGGI -- pakai untuk keputusan akhir, " +
+        "bukan eksplorasi. Known limitations: docs/full_pipeline_framework.md.",
       inputSchema: fullPipelineInputSchema,
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -742,10 +761,8 @@ export function registerFullPipelineTools(server: McpServer): void {
         };
 
         // Text dibatasi ke ringkasan + ranking table + reasoning singkat buat
-        // kandidat TRADE saja (maks 5 symbol, 3 alasan/symbol) -- detail penuh
-        // per symbol (gridBotConfig, reasoning lengkap, hardScreen, tier1,
-        // risk.evaluatedLeverages) TETAP ada di structuredContent.results[i],
-        // gak ada yang hilang, cuma gak dinarasikan panjang di teks lagi.
+        // kandidat TRADE saja (maks 5 symbol) -- detail penuh per symbol
+        // (termasuk breakevenInfo) TETAP ada di structuredContent.results[i].
         const builder = new ToolResponseBuilder()
           .header(`Full Pipeline — ${sorted.length} symbol`)
           .row("Total/TRADE/WATCH/NO_TRADE/Rejected", `${summary.total} / ${summary.traded} / ${summary.watch} / ${summary.noTrade} / ${summary.hardScreenRejected}`)
@@ -764,10 +781,20 @@ export function registerFullPipelineTools(server: McpServer): void {
 
         const tradeCandidates = sorted.filter((r) => r.decision === "TRADE").slice(0, 5);
         for (const r of tradeCandidates) {
-          builder.row(r.symbol, r.reasoning.slice(0, 3).join(" | ") || "-");
+          const be = r.breakevenInfo;
+          const matchesStr = be && be.matchesNeeded > 0 ? `🔁 Matches ke Impas: ${be.matchesNeeded}` : "";
+          const timeStr =
+            be && be.estHoursToBreakeven != null
+              ? `⏱️ Estimasi Durasi ke Impas: ~${be.estHoursToBreakeven.toFixed(1)} jam (~${(be.estDaysToBreakeven ?? 0).toFixed(1)} hari)`
+              : "";
+          const beLine = [matchesStr, timeStr].filter(Boolean).join(" | ");
+          builder.row(r.symbol, (r.reasoning.slice(0, 2).join(" | ") || "-") + (beLine ? ` | ${beLine}` : ""));
         }
 
-        builder.note("Detail lengkap per symbol (gridBotConfig, reasoning, hardScreen, tier1, risk) ada di structuredContent.results[i].");
+        builder.note(
+          "Detail lengkap per symbol (gridBotConfig, reasoning, hardScreen, tier1, risk, breakevenInfo) ada di structuredContent.results[i]. " +
+            "Matches Needed & Estimasi Durasi ke Impas adalah informasi non-gate (tidak mempengaruhi keputusan TRADE/WATCH/NO_TRADE).",
+        );
 
         const built = builder.build();
 
