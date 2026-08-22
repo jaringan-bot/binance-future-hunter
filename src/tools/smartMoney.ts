@@ -26,21 +26,11 @@ export function registerSmartMoneyTools(server: McpServer): void {
     {
       title: "Smart Money vs Retail Divergence (Composite)",
       description:
-        "Skor divergensi positioning 'smart money' (top trader, by size posisi) vs 'retail' (global account, " +
-        "blended) untuk satu pair Futures, dari kombinasi 5 variabel: top trader position ratio, global account " +
-        "ratio, delta OI 4 jam terakhir, funding rate terkini, dan orderbook depth imbalance (depth 20) -- 5 tool " +
-        "call sekaligus lewat Promise.all. BUKAN deteksi 'MM memanipulasi harga' (MM murni delta-neutral/hedged, " +
-        "rasio long/short sendiri bukan bukti manipulasi) -- ini mengukur DIVERGENSI arah antara akun besar vs akun " +
-        "retail. Beda dari binance_detect_mm_activity (6 sinyal absorption/spoofing/stop-hunt/basis-arb terpisah) -- " +
-        "tool ini fokus khusus top-trader-vs-retail positioning. Mengembalikan salah satu dari 4 kondisi: " +
-        "LONG_LIQUIDATION_RISK (retail trap -- retail dominan long, top trader short/netral, OI naik), " +
-        "BULLISH_ACCUMULATION (top trader dominan long, retail dominan short, OI naik), SHORT_SQUEEZE_RISK " +
-        "(funding rate negatif ekstrem + top trader tetap long + harga belum naik), atau NEUTRAL. Plus " +
-        "smartMoneyBias, retailSentiment, confidenceScore (0-100, dari margin di atas threshold + sinyal " +
-        "pendukung searah, BUKAN probabilitas statistik terkalibrasi -- lihat docs/mm_detection_framework.md " +
-        "Section 4.2 untuk kenapa threshold absolut pada top-trader ratio harus dipakai hati-hati). Cross-check " +
-        "dengan tool individual (binance_get_top_trader_ratio, binance_get_long_short_ratio) untuk histori/detail " +
-        "lebih dalam.",
+        "Skor divergensi 'smart money' (top trader) vs 'retail' (global account) dari 5 variabel (top trader ratio, " +
+        "global account ratio, OI delta 4h, funding, orderbook imbalance depth 20). BUKAN deteksi manipulasi harga -- " +
+        "mengukur DIVERGENSI arah. Kondisi: LONG_LIQUIDATION_RISK, BULLISH_ACCUMULATION, SHORT_SQUEEZE_RISK, atau " +
+        "NEUTRAL. confidenceScore (0-100) BUKAN probabilitas terkalibrasi -- lihat docs/mm_detection_framework.md " +
+        "Section 4.2 untuk batasan threshold top-trader ratio.",
       inputSchema: { symbol: symbolSchema },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -100,43 +90,24 @@ export function registerSmartMoneyTools(server: McpServer): void {
         });
 
         const builder = new ToolResponseBuilder()
-          .header(`Smart Money vs Retail Divergence — ${symbol}`)
-          .row("Kondisi", result.condition)
-          .row("Smart Money Bias", result.smartMoneyBias)
-          .row("Retail Sentiment", result.retailSentiment)
-          .row("Confidence Score", `${result.confidenceScore}%`)
-          .row("Divergence Score", `${result.divergenceScore >= 0 ? "+" : ""}${result.divergenceScore}`)
-          .subheader("5 Variabel Mentah")
-          .table(
-            ["Variabel", "Nilai"],
-            [
-              ["Top Trader Position Ratio", fmtNum(topTraderPositionRatio, 4)],
-              ["Global Account Ratio", fmtNum(globalAccountRatio, 4)],
-              ["OI Delta (4 jam)", `${oiDelta4hPct >= 0 ? "+" : ""}${oiDelta4hPct.toFixed(2)}%`],
-              ["OI Delta (24 jam, konteks tambahan)", `${oiDelta24hPct >= 0 ? "+" : ""}${oiDelta24hPct.toFixed(2)}%`],
-              ["Funding Rate", fmtPct(fundingRate, 4)],
-              ["Orderbook Imbalance (depth 20, % bid)", `${orderBookImbalancePct.toFixed(2)}%`],
-              ["Price Bias (24 candle @1h)", `${priceBias} (${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}%)`],
-            ],
+          .header(`${symbol} — Smart Money vs Retail`)
+          .row("Kondisi", `${result.condition} (confidence ${result.confidenceScore}%, divScore ${result.divergenceScore >= 0 ? "+" : ""}${result.divergenceScore})`)
+          .row("Smart Money", result.smartMoneyBias)
+          .row("Retail", result.retailSentiment)
+          .row(
+            "Raw",
+            `topTrader ${fmtNum(topTraderPositionRatio, 4)} | global ${fmtNum(globalAccountRatio, 4)} | OI4h ${oiDelta4hPct >= 0 ? "+" : ""}${oiDelta4hPct.toFixed(2)}% | funding ${fmtPct(fundingRate, 4)} | OBI20 ${orderBookImbalancePct.toFixed(1)}% | price ${priceBias} ${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}%`,
           )
-          .subheader("Analisis")
-          .interpretation("Divergensi", result.divergenceAnalysis)
-          .note(
-            "confidenceScore dihitung dari margin di atas threshold operasional + 2 sinyal pendukung searah " +
-              "(funding, orderbook) -- BUKAN probabilitas statistik terkalibrasi. Threshold sengaja fixed/eksplisit " +
-              "sesuai spesifikasi, bukan hasil kalibrasi historis per-pair -- untuk validasi lebih dalam (terutama " +
-              "top-trader ratio yang secara empiris pergerakannya kecil per pair likuid), cross-check " +
-              "docs/mm_detection_framework.md Section 4.2 dan tool binance_get_top_trader_ratio / " +
-              "binance_get_long_short_ratio untuk histori.",
-          )
+          .interpretation("Analisis", result.divergenceAnalysis)
+          .note("confidenceScore BUKAN probabilitas terkalibrasi -- docs/mm_detection_framework.md Section 4.2.")
           .struct("symbol", symbol)
           .struct("condition", result.condition)
-          .struct("smartMoneyBias", result.smartMoneyBias)
-          .struct("retailSentiment", result.retailSentiment)
-          .struct("confidenceScore", result.confidenceScore)
-          .struct("divergenceScore", result.divergenceScore)
-          .struct("divergenceAnalysis", result.divergenceAnalysis)
-          .struct("signals", {
+          .struct("smBias", result.smartMoneyBias)
+          .struct("retail", result.retailSentiment)
+          .struct("confidence", result.confidenceScore)
+          .struct("divScore", result.divergenceScore)
+          .struct("reason", result.divergenceAnalysis)
+          .struct("raw", {
             topTraderPositionRatio,
             globalAccountRatio,
             oiDelta4hPct,

@@ -204,10 +204,10 @@ export const detailParam = z
 // (mis. finalRun: null waktu leverage direject) gak ikut nge-bloat payload.
 // Cuma shallow (1 level) -- struktur nested tetap dipertahankan apa adanya,
 // caller yang panggil rekursif kalau perlu.
-export function dropNulls<T extends Record<string, unknown>>(obj: T): Partial<T> {
+export function dropNulls<T extends object>(obj: T): Partial<T> {
   const out: Partial<T> = {};
-  for (const [k, v] of Object.entries(obj)) {
-    if (v !== null && v !== undefined) (out as Record<string, unknown>)[k] = v;
+  for (const [k, v] of Object.entries(obj) as [keyof T, unknown][]) {
+    if (v !== null && v !== undefined) out[k] = v as T[keyof T];
   }
   return out;
 }
