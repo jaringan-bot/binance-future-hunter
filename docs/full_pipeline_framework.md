@@ -19,9 +19,10 @@
 6. [Tahap 3: Grid Bounds (Compass-Equivalent)](#6-tahap-3-grid-bounds-compass-equivalent)
 7. [Tahap 4: Capital Solve & Pemilihan Leverage](#7-tahap-4-capital-solve--pemilihan-leverage)
 8. [Tahap 5: Keputusan Akhir](#8-tahap-5-keputusan-akhir)
-9. [Mapping Tool → Sinyal](#9-mapping-tool--sinyal)
-10. [Contoh Kasus (Worked Example)](#10-contoh-kasus-worked-example)
-11. [Known Limitations](#11-known-limitations)
+9. [Informasi Non-Gate: Matches Needed & Estimasi Durasi ke Impas](#9-informasi-non-gate-matches-needed--estimasi-durasi-ke-impas)
+10. [Mapping Tool → Sinyal](#10-mapping-tool--sinyal)
+11. [Contoh Kasus (Worked Example)](#11-contoh-kasus-worked-example)
+12. [Known Limitations](#12-known-limitations)
 
 ---
 
@@ -57,6 +58,7 @@ tool lain di repo ini:
 |---|---|---|
 | Pure engine (grid bounds) | `src/gridBoundEngine.ts` | `computeATR()`, `computeGridBounds()` -- murni fungsi angka masuk-angka keluar, tanpa fetch |
 | Pure engine (screening/scoring/decision) | `src/pipelineEngine.ts` | `evaluateHardScreen()`, `scoreTier1Signals()`, `scaleCapitalForTargetLoss()`, `decidePipelineOutcome()` |
+| Pure engine (grid velocity) | `src/gridVelocity.ts` | `computeGridVelocity()` -- estimasi matches + waktu ke impas (non-gate) |
 | Concurrency helper | `src/concurrency.ts` | `mapWithConcurrency()` -- worker-pool buat proses banyak symbol paralel dibatasi `concurrency` |
 | Thin MCP wrapper | `src/tools/fullPipeline.ts` | Zod schema, 2-wave fetch orchestration, panggil pure engine + fungsi murni tool lain LANGSUNG (bukan MCP roundtrip), susun output |
 
@@ -100,6 +102,7 @@ dipakai ulang secara langsung (import TypeScript, bukan panggil MCP tool):
 │   -> computeGridBounds() (dari klines 1h Wave 1)                   │
 │   -> loop leverage (descending): capital-solve exact via           │
 │      calculateGridRisk() 2x per leverage (referensi + final)       │
+│   -> computeGridVelocity() (non-gate, reuse candles 1h)            │
 │   -> decidePipelineOutcome() -> TRADE / WATCH / NO_TRADE           │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -165,7 +168,7 @@ reverse-engineering fitur Compass Binance yang tidak publik):
    `gridRiskEngine.ts`, jadi grid yang dibentuk pipeline ini selalu lolos
    `gridTypeMismatch=false` kalau dianalisis ulang.
 6. **Grid Count**: heuristik target ~0.75% lebar per step, dibatasi
-   [10, 150] -- **bukan histogram-optimized**, lihat Bagian 11.
+   [10, 150] -- **bukan histogram-optimized**, lihat Bagian 12.
 
 ATR dihitung Wilder's smoothing lewat `computeATR()`, dibangun di atas
 `computeTrueRange()` yang diekstrak dari `calculateADX()`
@@ -213,7 +216,45 @@ memanggil `fetchBinanceMarketData()` (`binanceFetcher.ts`), yang hit
 
 ---
 
-## 9. Mapping Tool → Sinyal
+## 9. Informasi Non-Gate: Matches Needed & Estimasi Durasi ke Impas
+
+Setelah capital solve selesai, pipeline menghitung **dua angka informasional**
+yang **tidak mempengaruhi** keputusan TRADE / WATCH / NO_TRADE:
+
+| Field | Sumber | Keterangan |
+|---|---|---|
+| `breakevenInfo.matchesNeeded` | `minBreakevenCycles` dari `calculateGridRisk` | Jumlah match yang dibutuhkan agar net profit menutup slippageStressedLoss |
+| `breakevenInfo.estHoursToBreakeven` / `estDaysToBreakeven` | `computeGridVelocity()` (`src/gridVelocity.ts`) | Estimasi waktu kalender berdasarkan histori crossing rate candle 1h |
+
+**Cara hitung Grid Velocity (murni dari candles 1h yang sudah di-fetch Wave 1):**
+
+```
+Step_$ (Arithmetic) = (Upper − Lower) / N
+Step_$ (Geometric)  = Lower × (price_ratio − 1)   [level terendah]
+
+Crossing_Candles = jumlah candle dengan (High − Low) ≥ Step_$
+Crossing_Rate = Crossing_Candles / Total_Candle
+Est_Candle_per_Match ≈ 1 / Crossing_Rate
+Est_Waktu_per_Match ≈ Est_Candle_per_Match × 1 jam
+Est_Total_Waktu_BE ≈ Matches_Needed × Est_Waktu_per_Match
+```
+
+**Wajib dipahami:**
+- Ini **bukan gate**. Keputusan sudah final sebelum angka ini dihitung.
+- Estimasi kasar berbasis histori singkat — bukan prediksi.
+- Proxy “range candle ≥ step” bukan bukti match penuh terjadi.
+- Sampel kecil (<50 candle) rawan bias outlier.
+- Field `breakevenInfo.note` selalu berisi peringatan ini.
+
+Di text summary, untuk kandidat TRADE, dua angka ini ditampilkan dengan ikon:
+- 🔁 Matches ke Impas
+- ⏱️ Estimasi Durasi ke Impas
+
+Detail lengkap selalu ada di `structuredContent.results[i].breakevenInfo`.
+
+---
+
+## 10. Mapping Tool → Sinyal
 
 | Tahap pipeline | Fungsi murni yang dipakai ulang | File asal |
 |---|---|---|
@@ -223,12 +264,13 @@ memanggil `fetchBinanceMarketData()` (`binanceFetcher.ts`), yang hit
 | Grid risk per leverage | `calculateGridRisk()` | `src/gridRiskEngine.ts` |
 | Konteks regime/squeeze buat stress multiplier | `fetchMarketContext()` | `src/marketContext.ts` |
 | CVD, kline summary, ADX, true range | `computeCvdFromTrades`, `summarizeKlines`, `calculateADX`, `computeTrueRange` | `src/toolHelpers.ts` |
-| Grid bounds | `computeATR()`, `computeGridBounds()` | `src/gridBoundEngine.ts` (baru) |
-| Screening/scoring/decision/capital-solve | `evaluateHardScreen`, `scoreTier1Signals`, `scaleCapitalForTargetLoss`, `decidePipelineOutcome` | `src/pipelineEngine.ts` (baru) |
+| Grid bounds | `computeATR()`, `computeGridBounds()` | `src/gridBoundEngine.ts` |
+| Screening/scoring/decision/capital-solve | `evaluateHardScreen`, `scoreTier1Signals`, `scaleCapitalForTargetLoss`, `decidePipelineOutcome` | `src/pipelineEngine.ts` |
+| Matches + Estimasi durasi (non-gate) | `computeGridVelocity()` | `src/gridVelocity.ts` |
 
 ---
 
-## 10. Contoh Kasus (Worked Example)
+## 11. Contoh Kasus (Worked Example)
 
 Symbol hipotetis `EXAMPLEUSDT`, `risk_usd=20`, default lainnya:
 
@@ -249,13 +291,16 @@ Symbol hipotetis `EXAMPLEUSDT`, `risk_usd=20`, default lainnya:
 5. **Keputusan**: hard screen lolos + status SAFE + rankingScore 61.4 (≥55)
    → **TRADE**. `gridBotConfig`: Lower 94 / Upper 106 / N 17 / ARITHMETIC /
    10x / ISOLATED / SL 90.1 / TP 108.
+6. **Non-gate**: `minBreakevenCycles` = 12 → `breakevenInfo.matchesNeeded=12`.
+   Crossing rate dari 50 candle 1h ≈ 0.28 → estimasi ~43 jam (~1.8 hari)
+   ke impas. Angka ini **tidak** mengubah keputusan TRADE.
 
 _(Angka-angka di atas ilustratif untuk menjelaskan alur perhitungan, BUKAN
 hasil query live ke Binance.)_
 
 ---
 
-## 11. Known Limitations
+## 12. Known Limitations
 
 1. **Grid Count heuristik, bukan histogram-optimized.** Target ~0.75%
    lebar per step, dibatasi [10, 150] -- pendekatan sederhana yang
@@ -311,7 +356,11 @@ hasil query live ke Binance.)_
 9. **Token cost TINGGI.** Satu panggilan bisa memicu belasan fetch proxy
    per symbol (lebih untuk symbol yang lolos hard screen) -- pakai untuk
    keputusan akhir, bukan eksplorasi awal.
+10. **Estimasi durasi ke impas adalah kasar.** Berbasis crossing rate
+    histori singkat candle 1h. Bukan prediksi, bukan jaminan, dan **tidak
+    mempengaruhi** keputusan TRADE/WATCH/NO_TRADE.
 
 ---
 
 *Dibuat: 2026-08-22, bareng rilis `whalescope_full_pipeline`.*
+*Update 2026-08-22: tambah non-gate Matches Needed + Estimated Time to Breakeven.*
