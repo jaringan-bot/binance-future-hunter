@@ -86,7 +86,7 @@ export function registerRatiosTools(server: McpServer): void {
             ratio: latestRatio,
             bias,
             direction,
-            ...(detail === "full" ? { points } : { recent: shown }),
+            ...(detail === "full" ? { points } : { recent: points.slice(-10) }),
           },
         };
       } catch (err) {
@@ -182,7 +182,7 @@ export function registerRatiosTools(server: McpServer): void {
             ratio,
             bias,
             direction,
-            ...(detail === "full" ? { points } : { recent: shown }),
+            ...(detail === "full" ? { points } : { recent: points.slice(-10) }),
           },
         };
       } catch (err) {

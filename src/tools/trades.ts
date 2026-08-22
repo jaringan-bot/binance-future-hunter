@@ -127,7 +127,7 @@ export function registerTradesTools(server: McpServer): void {
             symbol,
             ratio,
             bias,
-            ...(detail === "full" ? { points } : { recent: shown }),
+            ...(detail === "full" ? { points } : { recent: points.slice(-10) }),
           },
         };
       } catch (err) {

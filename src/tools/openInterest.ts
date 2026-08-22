@@ -109,7 +109,7 @@ export function registerOpenInterestTools(server: McpServer): void {
             changePct,
             current: last,
             pointCount: bars.length,
-            ...(detail === "full" ? { points: bars } : { recent: shown }),
+            ...(detail === "full" ? { points: bars } : { recent: bars.slice(-10) }),
           },
         };
       } catch (err) {

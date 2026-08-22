@@ -166,7 +166,7 @@ export function registerFundingTools(server: McpServer): void {
             avg,
             direction,
             pointCount: points.length,
-            ...(detail === "full" ? { points } : { recent: shown }),
+            ...(detail === "full" ? { points } : { recent: points.slice(-10) }),
           },
         };
       } catch (err) {

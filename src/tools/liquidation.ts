@@ -81,7 +81,7 @@ export function registerLiquidationTools(server: McpServer): void {
             totalShort,
             dominance,
             pointCount: bars.length,
-            ...(detail === "full" ? { points: bars } : { recent: shown }),
+            ...(detail === "full" ? { points: bars } : { recent: bars.slice(-10) }),
           },
         };
       } catch (err) {
