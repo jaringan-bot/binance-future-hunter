@@ -504,7 +504,7 @@ export async function getInsuranceFundBalanceNative(symbol?: string): Promise<In
 export async function getMarkPriceKlinesNative(symbol: string, interval: string, limit: number, startTime?: number, endTime?: number): Promise<KlineTuple[]> {
   return callProxy<KlineTuple[]>("/fapi/v1/markPriceKlines", { symbol: symbol.toUpperCase(), interval, limit, startTime, endTime });
 }
-export async function getIndexPriceKlinesNative(pair: string, contractType: string, interval: string, limit: number, startTime?: number, endTime?: number): Promise<KlineTuple[]> {
+export async function getIndexPriceKlinesNative(pair: string, interval: string, limit: number, startTime?: number, endTime?: number): Promise<KlineTuple[]> {
   return callProxy<KlineTuple[]>("/fapi/v1/indexPriceKlines", { pair: pair.toUpperCase(), interval, limit, startTime, endTime });
 }
 export async function getPremiumIndexKlinesNative(symbol: string, interval: string, limit: number, startTime?: number, endTime?: number): Promise<KlineTuple[]> {
