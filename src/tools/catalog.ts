@@ -77,6 +77,7 @@ const CATALOG_METADATA: Record<string, CatalogMetadata> = {
   binance_market_regime: { category: "composite", tokenCost: "medium", useCase: "Klasifikasi TRENDING/RANGING/BREAKOUT/ACCUMULATION/DISTRIBUTION", dependencies: ["technical", "oi", "trades"] },
   binance_set_pair_threshold: { category: "config", tokenCost: "low", useCase: "Set threshold funding/basis custom per pair", dependencies: [] },
   binance_get_pair_threshold: { category: "config", tokenCost: "low", useCase: "Cek threshold custom yang sudah di-set", dependencies: [] },
+  binance_get_basis: { category: "history", tokenCost: "medium", useCase: "Histori basis native index vs futures (GET /futures/data/basis) — semua pair, period 5m–1d", dependencies: [] },
   binance_get_basis_history: { category: "history", tokenCost: "medium", useCase: "Histori basis+funding+OI dari snapshot cron 5 menit ke D1 (watchlist tetap 10 pair saja)", dependencies: [] },
   binance_backtest_signal: { category: "backtest", tokenCost: "high", useCase: "Validasi empiris sinyal MM detection: win rate/avg return/max drawdown dari histori sinyal D1 + forward return on-demand", dependencies: ["history", "technical"] },
   whalescope_compare_funding_across_exchanges: { category: "cross-exchange", tokenCost: "medium", useCase: "Bandingkan funding rate, price, OI, 24h change 1 pair across Binance/Bybit/OKX/Hyperliquid, deteksi divergensi", dependencies: ["funding"] },
