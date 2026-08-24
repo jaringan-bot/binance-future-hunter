@@ -156,7 +156,7 @@ function defaultMockSetup(): void {
   ]);
   vi.mocked(binanceProxy.getOrderBookDepth).mockResolvedValue(makeOrderBook(5, 5));
   vi.mocked(binanceProxy.getSpotPrice).mockResolvedValue({ symbol: "BTCUSDT", price: "100" });
-  vi.mocked(binanceProxy.getFuturesExchangeInfo).mockImplementation(async (symbol: string) => makeExchangeInfo(symbol));
+  vi.mocked(binanceProxy.getFuturesExchangeInfo).mockImplementation(async (symbol?: string) => makeExchangeInfo(symbol ?? "BTCUSDT"));
 }
 
 describe("whalescope_full_pipeline tool handler", () => {
