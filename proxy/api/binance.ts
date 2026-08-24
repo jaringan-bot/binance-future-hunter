@@ -17,13 +17,15 @@
 // atas nama kamu (potensi disalahgunakan / kena rate limit Binance karena
 // orang lain).
 //
-// PARAM RESERVED `_apiKey`: satu-satunya param yang ditangani khusus --
-// TIDAK diterusin sebagai query param ke Binance, malah dipindah jadi
-// header X-MBX-APIKEY (dibutuhkan endpoint signed/USER_DATA kayak
-// /fapi/v1/leverageBracket). Signing (HMAC secret) tetap sepenuhnya di
-// sisi caller (worker leverage-bracket-mcp terpisah) -- proxy ini cuma
-// relay `signature`/`timestamp`/`recvWindow` apa adanya sebagai query
-// param biasa, gak pernah pegang Binance secret.
+// HEADER x-binance-api-key (OPSIONAL, dari caller ke proxy ini): diteruskan
+// ke Binance sebagai X-MBX-APIKEY (dibutuhkan endpoint signed/USER_DATA
+// kayak /fapi/v1/leverageBracket). Sengaja header, BUKAN query param --
+// query string gampang kena log platform-level (URL request line), header
+// jauh lebih jarang. Signing (HMAC secret) tetap sepenuhnya di sisi caller
+// (worker leverage-bracket-mcp terpisah); proxy ini cuma relay
+// `signature`/`timestamp`/`recvWindow` apa adanya sebagai query param
+// biasa dan meneruskan API key (bukan secret) dari header ke header, gak
+// pernah pegang Binance secret sama sekali.
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 
@@ -51,8 +53,8 @@ const ALLOWED_PATHS_BY_MARKET: Record<string, Set<string>> = {
     "/fapi/v1/symbolAdlRisk",
     "/fapi/v1/insuranceBalance",
     // Satu-satunya path di whitelist ini yang expect request SUDAH signed
-    // (query bawa signature/timestamp/recvWindow + header X-MBX-APIKEY
-    // lewat _apiKey) -- lihat komentar _apiKey di atas.
+    // (query bawa signature/timestamp/recvWindow + header x-binance-api-key
+    // dari caller) -- lihat komentar x-binance-api-key di atas.
     "/fapi/v1/leverageBracket",
     "/fapi/v1/markPriceKlines",
     "/fapi/v1/indexPriceKlines",
@@ -86,7 +88,7 @@ const ALLOWED_PATHS_BY_MARKET: Record<string, Set<string>> = {
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-proxy-secret");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-proxy-secret, x-binance-api-key");
 
   if (req.method === "OPTIONS") {
     res.status(204).end();
@@ -130,20 +132,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return;
   }
 
-  const RESERVED_PARAMS = new Set(["path", "market", "_apiKey"]);
   const forwardParams = new URLSearchParams();
   for (const [key, value] of Object.entries(req.query)) {
-    if (RESERVED_PARAMS.has(key)) continue;
+    if (key === "path" || key === "market") continue;
     if (typeof value === "string") forwardParams.set(key, value);
   }
-  const apiKeyParam = req.query._apiKey;
+  const apiKeyHeader = req.headers["x-binance-api-key"];
 
   const targetUrl = `${binanceBase}${path}${forwardParams.toString() ? `?${forwardParams.toString()}` : ""}`;
 
   try {
     const outboundHeaders: Record<string, string> = { Accept: "application/json" };
-    if (typeof apiKeyParam === "string" && apiKeyParam) {
-      outboundHeaders["X-MBX-APIKEY"] = apiKeyParam;
+    if (typeof apiKeyHeader === "string" && apiKeyHeader) {
+      outboundHeaders["X-MBX-APIKEY"] = apiKeyHeader;
     }
     const binanceRes = await fetch(targetUrl, {
       headers: outboundHeaders,
