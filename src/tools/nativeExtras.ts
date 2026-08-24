@@ -27,8 +27,13 @@ export function registerNativeExtrasTools(server: McpServer): void {
     },
     async ({ symbol }) => {
       try {
+        // /fapi/v1/exchangeInfo mengabaikan query param `symbol` (beda dari
+        // spot) -- Binance selalu balikin SEMUA pair, harus difilter di sini.
         const data = await binanceProxy.getFuturesExchangeInfo(symbol as string);
-        const symbols = data.symbols ?? [];
+        const allSymbols = data.symbols ?? [];
+        const symbols = symbol
+          ? allSymbols.filter((s: any) => s.symbol === (symbol as string).toUpperCase())
+          : allSymbols;
 
         if (symbols.length === 0) {
           return {
@@ -262,8 +267,26 @@ export function registerNativeExtrasTools(server: McpServer): void {
     },
     async ({ symbol }) => {
       try {
+        // /fapi/v1/fundingInfo tidak menerima param `symbol` -- selalu balikin
+        // SEMUA pair yang punya cap/floor funding custom (bukan semua pair
+        // exist). Filter di sini; kalau simbol yang diminta gak ada di daftar,
+        // artinya dia pakai default funding rate Binance (bukan error).
         const data = await binanceProxy.getFundingInfo(symbol);
-        const list = Array.isArray(data) ? data : [data];
+        const allEntries = Array.isArray(data) ? data : [data];
+        const list = symbol
+          ? allEntries.filter((f) => f.symbol === (symbol as string).toUpperCase())
+          : allEntries;
+
+        if (symbol && list.length === 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `${symbol} tidak punya cap/floor funding custom -- pakai default Binance (interval 8h, cap/floor standar).`,
+              },
+            ],
+          };
+        }
 
         const rows = list
           .slice(0, 30)
