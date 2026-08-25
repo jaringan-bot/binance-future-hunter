@@ -18,13 +18,34 @@ import { sendTelegramAlert, type TelegramEnv } from "../telegram.js";
 import { getTopUsdtPerpetualWatchlist } from "../entryWatchlist.js";
 import { mapWithConcurrency } from "../concurrency.js";
 import { TRADE_RANKING_SCORE_THRESHOLD } from "../pipelineEngine.js";
+import * as pacing from "../pacing.js";
 
 const COOLDOWN_MS = 4 * 60 * 60 * 1000;
 
 // Concurrency rendah (bukan default 6 whalescope_full_pipeline) -- watchlist
-// di sini jauh lebih besar (200 vs maks 20/tool-call), jaga jarak dari
+// di sini jauh lebih besar (400 vs maks 20/tool-call), jaga jarak dari
 // MAX_REQUESTS_PER_WINDOW (rateLimiter.ts).
 const CONCURRENCY = 4;
+
+// PACING -- ditemukan live 2026-08-25 via wrangler tail: tanpa delay ini,
+// 355/400 pair di watchlist gagal dalam 1 tick (346 kena RateLimitError
+// self-throttle, sisanya bug parsing terpisah) karena seluruh batch nyoba
+// habisin ~12-17 call/symbol SEKALIGUS di awal tick, jauh ngelewatin jatah
+// per-menit yang dipakai bareng cron lain (rateLimiter.ts). Delay ini
+// nge-pace throughput SENDIRI biar sebar sepanjang siklus 15 menit
+// (ENTRY_ALERT_CRON), bukan burst di 60 detik pertama.
+//
+// Perhitungan (worst-case, hard screen lolos = 17 call/symbol):
+// - Target throughput entry-alert sendiri: ~1.100-1.200 call/menit (jauh di
+//   bawah limit ASLI Binance per-IP ~2400/menit -- proxy Vercel 1 IP dipakai
+//   bareng semua cron, BUKAN cuma limiter internal kita).
+// - 4 worker (CONCURRENCY) x 17 call / (network time + delay) <= target
+//   -> delay ~4 detik/symbol/worker cukup (network time diasumsikan ~0.5-1s,
+//   BELUM diukur presisi -- verifikasi live via wrangler tail setelah deploy,
+//   sama seperti langkah verifikasi tiap kenaikan watchlist sebelumnya).
+// - Total durasi estimasi: 400 pair / 4 worker = 100 putaran x ~4.8 detik
+//   = ~8 menit -- jauh di bawah siklus 15 menit ke tick berikutnya.
+export const ENTRY_ALERT_PACING_DELAY_MS = 4000;
 
 // Mirror default zod schema whalescope_full_pipeline (src/tools/fullPipeline.ts)
 // -- alert pakai parameter risiko/leverage yang SAMA dengan yang biasa dipakai
@@ -110,6 +131,8 @@ export async function runEntryAlertCheck(env: TelegramEnv): Promise<void> {
       await checkEntryAlertForSymbol(symbol, env, now);
     } catch (err) {
       console.error(`[cron] gagal entry-alert check ${symbol}:`, (err as Error)?.message ?? String(err));
+    } finally {
+      await pacing.sleep(ENTRY_ALERT_PACING_DELAY_MS);
     }
   });
 }

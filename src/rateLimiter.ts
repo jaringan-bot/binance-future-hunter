@@ -5,7 +5,7 @@
 // weight per path, di luar scope).
 //
 // Dinaikkan dari 200 -> 780/menit (2026-08-20) bersamaan dengan perluasan
-// SNAPSHOT_WATCHLIST 10->50 pair (shared.ts). Perhitungan worst-case:
+// SNAPSHOT_WATCHLIST 10->50 pair (shared.ts). Perhitungan worst-case saat itu:
 // - Cron 5-menit: 50 pair x ~11 call/symbol = ~550 call.
 // - WALL_SCAN_CRON (cron TERPISAH, tiap 1 menit, 1 call/symbol via
 //   getOrderBookDepth): 50 call/menit.
@@ -13,9 +13,28 @@
 //   (Cloudflare tidak menjamin urutan/spacing antar Cron Trigger berbeda) --
 //   worst case realistis: 550 + 50 = ~600 call dalam 60 detik.
 // - 780 memberi buffer ~30% di atas worst-case 600 yang sudah diketahui.
+//
+// Dinaikkan lagi 780 -> 1800/menit (2026-08-25), setelah ENTRY_ALERT_CRON
+// (entryAlertCron.ts, watchlist 400 pair naik dari 200) terbukti live lewat
+// `wrangler tail` bikin 355/400 pair (89%) gagal 1 tick karena limiter 780
+// SANGAT kekecilan buat beban barunya -- 780 itu gak pernah menghitung cron
+// ini sama sekali. Perhitungan worst-case baru:
+// - ENTRY_ALERT_CRON sendiri (setelah dipacing, lihat ENTRY_ALERT_PACING_DELAY_MS
+//   di entryAlertCron.ts): ditarget ~1.100-1.200 call/menit, BUKAN burst
+//   ~6.800 call (400 pair x sampai 17 call/symbol worst-case) dalam 60 detik --
+//   itu sendiri sudah jauh ngelewatin limit asli Binance, gak ada limiter
+//   internal yang bisa "menampungnya" dengan aman, satu-satunya cara aman
+//   adalah menyebar bebannya, bukan menaikkan limiter sampai setinggi itu.
+// - WALL_SCAN 50/menit (selalu tumpang tindih, tiap menit) + SNAPSHOT 550/menit
+//   (kadang tumpang tindih, kelipatan 5 menit) tetap seperti sebelumnya.
+// - Worst-case gabungan: ~1.200 + 50 + 550 = ~1.800 call/60 detik.
 // Batas ini TETAP jauh di bawah limit asli Binance (2400/menit IP-based) --
-// rasio buffer turun dari ~12x (200 vs 2400) jadi ~3.1x (780 vs 2400),
-// masih buffer wajar, bukan mepet ke limit asli.
+// rasio buffer ~1.33x (1800 vs 2400). Lebih ketat dari rasio 780 vs 2400
+// (~3.1x) karena beban real sekarang jauh lebih besar -- kalau butuh naikkan
+// watchlist ENTRY_ALERT lebih jauh lagi, pertimbangkan turunkan target
+// throughput entry-alert (naikkan ENTRY_ALERT_PACING_DELAY_MS) dulu sebelum
+// naikkan angka ini lagi, supaya buffer ke limit asli Binance gak makin
+// mepet.
 //
 // KETERBATASAN JUJUR: worker ini STATELESS per-request (lihat komentar di
 // src/index.ts) -- counter module-level di sini efektif SELAMA isolate
@@ -26,7 +45,7 @@ const WINDOW_MS = 60_000;
 // Exported so rateLimiter.test.ts asserts against this value instead of a
 // hardcoded copy -- a hardcoded copy is what let the test silently desync
 // from this constant when it was raised 200 -> 780 (see below).
-export const MAX_REQUESTS_PER_WINDOW = 780;
+export const MAX_REQUESTS_PER_WINDOW = 1800;
 
 let timestamps: number[] = [];
 

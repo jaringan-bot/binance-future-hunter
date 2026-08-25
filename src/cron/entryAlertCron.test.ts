@@ -3,13 +3,15 @@ import * as fullPipeline from "../tools/fullPipeline.js";
 import * as d1Client from "../d1Client.js";
 import * as telegram from "../telegram.js";
 import * as entryWatchlist from "../entryWatchlist.js";
-import { checkEntryAlertForSymbol, runEntryAlertCheck } from "./entryAlertCron.js";
+import { checkEntryAlertForSymbol, runEntryAlertCheck, ENTRY_ALERT_PACING_DELAY_MS } from "./entryAlertCron.js";
 import type { SymbolPipelineResult } from "../tools/fullPipeline.js";
+import * as pacing from "../pacing.js";
 
 vi.mock("../tools/fullPipeline.js", () => ({ runPipelineForSymbol: vi.fn() }));
 vi.mock("../d1Client.js", () => ({ getEntryAlertState: vi.fn(), upsertEntryAlertState: vi.fn() }));
 vi.mock("../telegram.js", () => ({ sendTelegramAlert: vi.fn() }));
 vi.mock("../entryWatchlist.js", () => ({ getTopUsdtPerpetualWatchlist: vi.fn() }));
+vi.mock("../pacing.js", () => ({ sleep: vi.fn().mockResolvedValue(undefined) }));
 
 function tradeResult(symbol: string): SymbolPipelineResult {
   return {
@@ -227,5 +229,16 @@ describe("runEntryAlertCheck", () => {
 
     expect(telegram.sendTelegramAlert).toHaveBeenCalledTimes(1);
     expect(console.error).toHaveBeenCalledTimes(1);
+  });
+
+  it("paces each symbol with a delay so sustained throughput stays within the entry-alert rate budget", async () => {
+    vi.mocked(entryWatchlist.getTopUsdtPerpetualWatchlist).mockResolvedValue(["BTCUSDT", "ETHUSDT", "SOLUSDT"]);
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
+    vi.mocked(fullPipeline.runPipelineForSymbol).mockImplementation(async (symbol: string) => tradeResult(symbol));
+
+    await runEntryAlertCheck(ENV);
+
+    expect(pacing.sleep).toHaveBeenCalledTimes(3);
+    expect(pacing.sleep).toHaveBeenCalledWith(ENTRY_ALERT_PACING_DELAY_MS);
   });
 });
