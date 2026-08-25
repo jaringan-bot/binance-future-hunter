@@ -104,6 +104,14 @@ export function summarizeKlines(raw: KlineTuple[]): KlinesSummary {
   };
 }
 
+export function computeTrueRange(curr: KlineCandle, prev: KlineCandle): number {
+  return Math.max(
+    curr.high - curr.low,
+    Math.abs(curr.high - prev.close),
+    Math.abs(curr.low - prev.close),
+  );
+}
+
 export interface AdxResult {
   adx: number;
   plusDI: number;

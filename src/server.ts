@@ -3,6 +3,7 @@ import { registerFundingTools } from "./tools/funding.js";
 import { registerOpenInterestTools } from "./tools/openInterest.js";
 import { registerRatiosTools } from "./tools/ratios.js";
 import { registerOrderbookTools } from "./tools/orderbook.js";
+import { registerOrderbookDeltaTools } from "./tools/orderbookDelta.js";
 import { registerTradesTools } from "./tools/trades.js";
 import { registerLiquidationTools } from "./tools/liquidation.js";
 import { registerPriceTools } from "./tools/price.js";
@@ -10,6 +11,7 @@ import { registerSpotTools } from "./tools/spot.js";
 import { registerCompositeTools } from "./tools/composite.js";
 import { registerConfigTools } from "./tools/config.js";
 import { registerBasisHistoryTools } from "./tools/basisHistory.js";
+import { registerBasisTools } from "./tools/basis.js";
 import { registerWallPersistenceTools } from "./tools/wallPersistence.js";
 import { registerMmDetectionTools } from "./tools/detectMmActivity.js";
 import { registerMarketRegimeTools } from "./tools/marketRegime.js";
@@ -19,5 +21,7 @@ import { registerCrossExchangeTools } from "./tools/crossExchange.js";
 import { registerSmartMoneyTools } from "./tools/smartMoney.js";
 import { registerFuturesGridRiskTool } from "./tools/futuresGridRisk.js";
 import { registerRiskTools } from "./tools/risk.js";
+import { registerNativeExtrasTools } from "./tools/nativeExtras.js";
+import { registerFullPipelineTools } from "./tools/fullPipeline.js";
 import { resetToolRegistry } from "./toolWrapper.js";
-export function createServer(): McpServer { const server = new McpServer({ name:'whalescope-mcp', version:'1.0.0'}); resetToolRegistry(); registerFundingTools(server); registerOpenInterestTools(server); registerRatiosTools(server); registerOrderbookTools(server); registerTradesTools(server); registerLiquidationTools(server); registerPriceTools(server); registerSpotTools(server); registerCompositeTools(server); registerConfigTools(server); registerBasisHistoryTools(server); registerWallPersistenceTools(server); registerMmDetectionTools(server); registerMarketRegimeTools(server); registerCatalogTools(server); registerBacktestTools(server); registerCrossExchangeTools(server); registerSmartMoneyTools(server); registerFuturesGridRiskTool(server); registerRiskTools(server); return server;}
+export function createServer(): McpServer { const server = new McpServer({ name:'whalescope-mcp', version:'1.0.0'}); resetToolRegistry(); registerFundingTools(server); registerOpenInterestTools(server); registerRatiosTools(server); registerOrderbookTools(server); registerOrderbookDeltaTools(server); registerTradesTools(server); registerLiquidationTools(server); registerPriceTools(server); registerSpotTools(server); registerCompositeTools(server); registerConfigTools(server); registerBasisHistoryTools(server); registerBasisTools(server); registerWallPersistenceTools(server); registerMmDetectionTools(server); registerMarketRegimeTools(server); registerCatalogTools(server); registerBacktestTools(server); registerCrossExchangeTools(server); registerSmartMoneyTools(server); registerFuturesGridRiskTool(server); registerRiskTools(server); registerNativeExtrasTools(server); registerFullPipelineTools(server); return server;}

@@ -169,6 +169,17 @@ export const pairSchema = z
 // CURRENT_QUARTER/NEXT_QUARTER adalah kontrak dated yang delivery tiap kuartal.
 export const CONTRACT_TYPE_ENUM = ["PERPETUAL", "CURRENT_QUARTER", "NEXT_QUARTER"] as const;
 
+// Param `detail` dipakai bareng-bareng tool yang punya varian ringkas vs
+// mentah (rpiDepth, allForceOrders, recentTrades, dll) -- default "summary"
+// biar hemat token, "full" buat array/level mentah lengkap.
+export const detailParam = z
+  .enum(["summary", "full"])
+  .optional()
+  .default("summary")
+  .describe(
+    "'summary' (default): metrik turunan + <=10 poin terbaru saja, HEMAT TOKEN. 'full': array/level mentah lengkap seperti sebelumnya.",
+  );
+
 // Parse ISO 8601 datetime string ke epoch ms. Dipakai untuk startTime/endTime
 // klines (Futures & Spot) supaya backtest bisa narik histori jauh ke belakang,
 // bukan cuma N candle terakhir.

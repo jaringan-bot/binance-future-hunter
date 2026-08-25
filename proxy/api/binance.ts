@@ -70,6 +70,16 @@ const ALLOWED_PATHS_BY_MARKET: Record<string, Set<string>> = {
     "/fapi/v1/constituents",
     // exchangeInfo (LOT_SIZE/MIN_NOTIONAL) -- trading rules utk validasi grid qty minimum
     "/fapi/v1/exchangeInfo",
+    // Native extras (2026-08-22) -- basis native, recent trades, book/price
+    // ticker, funding info, RPI depth, trading schedule, force orders.
+    "/futures/data/basis",
+    "/fapi/v1/trades",
+    "/fapi/v1/ticker/bookTicker",
+    "/fapi/v2/ticker/price",
+    "/fapi/v1/fundingInfo",
+    "/fapi/v1/rpiDepth",
+    "/fapi/v1/tradingSchedule",
+    "/fapi/v1/allForceOrders",
   ]),
   spot: new Set([
     "/api/v3/ticker/price",

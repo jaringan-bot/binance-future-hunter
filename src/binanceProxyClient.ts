@@ -140,6 +140,16 @@ const PROXY_ALLOWED_PATHS = new Set([
   "/futures/data/delivery-price",
   "/fapi/v1/constituents",
   "/fapi/v1/exchangeInfo",
+  // Native extras (2026-08-22) -- basis native, recent trades, book/price
+  // ticker, funding info, RPI depth, trading schedule, force orders.
+  "/futures/data/basis",
+  "/fapi/v1/trades",
+  "/fapi/v1/ticker/bookTicker",
+  "/fapi/v2/ticker/price",
+  "/fapi/v1/fundingInfo",
+  "/fapi/v1/rpiDepth",
+  "/fapi/v1/tradingSchedule",
+  "/fapi/v1/allForceOrders",
 ]);
 
 interface ProxyEndpoint {
@@ -778,6 +788,8 @@ type FuturesSymbolFilter =
 
 export interface FuturesExchangeInfoSymbol {
   symbol: string;
+  status: string;
+  contractType?: string;
   filters: FuturesSymbolFilter[];
 }
 
@@ -785,8 +797,14 @@ export interface FuturesExchangeInfoResponse {
   symbols: FuturesExchangeInfoSymbol[];
 }
 
-export async function getFuturesExchangeInfo(symbol: string): Promise<FuturesExchangeInfoResponse> {
-  return callProxy<FuturesExchangeInfoResponse>("/fapi/v1/exchangeInfo", { symbol: symbol.toUpperCase() });
+// symbol OPSIONAL -- Binance /fapi/v1/exchangeInfo MENGABAIKAN parameter
+// query `symbol` (selalu balikin semua symbol), lihat binanceFetcher.ts.
+// Filter per-symbol dilakukan client-side di tool handler.
+export async function getFuturesExchangeInfo(symbol?: string): Promise<FuturesExchangeInfoResponse> {
+  return callProxy<FuturesExchangeInfoResponse>(
+    "/fapi/v1/exchangeInfo",
+    symbol ? { symbol: symbol.toUpperCase() } : {},
+  );
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -957,4 +975,142 @@ export interface IndexConstituentsResponse {
 
 export async function getIndexConstituentsNative(symbol: string): Promise<IndexConstituentsResponse> {
   return callProxy<IndexConstituentsResponse>("/fapi/v1/constituents", { symbol: symbol.toUpperCase() });
+}
+
+// ─────────────────────────────────────────────────────────────
+// NATIVE EXTRAS (2026-08-22) -- basis native, recent trades, book/price
+// ticker, funding info, RPI depth, trading schedule, force orders.
+// ─────────────────────────────────────────────────────────────
+export interface BasisPoint {
+  pair: string;
+  contractType: string;
+  futuresPrice: string;
+  indexPrice: string;
+  basis: string;
+  basisRate: string;
+  annualizedBasisRate: string;
+  timestamp: number;
+}
+
+export async function getBasisNative(
+  pair: string,
+  contractType: string,
+  period: string,
+  limit: number,
+): Promise<BasisPoint[]> {
+  return callProxy<BasisPoint[]>("/futures/data/basis", {
+    pair: pair.toUpperCase(),
+    contractType,
+    period,
+    limit,
+  });
+}
+
+export interface RecentTrade {
+  id: number;
+  price: string;
+  qty: string;
+  quoteQty: string;
+  time: number;
+  isBuyerMaker: boolean;
+}
+
+export async function getRecentTrades(symbol: string, limit: number): Promise<RecentTrade[]> {
+  return callProxy<RecentTrade[]>("/fapi/v1/trades", { symbol: symbol.toUpperCase(), limit });
+}
+
+export interface BookTickerEntry {
+  symbol: string;
+  bidPrice: string;
+  bidQty: string;
+  askPrice: string;
+  askQty: string;
+  time: number;
+}
+
+export async function getBookTicker(symbol?: string): Promise<BookTickerEntry | BookTickerEntry[]> {
+  return callProxy<BookTickerEntry | BookTickerEntry[]>(
+    "/fapi/v1/ticker/bookTicker",
+    symbol ? { symbol: symbol.toUpperCase() } : {},
+  );
+}
+
+export interface PriceTickerEntry {
+  symbol: string;
+  price: string;
+  time: number;
+}
+
+export async function getPriceTicker(symbol?: string): Promise<PriceTickerEntry | PriceTickerEntry[]> {
+  return callProxy<PriceTickerEntry | PriceTickerEntry[]>(
+    "/fapi/v2/ticker/price",
+    symbol ? { symbol: symbol.toUpperCase() } : {},
+  );
+}
+
+export interface FundingInfoEntry {
+  symbol: string;
+  adjustedFundingRateCap?: string;
+  adjustedFundingRateFloor?: string;
+  fundingIntervalHours?: number;
+  interestRate?: string;
+}
+
+export async function getFundingInfo(symbol?: string): Promise<FundingInfoEntry | FundingInfoEntry[]> {
+  return callProxy<FundingInfoEntry | FundingInfoEntry[]>(
+    "/fapi/v1/fundingInfo",
+    symbol ? { symbol: symbol.toUpperCase() } : {},
+  );
+}
+
+export interface RpiDepth {
+  lastUpdateId: number;
+  E: number;
+  T: number;
+  bids: [string, string][];
+  asks: [string, string][];
+}
+
+export async function getRpiDepth(symbol: string, limit: number): Promise<RpiDepth> {
+  return callProxy<RpiDepth>("/fapi/v1/rpiDepth", { symbol: symbol.toUpperCase(), limit });
+}
+
+export interface TradingScheduleEntry {
+  symbol?: string;
+  underlying?: string;
+  timezone?: string;
+  sessions?: unknown;
+}
+
+export async function getTradingSchedule(): Promise<TradingScheduleEntry[]> {
+  return callProxy<TradingScheduleEntry[]>("/fapi/v1/tradingSchedule", {});
+}
+
+export interface ForceOrder {
+  symbol: string;
+  price: string;
+  origQty: string;
+  executedQty: string;
+  averagePrice: string;
+  status: string;
+  timeInForce: string;
+  side: string;
+  time: number;
+}
+
+export interface GetAllForceOrdersParams {
+  symbol?: string;
+  limit: number;
+  startTime?: number;
+  endTime?: number;
+}
+
+export async function getAllForceOrders(params: GetAllForceOrdersParams): Promise<ForceOrder[]> {
+  const q: Record<string, string | number | undefined> = {
+    limit: params.limit,
+    startTime: params.startTime,
+    endTime: params.endTime,
+  };
+  if (params.symbol) q.symbol = params.symbol.toUpperCase();
+  return callProxy<ForceOrder[]>("/fapi/v1/allForceOrders", q);
 }

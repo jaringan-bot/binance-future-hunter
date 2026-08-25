@@ -85,6 +85,7 @@ const CATALOG_METADATA: Record<string, CatalogMetadata> = {
   binance_get_tool_catalog: { category: "meta", tokenCost: "low", useCase: "Daftar semua tool + kategori/use-case (tool ini sendiri)", dependencies: [] },
   binance_get_adl_risk: { category: "risk", tokenCost: "low", useCase: "Quantile risk rating ADL per pair (update tiap 30 menit)", dependencies: [] },
   binance_get_insurance_fund_balance: { category: "risk", tokenCost: "low", useCase: "Snapshot historis saldo insurance fund per asset margin", dependencies: [] },
+  whalescope_full_pipeline: { category: "composite", tokenCost: "high", useCase: "Decision chain penuh Grid Bot Futures (hard screen -> Tier-1 intel -> grid bounds -> risk -> keputusan) untuk 1-20 symbol", dependencies: ["funding", "oi", "ratios", "orderbook", "trades", "technical", "risk", "composite"] },
   binance_get_mark_price_klines: { category: "technical", tokenCost: "medium", useCase: "Candle mark price (acuan liquidation/funding), bukan harga transaksi", dependencies: [] },
   binance_get_index_price_klines: { category: "technical", tokenCost: "medium", useCase: "Candle index price (blended spot), dasar premium index/funding", dependencies: [] },
   binance_get_premium_index_klines: { category: "technical", tokenCost: "medium", useCase: "Candle premium index (rasio mark vs index price), komponen funding rate", dependencies: [] },
@@ -92,6 +93,17 @@ const CATALOG_METADATA: Record<string, CatalogMetadata> = {
   binance_get_quarterly_settlement_price: { category: "history", tokenCost: "low", useCase: "Histori delivery/settlement price kontrak quarterly", dependencies: [] },
   binance_get_composite_index_info: { category: "composite", tokenCost: "low", useCase: "Komposisi base asset + bobot sebuah composite index symbol", dependencies: [] },
   binance_get_index_constituents: { category: "composite", tokenCost: "low", useCase: "Daftar exchange+symbol penyusun index price composite index symbol", dependencies: [] },
+  binance_get_orderbook_delta: { category: "orderbook", tokenCost: "medium", useCase: "Bandingkan 2 snapshot order book ~1-2 detik terpisah untuk deteksi spoofing riil (wall hilang tanpa harga crossing)", dependencies: [] },
+  binance_get_basis: { category: "history", tokenCost: "medium", useCase: "Histori basis native index vs futures (GET /futures/data/basis) — semua pair, period 5m–1d", dependencies: [] },
+  // Native extras (2026-08-22)
+  binance_get_exchange_info: { category: "config", tokenCost: "medium", useCase: "Trading rules, tick size, min qty, status pair sebelum order/grid", dependencies: [] },
+  binance_get_recent_trades: { category: "trades", tokenCost: "medium", useCase: "Trade individual mentah (bukan aggregate) + CVD micro-structure", dependencies: [] },
+  binance_get_book_ticker: { category: "orderbook", tokenCost: "low", useCase: "Best bid/ask + qty saja, sangat ringan dibanding full depth", dependencies: [] },
+  binance_get_price_ticker: { category: "technical", tokenCost: "low", useCase: "Harga terakhir saja (endpoint ringan)", dependencies: [] },
+  binance_get_funding_info: { category: "funding", tokenCost: "low", useCase: "Interval funding + cap/floor + interest rate per symbol", dependencies: [] },
+  binance_get_rpi_depth: { category: "orderbook", tokenCost: "medium", useCase: "Order book termasuk RPI orders (beda dari depth biasa)", dependencies: [] },
+  binance_get_trading_schedule: { category: "config", tokenCost: "low", useCase: "Jadwal sesi trading TradFi underlying assets", dependencies: [] },
+  binance_get_all_force_orders: { category: "risk", tokenCost: "medium", useCase: "Histori force orders / liquidations market-wide", dependencies: [] },
 };
 
 function truncateUseCase(description: string | undefined): string {
