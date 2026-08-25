@@ -9,6 +9,10 @@ import type { CrossExchangeMarketData } from "./bybitClient.js";
 
 const HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info";
 const CACHE_TTL_SECONDS = 5;
+// Posisi wallet gak berubah secepat funding/OI -- cache lebih pendek dari
+// interval polling cron (15 menit) cuma buat hindari duplicate fetch kalau
+// beberapa address di-query dalam satu tick yang sama, bukan buat freshness.
+const CLEARINGHOUSE_CACHE_TTL_SECONDS = 30;
 
 interface HyperliquidUniverseAsset {
   name: string;
@@ -61,4 +65,61 @@ export async function getHyperliquidMarketData(baseAsset: string): Promise<Cross
     openInterest: parseFloat(ctx.openInterest),
     change24hPct,
   };
+}
+
+// clearinghouseState -- posisi perp on-chain SATU wallet address. Beda dari
+// metaAndAssetCtxs (semua asset, gak butuh address), ini butuh address
+// spesifik dan balikin SEMUA posisi terbuka wallet itu (lintas coin), bukan
+// difilter per-coin di request. Caller (cron/tool) yang filter per-coin.
+interface HyperliquidRawPosition {
+  coin: string;
+  szi: string; // signed size: positif = long, negatif = short
+  entryPx: string;
+  leverage: { value: number; type: "isolated" | "cross" };
+}
+
+interface HyperliquidClearinghouseResponse {
+  assetPositions: { position: HyperliquidRawPosition; type: string }[];
+}
+
+export interface HyperliquidPosition {
+  coin: string;
+  side: "long" | "short";
+  size: number; // absolut, selalu positif -- arah sudah dipindah ke `side`
+  entryPrice: number | null;
+  leverage: number | null;
+}
+
+export async function getUserClearinghouseState(address: string): Promise<HyperliquidPosition[]> {
+  const response = await cachedFetch(
+    HYPERLIQUID_INFO_URL,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ type: "clearinghouseState", user: address }),
+    },
+    CLEARINGHOUSE_CACHE_TTL_SECONDS,
+    fetchWithRetry,
+  );
+
+  if (!response.ok) {
+    throw new Error(`Hyperliquid HTTP ${response.status}: ${(await response.text()).slice(0, 200)}`);
+  }
+
+  const data = (await response.json()) as HyperliquidClearinghouseResponse;
+
+  return data.assetPositions
+    .map(({ position }): HyperliquidPosition | null => {
+      const szi = parseFloat(position.szi);
+      if (szi === 0 || Number.isNaN(szi)) return null;
+      const entryPx = parseFloat(position.entryPx);
+      return {
+        coin: position.coin,
+        side: szi > 0 ? "long" : "short",
+        size: Math.abs(szi),
+        entryPrice: Number.isNaN(entryPx) ? null : entryPx,
+        leverage: position.leverage?.value ?? null,
+      };
+    })
+    .filter((p): p is HyperliquidPosition => p !== null);
 }

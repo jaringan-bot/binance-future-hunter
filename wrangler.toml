@@ -22,11 +22,15 @@ binding = "DB"
 database_name = "whalescope-mcp-db"
 database_id = "3600a9bb-9261-492a-bf06-3a11b0448f4e"
 
-# Dua Cron Trigger (2 dari maksimal 5 di Cloudflare Free plan), dibedakan
-# lewat event.cron di src/index.ts scheduled handler:
+# Tiga Cron Trigger -- akun ini sudah di Workers PAID plan, jadi limit slot
+# jauh di atas 5 (bekas batasan Free plan yang mendasari komentar lama di
+# sini), dibedakan lewat event.cron di src/index.ts scheduled handler:
 # - */5: snapshot basis + sinyal MM futures-vs-spot untuk watchlist, plus
 #   prune request_log & wall_tracking.
 # - */1: scan wall kandidat order book untuk watchlist (wall_tracking, D1)
 #   -- lebih sering karena wall bisa hilang dalam hitungan menit.
+# - */15: snapshot posisi wallet whale Hyperliquid (HYPERLIQUID_WHALE_WATCHLIST,
+#   shared.ts) ke hyperliquid_whale_snapshots -- posisi whale gak berubah
+#   secepat orderbook/funding, 15 menit cukup, hemat fetch budget.
 [triggers]
-crons = ["*/5 * * * *", "*/1 * * * *"]
+crons = ["*/5 * * * *", "*/1 * * * *", "*/15 * * * *"]

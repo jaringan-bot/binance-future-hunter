@@ -4,7 +4,7 @@
 // beda -- Bybit/Hyperliquid dapat semuanya dalam 1 call.
 import { fetchWithRetry } from "./retry.js";
 import { cachedFetch } from "./cache.js";
-import type { CrossExchangeMarketData } from "./bybitClient.js";
+import type { CrossExchangeMarketData, OrderBookLevels } from "./bybitClient.js";
 
 const CACHE_TTL_SECONDS = 5;
 
@@ -66,5 +66,26 @@ export async function getOkxMarketData(instId: string): Promise<CrossExchangeMar
     lastPrice: last,
     openInterest: parseFloat(oi.oiCcy), // base-asset, bukan oi (contract) -- sepadan sama exchange lain
     change24hPct,
+  };
+}
+
+// OKX books: level = [price, size, liquidatedOrders, numOrders] -- cuma
+// price+size yang dipakai (2 elemen pertama), sama shape [string,string]
+// dengan bids/asks Binance/Bybit.
+interface OkxOrderBookData {
+  bids: [string, string, string, string][];
+  asks: [string, string, string, string][];
+}
+
+export async function getOkxOrderBookDepth(instId: string, size: number): Promise<OrderBookLevels> {
+  const [book] = await okxGet<OkxOrderBookData>(
+    `https://www.okx.com/api/v5/market/books?instId=${encodeURIComponent(instId)}&sz=${size}`,
+  );
+  if (!book) {
+    throw new Error(`Instrument ${instId} tidak ditemukan di OKX order book.`);
+  }
+  return {
+    bids: book.bids.map(([p, q]) => [p, q]),
+    asks: book.asks.map(([p, q]) => [p, q]),
   };
 }

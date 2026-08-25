@@ -6,6 +6,7 @@ import { fetchWithRetry } from "./retry.js";
 import { cachedFetch } from "./cache.js";
 
 const BYBIT_TICKERS_URL = "https://api.bybit.com/v5/market/tickers";
+const BYBIT_ORDERBOOK_URL = "https://api.bybit.com/v5/market/orderbook";
 const CACHE_TTL_SECONDS = 5; // sama kayak funding rate Binance -- snapshot cepat berubah
 
 export interface CrossExchangeMarketData {
@@ -50,4 +51,31 @@ export async function getBybitMarketData(symbol: string): Promise<CrossExchangeM
     openInterest: parseFloat(ticker.openInterest),
     change24hPct: parseFloat(ticker.price24hPcnt),
   };
+}
+
+export interface OrderBookLevels {
+  bids: [string, string][];
+  asks: [string, string][];
+}
+
+interface BybitOrderBookResponse {
+  retCode: number;
+  retMsg: string;
+  result: { b: [string, string][]; a: [string, string][] };
+}
+
+export async function getBybitOrderBookDepth(symbol: string, limit: number): Promise<OrderBookLevels> {
+  const url = `${BYBIT_ORDERBOOK_URL}?category=linear&symbol=${encodeURIComponent(symbol)}&limit=${limit}`;
+  const response = await cachedFetch(url, { headers: { Accept: "application/json" } }, CACHE_TTL_SECONDS, fetchWithRetry);
+
+  if (!response.ok) {
+    throw new Error(`Bybit HTTP ${response.status}: ${(await response.text()).slice(0, 200)}`);
+  }
+
+  const data = (await response.json()) as BybitOrderBookResponse;
+  if (data.retCode !== 0) {
+    throw new Error(`Bybit API error (retCode ${data.retCode}): ${data.retMsg}`);
+  }
+
+  return { bids: data.result.b, asks: data.result.a };
 }

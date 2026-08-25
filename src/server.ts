@@ -22,6 +22,10 @@ import { registerFuturesGridRiskTool } from "./tools/futuresGridRisk.js";
 import { registerRiskTools } from "./tools/risk.js";
 import { registerFullPipelineTools } from "./tools/fullPipeline.js";
 import { registerNativeExtrasTools } from "./tools/nativeExtras.js";
+import { registerHyperliquidWhaleTools } from "./tools/hyperliquidWhale.js";
+import { registerCrossVenueDepthTools } from "./tools/crossVenueDepth.js";
+import { registerCftcPositioningTools } from "./tools/cftcPositioning.js";
+import { registerStablecoinSupplyTools } from "./tools/stablecoinSupply.js";
 import { resetToolRegistry } from "./toolWrapper.js";
 
 export function createServer(): McpServer {
@@ -50,5 +54,9 @@ export function createServer(): McpServer {
   registerRiskTools(server);
   registerFullPipelineTools(server);
   registerNativeExtrasTools(server);
+  registerHyperliquidWhaleTools(server);
+  registerCrossVenueDepthTools(server);
+  registerCftcPositioningTools(server);
+  registerStablecoinSupplyTools(server);
   return server;
 }

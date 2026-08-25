@@ -280,3 +280,78 @@ export async function queryWallPersistence(
 export async function pruneOldWallTracking(cutoffMs: number): Promise<void> {
   await requireDb().prepare("DELETE FROM wall_tracking WHERE captured_at < ?").bind(cutoffMs).run();
 }
+
+// hyperliquid_whale_snapshots -- posisi on-chain per wallet address di
+// HYPERLIQUID_WHALE_WATCHLIST (shared.ts), diisi Cron terpisah tiap 15
+// menit (hyperliquidWhaleCron.ts). Dibaca hyperliquid_get_whale_wallet_positions
+// (src/tools/hyperliquidWhale.ts) buat hitung delta akumulasi/distribusi.
+export interface HyperliquidWhaleSnapshotRow {
+  walletAddress: string;
+  coin: string;
+  capturedAt: number;
+  side: "long" | "short";
+  size: number;
+  entryPrice: number | null;
+  leverage: number | null;
+}
+
+interface RawHyperliquidWhaleSnapshotRow {
+  wallet_address: string;
+  coin: string;
+  captured_at: number;
+  side: "long" | "short";
+  size: number;
+  entry_price: number | null;
+  leverage: number | null;
+}
+
+export async function insertHyperliquidWhaleSnapshots(rows: HyperliquidWhaleSnapshotRow[]): Promise<void> {
+  if (rows.length === 0) return;
+  const database = requireDb();
+  const stmt = database.prepare(
+    "INSERT INTO hyperliquid_whale_snapshots (wallet_address, coin, captured_at, side, size, entry_price, leverage) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  );
+  await database.batch(
+    rows.map((r) => stmt.bind(r.walletAddress, r.coin, r.capturedAt, r.side, r.size, r.entryPrice, r.leverage)),
+  );
+}
+
+// Dua snapshot TERBARU per wallet_address untuk satu coin -- cukup buat
+// hitung delta (naik/turun/baru/tutup posisi) tanpa narik seluruh histori.
+// Pola window function sama seperti queryWallPersistence() (ROW_NUMBER
+// PARTITION BY per wallet, bukan per captured_at seperti wall_tracking).
+// Delta/agregasi dihitung di tool layer (hyperliquidWhale.ts), bukan di
+// sini -- d1Client tetap cuma akses data, sama seperti pola findWallCandidates
+// yang dipisah dari insertWallCandidates.
+export async function queryHyperliquidWhaleRecentByCoin(coin: string): Promise<HyperliquidWhaleSnapshotRow[]> {
+  const result = await requireDb()
+    .prepare(
+      `SELECT wallet_address, coin, captured_at, side, size, entry_price, leverage FROM (
+         SELECT wallet_address, coin, captured_at, side, size, entry_price, leverage,
+           ROW_NUMBER() OVER (PARTITION BY wallet_address ORDER BY captured_at DESC) AS rn
+         FROM hyperliquid_whale_snapshots
+         WHERE coin = ?
+       )
+       WHERE rn <= 2
+       ORDER BY wallet_address ASC, captured_at DESC`,
+    )
+    .bind(coin.toUpperCase())
+    .all<RawHyperliquidWhaleSnapshotRow>();
+
+  return result.results.map((r) => ({
+    walletAddress: r.wallet_address,
+    coin: r.coin,
+    capturedAt: r.captured_at,
+    side: r.side,
+    size: r.size,
+    entryPrice: r.entry_price,
+    leverage: r.leverage,
+  }));
+}
+
+// Retensi 14 hari -- posisi whale relevan lebih lama dari orderbook wall
+// (48 jam), delta dihitung dari 2 snapshot terbaru jadi histori lama gak
+// pernah dibaca lagi tapi disimpan buat analisa tren manual kalau perlu.
+export async function pruneOldHyperliquidWhaleSnapshots(cutoffMs: number): Promise<void> {
+  await requireDb().prepare("DELETE FROM hyperliquid_whale_snapshots WHERE captured_at < ?").bind(cutoffMs).run();
+}

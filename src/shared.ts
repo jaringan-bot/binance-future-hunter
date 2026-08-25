@@ -88,6 +88,17 @@ export const SNAPSHOT_WATCHLIST = [
   "ALGOUSDT",
 ] as const;
 
+// Address wallet whale Hyperliquid yang di-poll cron tiap 15 menit
+// (hyperliquidWhaleCron.ts) buat lacak delta posisi (akumulasi/distribusi).
+// TIDAK auto-generated -- Hyperliquid gak punya API leaderboard resmi
+// (endpoint publik yang ada undocumented/internal, dipakai UI mereka
+// sendiri, bisa berubah kapan aja tanpa notice). Curated manual, isi/update
+// sendiri sesuai riset (mis. dari tracker eksternal kayak Hyperdash) --
+// kosong by default, cron skip polling kalau daftar ini kosong.
+export const HYPERLIQUID_WHALE_WATCHLIST: string[] = [
+  // "0xexampleaddress...",
+];
+
 export const PERIOD_ENUM = [
   "5m",
   "15m",

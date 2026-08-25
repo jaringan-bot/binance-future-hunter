@@ -3,11 +3,12 @@ import { createServer } from "./server.js";
 import * as binanceProxy from "./binanceProxyClient.js";
 import * as kvConfig from "./kvConfig.js";
 import * as d1Client from "./d1Client.js";
-import { SNAPSHOT_WATCHLIST } from "./shared.js";
+import { SNAPSHOT_WATCHLIST, HYPERLIQUID_WHALE_WATCHLIST } from "./shared.js";
 import { computeMmSignals } from "./tools/detectMmActivity.js";
 import { isAuthorized } from "./adminUsage.js";
 import { scanWallCandidates } from "./cron/wallTrackingCron.js";
 import { snapshotBasisForSymbol, snapshotNonWatchlistBasis } from "./cron/marketSnapshotCron.js";
+import { snapshotWhaleWallet } from "./cron/hyperliquidWhaleCron.js";
 
 interface Env {
   PROXY_URL?: string;
@@ -35,7 +36,9 @@ interface Env {
 
 const REQUEST_LOG_RETENTION_MS = 30 * 24 * 3600 * 1000; // 30 hari
 const WALL_TRACKING_RETENTION_MS = 48 * 3600 * 1000; // 48 jam
+const HYPERLIQUID_WHALE_RETENTION_MS = 14 * 24 * 3600 * 1000; // 14 hari
 const WALL_SCAN_CRON = "*/1 * * * *";
+const HYPERLIQUID_WHALE_CRON = "*/15 * * * *";
 
 // Server ini STATELESS (sessionIdGenerator: undefined): setiap request
 // membuat instance server + transport baru. Ini pola resmi yang
@@ -207,11 +210,14 @@ export default {
     }
   },
 
-  // Dua Cron Trigger (lihat [triggers] di wrangler.toml), dibedakan lewat
+  // Tiga Cron Trigger (lihat [triggers] di wrangler.toml), dibedakan lewat
   // event.cron string:
   // - WALL_SCAN_CRON (*/1, tiap 1 menit): scan wall kandidat order book
   //   untuk SNAPSHOT_WATCHLIST -> wall_tracking (dibaca
   //   binance_get_orderbook_wall_persistence).
+  // - HYPERLIQUID_WHALE_CRON (*/15, tiap 15 menit): snapshot posisi wallet
+  //   whale HYPERLIQUID_WHALE_WATCHLIST -> hyperliquid_whale_snapshots
+  //   (dibaca hyperliquid_get_whale_wallet_positions).
   // - selain itu (*/5, tiap 5 menit, DEFAULT/fallback): dua hal per symbol
   //   di SNAPSHOT_WATCHLIST -- (1) market snapshot (basis futures-vs-spot +
   //   funding + OI, dibaca binance_get_basis_history), (2) 6 skor sinyal MM
@@ -245,6 +251,30 @@ export default {
             }
           }),
         ),
+      );
+      return;
+    }
+
+    if (event.cron === HYPERLIQUID_WHALE_CRON) {
+      ctx.waitUntil(
+        Promise.all(
+          HYPERLIQUID_WHALE_WATCHLIST.map(async (address) => {
+            try {
+              await snapshotWhaleWallet(address);
+            } catch (err) {
+              console.error(`[cron] gagal hyperliquid whale snapshot ${address}:`, (err as Error)?.message ?? String(err));
+            }
+          }),
+        ),
+      );
+      // Prune di tick ini sendiri (bukan cron ke-4) -- retensi 14 hari gak
+      // butuh presisi tiap tick, sama alasan seperti pruneOldWallTracking.
+      ctx.waitUntil(
+        d1Client
+          .pruneOldHyperliquidWhaleSnapshots(Date.now() - HYPERLIQUID_WHALE_RETENTION_MS)
+          .catch((err) =>
+            console.error("[cron] gagal prune hyperliquid_whale_snapshots:", (err as Error)?.message ?? String(err)),
+          ),
       );
       return;
     }
