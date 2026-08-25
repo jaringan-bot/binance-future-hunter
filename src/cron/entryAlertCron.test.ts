@@ -9,7 +9,7 @@ import type { SymbolPipelineResult } from "../tools/fullPipeline.js";
 vi.mock("../tools/fullPipeline.js", () => ({ runPipelineForSymbol: vi.fn() }));
 vi.mock("../d1Client.js", () => ({ getEntryAlertState: vi.fn(), upsertEntryAlertState: vi.fn() }));
 vi.mock("../telegram.js", () => ({ sendTelegramAlert: vi.fn() }));
-vi.mock("../entryWatchlist.js", () => ({ getTop200UsdtPerpetualWatchlist: vi.fn() }));
+vi.mock("../entryWatchlist.js", () => ({ getTopUsdtPerpetualWatchlist: vi.fn() }));
 
 function tradeResult(symbol: string): SymbolPipelineResult {
   return {
@@ -99,7 +99,7 @@ describe("runEntryAlertCheck", () => {
   afterEach(() => vi.restoreAllMocks());
 
   it("isolates a per-symbol failure -- one rejecting pipeline call doesn't block the other symbol", async () => {
-    vi.mocked(entryWatchlist.getTop200UsdtPerpetualWatchlist).mockResolvedValue(["BTCUSDT", "ETHUSDT"]);
+    vi.mocked(entryWatchlist.getTopUsdtPerpetualWatchlist).mockResolvedValue(["BTCUSDT", "ETHUSDT"]);
     vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
     vi.mocked(fullPipeline.runPipelineForSymbol).mockImplementation(async (symbol: string) => {
       if (symbol === "BTCUSDT") throw new Error("pipeline blew up");

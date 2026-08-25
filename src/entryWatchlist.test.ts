@@ -1,13 +1,13 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import * as binanceProxy from "./binanceProxyClient.js";
-import { getTop200UsdtPerpetualWatchlist } from "./entryWatchlist.js";
+import { getTopUsdtPerpetualWatchlist, ENTRY_WATCHLIST_SIZE } from "./entryWatchlist.js";
 
 vi.mock("./binanceProxyClient.js", () => ({
   getFuturesExchangeInfo: vi.fn(),
   getAllTicker24hrNative: vi.fn(),
 }));
 
-describe("getTop200UsdtPerpetualWatchlist", () => {
+describe("getTopUsdtPerpetualWatchlist", () => {
   afterEach(() => vi.restoreAllMocks());
 
   it("keeps only TRADING USDT-margined PERPETUAL symbols, ranked by 24h quote volume descending", async () => {
@@ -31,13 +31,14 @@ describe("getTop200UsdtPerpetualWatchlist", () => {
       { symbol: "BTCUSDC", quoteVolume: "999999" } as never,
     ]);
 
-    const result = await getTop200UsdtPerpetualWatchlist();
+    const result = await getTopUsdtPerpetualWatchlist();
 
     expect(result).toEqual(["ETHUSDT", "BTCUSDT"]);
   });
 
-  it("caps the result at 200 symbols even when more are eligible", async () => {
-    const symbols = Array.from({ length: 250 }, (_, i) => ({
+  it("caps the result at ENTRY_WATCHLIST_SIZE symbols even when more are eligible", async () => {
+    const total = ENTRY_WATCHLIST_SIZE + 50;
+    const symbols = Array.from({ length: total }, (_, i) => ({
       symbol: `SYM${i}USDT`,
       filters: [],
       status: "TRADING",
@@ -46,12 +47,12 @@ describe("getTop200UsdtPerpetualWatchlist", () => {
     }));
     vi.mocked(binanceProxy.getFuturesExchangeInfo).mockResolvedValue({ symbols } as never);
     vi.mocked(binanceProxy.getAllTicker24hrNative).mockResolvedValue(
-      symbols.map((s, i) => ({ symbol: s.symbol, quoteVolume: String(250 - i) }) as never),
+      symbols.map((s, i) => ({ symbol: s.symbol, quoteVolume: String(total - i) }) as never),
     );
 
-    const result = await getTop200UsdtPerpetualWatchlist();
+    const result = await getTopUsdtPerpetualWatchlist();
 
-    expect(result).toHaveLength(200);
+    expect(result).toHaveLength(ENTRY_WATCHLIST_SIZE);
     expect(result[0]).toBe("SYM0USDT");
   });
 });

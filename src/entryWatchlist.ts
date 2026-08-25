@@ -4,9 +4,12 @@
 // manual daftar 200 baris.
 import * as binanceProxy from "./binanceProxyClient.js";
 
-export const ENTRY_WATCHLIST_SIZE = 200;
+// Dinaikkan bertahap 200 -> 300 (2026-08-25) buat lihat perilaku riil
+// (self-throttle proxy, CPU time) sebelum nambah pacing eksplisit -- lihat
+// [[project_whalescope-mcp_status]] soal budget rate-limiter 780/menit.
+export const ENTRY_WATCHLIST_SIZE = 300;
 
-export async function getTop200UsdtPerpetualWatchlist(): Promise<string[]> {
+export async function getTopUsdtPerpetualWatchlist(): Promise<string[]> {
   const [exchangeInfo, tickers] = await Promise.all([
     binanceProxy.getFuturesExchangeInfo(),
     binanceProxy.getAllTicker24hrNative(),

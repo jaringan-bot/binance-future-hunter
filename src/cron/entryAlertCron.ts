@@ -1,5 +1,6 @@
-// Entry alert (Telegram) buat top-200 pair Binance Futures USDT-M by 24h
-// quote volume (entryWatchlist.ts) -- dijalankan Cron Trigger terpisah
+// Entry alert (Telegram) buat top-N pair Binance Futures USDT-M by 24h
+// quote volume (ENTRY_WATCHLIST_SIZE, entryWatchlist.ts) -- dijalankan Cron
+// Trigger terpisah
 // (ENTRY_ALERT_CRON, lihat src/index.ts scheduled handler + wrangler.toml),
 // offset dari grid `*/5`/`*/15` yang sudah ada supaya gak numpuk rate-limit
 // proxy internal (rateLimiter.ts) di tick yang sama.
@@ -12,7 +13,7 @@
 import { runPipelineForSymbol, type PipelineOpts, type SymbolPipelineResult } from "../tools/fullPipeline.js";
 import * as d1Client from "../d1Client.js";
 import { sendTelegramAlert, type TelegramEnv } from "../telegram.js";
-import { getTop200UsdtPerpetualWatchlist } from "../entryWatchlist.js";
+import { getTopUsdtPerpetualWatchlist } from "../entryWatchlist.js";
 import { mapWithConcurrency } from "../concurrency.js";
 
 const COOLDOWN_MS = 4 * 60 * 60 * 1000;
@@ -71,7 +72,7 @@ export async function checkEntryAlertForSymbol(symbol: string, env: TelegramEnv,
 }
 
 export async function runEntryAlertCheck(env: TelegramEnv): Promise<void> {
-  const watchlist = await getTop200UsdtPerpetualWatchlist();
+  const watchlist = await getTopUsdtPerpetualWatchlist();
   const now = Date.now();
   await mapWithConcurrency(watchlist, CONCURRENCY, async (symbol) => {
     try {
