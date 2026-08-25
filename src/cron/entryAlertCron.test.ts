@@ -24,7 +24,10 @@ function tradeResult(symbol: string): SymbolPipelineResult {
 }
 
 function watchResult(symbol: string): SymbolPipelineResult {
-  return { ...tradeResult(symbol), decision: "WATCH" } as SymbolPipelineResult;
+  // rankingScore mid-band (40-54, bukan 80 dari tradeResult) -- WATCH nyata
+  // dari decidePipelineOutcome gak pernah punya skor >=55 kecuali HIGH_RISK
+  // (lihat isAlertWorthy di entryAlertCron.ts), jadi 80 gak realistis di sini.
+  return { ...tradeResult(symbol), decision: "WATCH", rankingScore: 45 } as SymbolPipelineResult;
 }
 
 function noTradeResult(symbol: string): SymbolPipelineResult {
@@ -35,11 +38,15 @@ function erroredResult(symbol: string, message: string): SymbolPipelineResult {
   return { ...noTradeResult(symbol), error: message } as SymbolPipelineResult;
 }
 
-function lowScoreWatchResult(symbol: string, gridRiskStatus: "SAFE" | "MODERATE" | "HIGH_RISK" | "REJECT" = "MODERATE"): SymbolPipelineResult {
+function lowScoreWatchResult(
+  symbol: string,
+  gridRiskStatus: "SAFE" | "MODERATE" | "HIGH_RISK" | "REJECT" = "MODERATE",
+  rankingScore = 30,
+): SymbolPipelineResult {
   return {
     ...tradeResult(symbol),
     decision: "WATCH",
-    rankingScore: 30,
+    rankingScore,
     risk: { chosenLeverage: 5, initialCapitalSolved: 100, evaluatedLeverages: [], gridRisk: { status: gridRiskStatus } },
   } as unknown as SymbolPipelineResult;
 }
@@ -211,7 +218,7 @@ describe("checkEntryAlertForSymbol", () => {
     expect(d1Client.upsertEntryAlertState).toHaveBeenCalledWith({ symbol: "BTCUSDT", lastDecision: "TRADE", lastAlertAt: now });
   });
 
-  it("does not alert when WATCH is driven by a low ranking score (below 55) and grid risk is not HIGH_RISK", async () => {
+  it("does not alert when WATCH ranking score is below the 40 floor and grid risk is not HIGH_RISK", async () => {
     vi.mocked(fullPipeline.runPipelineForSymbol).mockResolvedValue(lowScoreWatchResult("BTCUSDT", "MODERATE"));
     vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
 
@@ -221,7 +228,7 @@ describe("checkEntryAlertForSymbol", () => {
     expect(d1Client.upsertEntryAlertState).toHaveBeenCalledWith({ symbol: "BTCUSDT", lastDecision: "WATCH", lastAlertAt: null });
   });
 
-  it("still alerts on WATCH with a low ranking score when grid risk is HIGH_RISK", async () => {
+  it("still alerts on WATCH below the 40 floor when grid risk is HIGH_RISK", async () => {
     vi.mocked(fullPipeline.runPipelineForSymbol).mockResolvedValue(lowScoreWatchResult("BTCUSDT", "HIGH_RISK"));
     vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
 
@@ -229,6 +236,42 @@ describe("checkEntryAlertForSymbol", () => {
 
     expect(telegram.sendTelegramAlert).toHaveBeenCalledTimes(1);
     expect(d1Client.upsertEntryAlertState).toHaveBeenCalledWith({ symbol: "BTCUSDT", lastDecision: "WATCH", lastAlertAt: 1_000_000 });
+  });
+
+  it("alerts on WATCH with a mid-band score (40-54) even without HIGH_RISK", async () => {
+    vi.mocked(fullPipeline.runPipelineForSymbol).mockResolvedValue(lowScoreWatchResult("BTCUSDT", "MODERATE", 45));
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
+
+    await checkEntryAlertForSymbol("BTCUSDT", ENV, 1_000_000);
+
+    expect(telegram.sendTelegramAlert).toHaveBeenCalledTimes(1);
+  });
+
+  it("alerts at the exact 40 floor (inclusive) without HIGH_RISK", async () => {
+    vi.mocked(fullPipeline.runPipelineForSymbol).mockResolvedValue(lowScoreWatchResult("BTCUSDT", "MODERATE", 40));
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
+
+    await checkEntryAlertForSymbol("BTCUSDT", ENV, 1_000_000);
+
+    expect(telegram.sendTelegramAlert).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not alert just below the 40 floor (39.9) without HIGH_RISK", async () => {
+    vi.mocked(fullPipeline.runPipelineForSymbol).mockResolvedValue(lowScoreWatchResult("BTCUSDT", "MODERATE", 39.9));
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
+
+    await checkEntryAlertForSymbol("BTCUSDT", ENV, 1_000_000);
+
+    expect(telegram.sendTelegramAlert).not.toHaveBeenCalled();
+  });
+
+  it("does not alert on WATCH at/above the TRADE threshold even without HIGH_RISK (shouldn't happen from the real pipeline, defensive)", async () => {
+    vi.mocked(fullPipeline.runPipelineForSymbol).mockResolvedValue(lowScoreWatchResult("BTCUSDT", "MODERATE", 60));
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
+
+    await checkEntryAlertForSymbol("BTCUSDT", ENV, 1_000_000);
+
+    expect(telegram.sendTelegramAlert).not.toHaveBeenCalled();
   });
 
   it("logs the internal pipeline error (e.g. rate-limit self-throttle) so it's visible in wrangler tail, without alerting", async () => {

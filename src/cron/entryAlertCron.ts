@@ -67,15 +67,24 @@ const DEFAULT_PIPELINE_OPTS: PipelineOpts = {
 const ALERTABLE_DECISIONS = new Set(["TRADE", "WATCH"]);
 
 // WATCH bisa terjadi karena 2 alasan berbeda (lihat decidePipelineOutcome,
-// pipelineEngine.ts): grid risk HIGH_RISK (skor berapapun), ATAU rankingScore
-// di bawah TRADE_RANKING_SCORE_THRESHOLD. Alasan kedua terlalu sering & noise
-// buat notifikasi (banyak pair di bawah ambang), jadi WATCH cuma dianggap
-// layak alert kalau skornya sendiri >= ambang TRADE, atau grid risk-nya
-// HIGH_RISK (sinyal risiko nyata yang tetap perlu diketahui walau skor rendah).
+// pipelineEngine.ts): grid risk HIGH_RISK (skor berapapun -- ini murni soal
+// risiko EKSEKUSI grid, gak ada hubungan sama rankingScore, jadi tetap
+// selalu alert independen dari band skor di bawah), ATAU rankingScore di
+// bawah TRADE_RANKING_SCORE_THRESHOLD (kualitas sinyal arah). Buat alasan
+// kedua, band 40-54 (WATCH_MIN_ALERT_SCORE s/d di bawah ambang TRADE) --
+// di bawah 40 kebanyakan noise, >=55 udah wilayah TRADE (dijamin gak
+// pernah kejadian dari decidePipelineOutcome asli, guard ini cuma jaga-jaga).
+// User request 2026-08-26: revert dari versi sebelumnya yang mensyaratkan
+// skor >=55 buat WATCH (itu sendiri revert dari versi PALING awal yang
+// alert SEMUA WATCH tanpa filter skor sama sekali -- itu yang bikin skor
+// di bawah 40 kebanjiran notif ke HP).
+export const WATCH_MIN_ALERT_SCORE = 40;
+
 function isAlertWorthy(result: SymbolPipelineResult): boolean {
   if (!ALERTABLE_DECISIONS.has(result.decision)) return false;
   if (result.decision === "TRADE") return true;
-  return result.rankingScore >= TRADE_RANKING_SCORE_THRESHOLD || result.risk?.gridRisk?.status === "HIGH_RISK";
+  if (result.risk?.gridRisk?.status === "HIGH_RISK") return true;
+  return result.rankingScore >= WATCH_MIN_ALERT_SCORE && result.rankingScore < TRADE_RANKING_SCORE_THRESHOLD;
 }
 
 const DECISION_LABEL: Record<string, string> = {
