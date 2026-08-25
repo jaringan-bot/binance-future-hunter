@@ -145,6 +145,12 @@ export class BinanceProxyError extends Error {
     message: string,
     public readonly status?: number,
     public readonly path?: string,
+    // "parse" -- body-nya HTTP 200 tapi gagal JSON.parse. Kemungkinan race
+    // di withCache() (clone()+Cache API di bawah beban concurrent), belum
+    // dipastikan akar masalahnya, tapi retry cepat 1x (bypass cache, fetch
+    // baru) menyembuhkan gejalanya di kebanyakan kasus -- lihat pemanggil
+    // parseProxyResponse() di callProxyEndpoint/callProxyDirect.
+    public readonly kind: "http" | "parse" = "http",
   ) {
     super(message);
     this.name = "BinanceProxyError";
@@ -184,8 +190,12 @@ async function parseProxyResponse<T>(response: Response, path: string, authError
   try {
     return JSON.parse(bodyText) as T;
   } catch {
-    throw new BinanceProxyError(`Response proxy bukan JSON valid: ${bodyText.slice(0, 300)}`, response.status, path);
+    throw new BinanceProxyError(`Response proxy bukan JSON valid: ${bodyText.slice(0, 300)}`, response.status, path, "parse");
   }
+}
+
+function isParseError(err: unknown): err is BinanceProxyError {
+  return err instanceof BinanceProxyError && err.kind === "parse";
 }
 
 async function callProxyEndpoint<T>(
@@ -200,11 +210,12 @@ async function callProxyEndpoint<T>(
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined) url.searchParams.set(key, String(value));
   }
+  const authErrorHint = "Cek PROXY_SECRET cocok antara worker dan Vercel (primary maupun secondary).";
+  const doFetch = () => fetchWithRetry(url.toString(), { headers: { "x-proxy-secret": endpoint.secret, Accept: "application/json" } });
+
   let response: Response;
   try {
-    response = await withCache(buildCacheKeyUrl(path, params, market), cacheTtlForPath(path), () =>
-      fetchWithRetry(url.toString(), { headers: { "x-proxy-secret": endpoint.secret, Accept: "application/json" } }),
-    );
+    response = await withCache(buildCacheKeyUrl(path, params, market), cacheTtlForPath(path), doFetch);
   } catch (err) {
     throw new BinanceProxyError(
       `Gagal menghubungi proxy Vercel: ${(err as Error).message}. Cek apakah PROXY_URL benar dan proxy sedang aktif.`,
@@ -212,7 +223,27 @@ async function callProxyEndpoint<T>(
       path,
     );
   }
-  return parseProxyResponse<T>(response, path, "Cek PROXY_SECRET cocok antara worker dan Vercel (primary maupun secondary).");
+  try {
+    return await parseProxyResponse<T>(response, path, authErrorHint);
+  } catch (err) {
+    if (!isParseError(err)) throw err;
+    // Body ke-corrupt padahal HTTP 200 -- kemungkinan race di withCache()
+    // (clone()+Cache API di bawah beban concurrent), belum dipastikan akar
+    // masalahnya. Retry 1x BYPASS cache sama sekali (fetch baru langsung),
+    // supaya kalau yang corrupt itu entry cache-nya sendiri, retry gak
+    // baca ulang entry rusak yang sama.
+    let freshResponse: Response;
+    try {
+      freshResponse = await doFetch();
+    } catch (fetchErr) {
+      throw new BinanceProxyError(
+        `Gagal menghubungi proxy Vercel: ${(fetchErr as Error).message}. Cek apakah PROXY_URL benar dan proxy sedang aktif.`,
+        undefined,
+        path,
+      );
+    }
+    return await parseProxyResponse<T>(freshResponse, path, authErrorHint);
+  }
 }
 
 async function callProxyDirect<T>(
@@ -224,11 +255,12 @@ async function callProxyDirect<T>(
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined) url.searchParams.set(key, String(value));
   }
+  const authErrorHint = "Kemungkinan WAF block Binance (lihat komentar DIRECT FALLBACK).";
+  const doFetch = () => fetchWithRetry(url.toString(), { headers: { Accept: "application/json" } });
+
   let response: Response;
   try {
-    response = await withCache(buildCacheKeyUrl(path, params, market), cacheTtlForPath(path), () =>
-      fetchWithRetry(url.toString(), { headers: { Accept: "application/json" } }),
-    );
+    response = await withCache(buildCacheKeyUrl(path, params, market), cacheTtlForPath(path), doFetch);
   } catch (err) {
     throw new BinanceProxyError(
       `Gagal menghubungi Binance langsung (direct fallback): ${(err as Error).message}.`,
@@ -236,7 +268,22 @@ async function callProxyDirect<T>(
       path,
     );
   }
-  return parseProxyResponse<T>(response, path, "Kemungkinan WAF block Binance (lihat komentar DIRECT FALLBACK).");
+  try {
+    return await parseProxyResponse<T>(response, path, authErrorHint);
+  } catch (err) {
+    if (!isParseError(err)) throw err;
+    let freshResponse: Response;
+    try {
+      freshResponse = await doFetch();
+    } catch (fetchErr) {
+      throw new BinanceProxyError(
+        `Gagal menghubungi Binance langsung (direct fallback): ${(fetchErr as Error).message}.`,
+        undefined,
+        path,
+      );
+    }
+    return await parseProxyResponse<T>(freshResponse, path, authErrorHint);
+  }
 }
 
 interface ProxyTier {

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { setProxyConfig, getCurrentFundingRateNative, getAllTicker24hrNative, BinanceProxyError } from "./binanceProxyClient.js";
+import { setProxyConfig, getCurrentFundingRateNative, getAllTicker24hrNative, getKlinesNative, BinanceProxyError } from "./binanceProxyClient.js";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status });
@@ -108,6 +108,35 @@ describe("binanceProxyClient proxy failover", () => {
 
     await expect(getCurrentFundingRateNative("BTCUSDT")).rejects.toThrow(BinanceProxyError);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries once (same tier, no failover) when the proxy body is not valid JSON, then succeeds", async () => {
+    setProxyConfig("https://primary.example", "secret1", "https://secondary.example", "secret2");
+    const klineRow: [number, string, string, string, string, string, number, string, number, string, string, string] = [
+      1000, "1", "2", "0.5", "1.5", "10", 1999, "10", 5, "5", "5", "0",
+    ];
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("[[1000,\"1\",\"2\",\"0.5\",\"1.5\",\"10\",1999,\"10\",5,\"5\",\"5\",\"0\"],[trunca", { status: 200 }))
+      .mockResolvedValueOnce(jsonResponse([klineRow], 200));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await getKlinesNative("BTCUSDT", "1h", 50);
+
+    expect(result).toEqual([klineRow]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // Same tier both times (primary), not a failover to secondary/direct.
+    expect(String(fetchMock.mock.calls[0][0])).toContain("primary.example");
+    expect(String(fetchMock.mock.calls[1][0])).toContain("primary.example");
+  });
+
+  it("throws BinanceProxyError when the retry also gets an invalid JSON body", async () => {
+    setProxyConfig("https://primary.example", "secret1");
+    const fetchMock = vi.fn().mockImplementation(async () => new Response("not json at all", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getKlinesNative("BTCUSDT", "1h", 50)).rejects.toThrow(BinanceProxyError);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("fails over to secondary after primary's network-error retries are exhausted", async () => {
