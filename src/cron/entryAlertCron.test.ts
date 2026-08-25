@@ -53,6 +53,53 @@ describe("checkEntryAlertForSymbol", () => {
   });
   afterEach(() => vi.restoreAllMocks());
 
+  it("formats the Telegram message with a rounded ranking score, adaptive-precision prices, and a status icon", async () => {
+    const result = {
+      ...tradeResult("ONDOUSDT"),
+      decision: "WATCH",
+      rankingScore: 35.78099949618541,
+      risk: { chosenLeverage: 5, initialCapitalSolved: 100, evaluatedLeverages: [], gridRisk: { status: "HIGH_RISK" } },
+      gridBotConfig: {
+        lower: 0.35790218401913754,
+        upper: 0.40649781598086243,
+        gridCount: 18,
+        gridType: "ARITHMETIC",
+        leverage: 5,
+        marginMode: "ISOLATED",
+        stopLoss: 0.3434859054473654,
+        takeProfit: 0.41379563196172486,
+        marginModeCaveat: "",
+      },
+      tier1: {
+        smartMoney: {
+          condition: "BULLISH_ACCUMULATION",
+          smartMoneyBias: "BULLISH",
+          retailSentiment: "CROWDED_SHORT",
+          confidenceScore: 72,
+          divergenceScore: 0.6,
+        },
+        mm: { totalScore: 3, tier: "MODERATE", activeSignals: [] },
+        obi: { depth5: 0, depth10: 0, depth20: 0 },
+        cvd: { buyPct: 0, cvd: 0 },
+        oi: { changePct: 0 },
+        regime1h: { regime: "RANGING", confidence: 0.5, reason: "" },
+        regime4h: { regime: "RANGING", confidence: 0.5, reason: "" },
+      },
+    } as unknown as SymbolPipelineResult;
+    vi.mocked(fullPipeline.runPipelineForSymbol).mockResolvedValue(result);
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
+
+    await checkEntryAlertForSymbol("ONDOUSDT", ENV, 1_000_000);
+
+    const message = vi.mocked(telegram.sendTelegramAlert).mock.calls[0][1];
+    expect(message).toContain("🟡");
+    expect(message).toContain("Ranking score: 35.8");
+    expect(message).not.toContain("35.78099949618541");
+    expect(message).toContain("0.357902");
+    expect(message).not.toContain("0.35790218401913754");
+    expect(message).toContain("BULLISH_ACCUMULATION · SM Bias BULLISH vs Retail CROWDED_SHORT");
+  });
+
   it("sends a Telegram alert and stores TRADE state when a symbol transitions into TRADE", async () => {
     vi.mocked(fullPipeline.runPipelineForSymbol).mockResolvedValue(tradeResult("BTCUSDT"));
     vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);

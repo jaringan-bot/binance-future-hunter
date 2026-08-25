@@ -19,6 +19,7 @@ import { getTopUsdtPerpetualWatchlist } from "../entryWatchlist.js";
 import { mapWithConcurrency } from "../concurrency.js";
 import { TRADE_RANKING_SCORE_THRESHOLD } from "../pipelineEngine.js";
 import * as pacing from "../pacing.js";
+import { fmtPrice } from "../format.js";
 
 const COOLDOWN_MS = 4 * 60 * 60 * 1000;
 
@@ -82,13 +83,29 @@ const DECISION_LABEL: Record<string, string> = {
   WATCH: "masuk WATCH (mendekati entry, belum layak)",
 };
 
+const DECISION_ICON: Record<string, string> = {
+  TRADE: "🟢",
+  WATCH: "🟡",
+};
+
 function formatEntryAlert(result: SymbolPipelineResult): string {
-  const lines = [`*${result.symbol}* ${DECISION_LABEL[result.decision] ?? result.decision}`, `Ranking score: ${result.rankingScore}`];
+  const icon = DECISION_ICON[result.decision] ?? "ℹ️";
+  const lines = [
+    `${icon} *${result.symbol}* ${DECISION_LABEL[result.decision] ?? result.decision}`,
+    `📊 Ranking score: ${result.rankingScore.toFixed(1)}`,
+  ];
   const g = result.gridBotConfig;
   if (g) {
-    lines.push(`Range: ${g.lower} - ${g.upper} (${g.gridType}, ${g.gridCount} grid)`);
-    lines.push(`Leverage: ${g.leverage ?? "-"} (${g.marginMode})`);
-    lines.push(`SL: ${g.stopLoss} / TP: ${g.takeProfit}`);
+    lines.push(
+      "",
+      `📈 Range: ${fmtPrice(g.lower)} - ${fmtPrice(g.upper)} (${g.gridType}, ${g.gridCount} grid)`,
+      `⚙️ Leverage: ${g.leverage ?? "-"} (${g.marginMode})`,
+      `🛑 SL: ${fmtPrice(g.stopLoss)}  🎯 TP: ${fmtPrice(g.takeProfit)}`,
+    );
+  }
+  const sm = result.tier1?.smartMoney;
+  if (sm) {
+    lines.push(`🐋 ${sm.condition} · SM Bias ${sm.smartMoneyBias} vs Retail ${sm.retailSentiment}`);
   }
   return lines.join("\n");
 }
