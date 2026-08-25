@@ -27,3 +27,9 @@ ADMIN_SECRET=
 # memanggil /mcp (default: https://claude.ai, https://claude.com). Lihat
 # README.md bagian "Keamanan: DNS Rebinding Protection".
 ALLOWED_ORIGINS=
+
+# OPSIONAL -- token bot Telegram (dari @BotFather, format "123:ABC-...") +
+# chat_id tujuan, buat entry alert (ENTRY_ALERT_CRON). Tanpa ini, alert
+# di-skip + di-log doang (lihat src/telegram.ts), cron TETAP jalan normal.
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=

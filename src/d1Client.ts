@@ -355,3 +355,37 @@ export async function queryHyperliquidWhaleRecentByCoin(coin: string): Promise<H
 export async function pruneOldHyperliquidWhaleSnapshots(cutoffMs: number): Promise<void> {
   await requireDb().prepare("DELETE FROM hyperliquid_whale_snapshots WHERE captured_at < ?").bind(cutoffMs).run();
 }
+
+// Satu row per symbol (entryAlertCron.ts) -- lacak decision TRADE/WATCH/
+// NO_TRADE terakhir + kapan terakhir kirim alert, buat deteksi transisi dan
+// cooldown re-alert (lihat komentar entryAlertCron.ts).
+export interface EntryAlertStateRow {
+  symbol: string;
+  lastDecision: string;
+  lastAlertAt: number | null;
+}
+
+interface RawEntryAlertStateRow {
+  symbol: string;
+  last_decision: string;
+  last_alert_at: number | null;
+}
+
+export async function getEntryAlertState(symbol: string): Promise<EntryAlertStateRow | null> {
+  const row = await requireDb()
+    .prepare("SELECT symbol, last_decision, last_alert_at FROM entry_alert_state WHERE symbol = ?")
+    .bind(symbol.toUpperCase())
+    .first<RawEntryAlertStateRow>();
+  if (!row) return null;
+  return { symbol: row.symbol, lastDecision: row.last_decision, lastAlertAt: row.last_alert_at };
+}
+
+export async function upsertEntryAlertState(row: EntryAlertStateRow): Promise<void> {
+  await requireDb()
+    .prepare(
+      "INSERT INTO entry_alert_state (symbol, last_decision, last_alert_at) VALUES (?, ?, ?) " +
+        "ON CONFLICT(symbol) DO UPDATE SET last_decision = excluded.last_decision, last_alert_at = excluded.last_alert_at",
+    )
+    .bind(row.symbol.toUpperCase(), row.lastDecision, row.lastAlertAt)
+    .run();
+}

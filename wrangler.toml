@@ -22,7 +22,7 @@ binding = "DB"
 database_name = "whalescope-mcp-db"
 database_id = "3600a9bb-9261-492a-bf06-3a11b0448f4e"
 
-# Tiga Cron Trigger -- akun ini sudah di Workers PAID plan, jadi limit slot
+# Empat Cron Trigger -- akun ini sudah di Workers PAID plan, jadi limit slot
 # jauh di atas 5 (bekas batasan Free plan yang mendasari komentar lama di
 # sini), dibedakan lewat event.cron di src/index.ts scheduled handler:
 # - */5: snapshot basis + sinyal MM futures-vs-spot untuk watchlist, plus
@@ -32,5 +32,12 @@ database_id = "3600a9bb-9261-492a-bf06-3a11b0448f4e"
 # - */15: snapshot posisi wallet whale Hyperliquid (HYPERLIQUID_WHALE_WATCHLIST,
 #   shared.ts) ke hyperliquid_whale_snapshots -- posisi whale gak berubah
 #   secepat orderbook/funding, 15 menit cukup, hemat fetch budget.
+# - 7-59/15 (tiap 15 menit, OFFSET dari dua cron di atas -- fire di menit
+#   7,22,37,52): entry alert Telegram top-200 pair (entryAlertCron.ts) --
+#   offset SENGAJA supaya gak numpuk di tick yang sama dengan snapshot */5
+#   (pipeline penuh 200 pair jauh lebih berat call-nya daripada basis
+#   snapshot). Pakai range-step, BUKAN comma-list -- comma-list ("7,22,37,52")
+#   keterima saat registrasi tapi gak pernah beneran fire (lihat komentar
+#   ENTRY_ALERT_CRON di src/index.ts).
 [triggers]
-crons = ["*/5 * * * *", "*/1 * * * *", "*/15 * * * *"]
+crons = ["*/5 * * * *", "*/1 * * * *", "*/15 * * * *", "7-59/15 * * * *"]

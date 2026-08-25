@@ -435,6 +435,13 @@ export async function getTicker24hrNative(symbol: string): Promise<Ticker24hr> {
   return callProxy<Ticker24hr>("/fapi/v1/ticker/24hr", { symbol: symbol.toUpperCase() });
 }
 
+// Tanpa `symbol` param, Binance balikin ticker 24h SEMUA pair sekaligus --
+// dipakai entryWatchlist.ts buat rank top-N by 24h quote volume tanpa 500+
+// call per-symbol.
+export async function getAllTicker24hrNative(): Promise<Ticker24hr[]> {
+  return callProxy<Ticker24hr[]>("/fapi/v1/ticker/24hr", {});
+}
+
 export interface SpotPrice { symbol: string; price: string; }
 export async function getSpotPrice(symbol: string): Promise<SpotPrice> {
   return callProxy<SpotPrice>("/api/v3/ticker/price", { symbol: symbol.toUpperCase() }, "spot");
@@ -484,7 +491,7 @@ export async function getSpotExchangeInfo(symbol: string): Promise<SpotSymbolInf
 export interface FuturesLotSizeFilter { filterType: "LOT_SIZE"; minQty: string; stepSize: string; }
 export interface FuturesMinNotionalFilter { filterType: "MIN_NOTIONAL"; notional: string; }
 type FuturesSymbolFilter = FuturesLotSizeFilter | FuturesMinNotionalFilter | { filterType: string; [key: string]: unknown };
-export interface FuturesExchangeInfoSymbol { symbol: string; filters: FuturesSymbolFilter[]; status?: string; contractType?: string; }
+export interface FuturesExchangeInfoSymbol { symbol: string; filters: FuturesSymbolFilter[]; status?: string; contractType?: string; quoteAsset?: string; }
 export interface FuturesExchangeInfoResponse { symbols: FuturesExchangeInfoSymbol[]; }
 export async function getFuturesExchangeInfo(symbol?: string): Promise<FuturesExchangeInfoResponse> {
   return callProxy<FuturesExchangeInfoResponse>("/fapi/v1/exchangeInfo", symbol ? { symbol: symbol.toUpperCase() } : {});

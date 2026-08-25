@@ -9,6 +9,7 @@ import { isAuthorized } from "./adminUsage.js";
 import { scanWallCandidates } from "./cron/wallTrackingCron.js";
 import { snapshotBasisForSymbol, snapshotNonWatchlistBasis } from "./cron/marketSnapshotCron.js";
 import { snapshotWhaleWallet } from "./cron/hyperliquidWhaleCron.js";
+import { runEntryAlertCheck } from "./cron/entryAlertCron.js";
 
 interface Env {
   PROXY_URL?: string;
@@ -32,6 +33,11 @@ interface Env {
   // yang connect ke worker ini, lihat README "Admin: Usage Log"). Tanpa
   // ini, endpoint itu SELALU 403 (fitur nonaktif by default, aman).
   ADMIN_SECRET?: string;
+  // OPSIONAL -- token bot Telegram (dari @BotFather) + chat_id tujuan, buat
+  // entry alert (ENTRY_ALERT_CRON). Kalau salah satu belum diset, alert
+  // di-skip + di-log (lihat src/telegram.ts), TIDAK menggagalkan cron.
+  TELEGRAM_BOT_TOKEN?: string;
+  TELEGRAM_CHAT_ID?: string;
 }
 
 const REQUEST_LOG_RETENTION_MS = 30 * 24 * 3600 * 1000; // 30 hari
@@ -39,6 +45,19 @@ const WALL_TRACKING_RETENTION_MS = 48 * 3600 * 1000; // 48 jam
 const HYPERLIQUID_WHALE_RETENTION_MS = 14 * 24 * 3600 * 1000; // 14 hari
 const WALL_SCAN_CRON = "*/1 * * * *";
 const HYPERLIQUID_WHALE_CRON = "*/15 * * * *";
+// Offset 7 menit dari grid `*/5`/`*/15` di atas -- entryAlertCron.ts jalanin
+// pipeline penuh (bukan cuma basis snapshot) buat top-200 pair, numpuk di
+// tick yang sama dengan snapshot cron bisa nabrak MAX_REQUESTS_PER_WINDOW
+// proxy internal (rateLimiter.ts). Offset ini gak pernah bertepatan dengan
+// kelipatan 5 menit manapun.
+//
+// SENGAJA range-step ("7-59/15"), BUKAN comma-list ("7,22,37,52") --
+// comma-list KETERIMA saat registrasi (muncul benar di dashboard + wrangler
+// deploy), tapi ANEHNYA gak pernah beneran fire (diverifikasi wrangler tail
+// 3x berturut-turut, tick :07/:22/:37 semua kelewat, sementara */1, */5,
+// */15 normal terus). Range-step hasilnya SAMA (fire di menit 7,22,37,52)
+// tapi pakai operator step yang sama kayak */15 yang udah terbukti reliable.
+const ENTRY_ALERT_CRON = "7-59/15 * * * *";
 
 // Server ini STATELESS (sessionIdGenerator: undefined): setiap request
 // membuat instance server + transport baru. Ini pola resmi yang
@@ -210,11 +229,17 @@ export default {
     }
   },
 
-  // Tiga Cron Trigger (lihat [triggers] di wrangler.toml), dibedakan lewat
+  // Empat Cron Trigger (lihat [triggers] di wrangler.toml), dibedakan lewat
   // event.cron string:
   // - WALL_SCAN_CRON (*/1, tiap 1 menit): scan wall kandidat order book
   //   untuk SNAPSHOT_WATCHLIST -> wall_tracking (dibaca
   //   binance_get_orderbook_wall_persistence).
+  // - ENTRY_ALERT_CRON (7,22,37,52 -- tiap 15 menit, offset dari grid */5 &
+  //   */15 lainnya): whalescope_full_pipeline penuh untuk top-200 pair
+  //   USDT-M perpetual by 24h volume (entryWatchlist.ts, DINAMIS bukan
+  //   hardcode) -> kirim alert Telegram (telegram.ts) pas symbol TRANSISI ke
+  //   TRADE, atau masih TRADE tapi cooldown 4 jam sejak alert terakhir sudah
+  //   lewat (entryAlertCron.ts, state di D1 entry_alert_state).
   // - HYPERLIQUID_WHALE_CRON (*/15, tiap 15 menit): snapshot posisi wallet
   //   whale HYPERLIQUID_WHALE_WATCHLIST -> hyperliquid_whale_snapshots
   //   (dibaca hyperliquid_get_whale_wallet_positions).
@@ -251,6 +276,13 @@ export default {
             }
           }),
         ),
+      );
+      return;
+    }
+
+    if (event.cron === ENTRY_ALERT_CRON) {
+      ctx.waitUntil(
+        runEntryAlertCheck({ TELEGRAM_BOT_TOKEN: env.TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID: env.TELEGRAM_CHAT_ID }),
       );
       return;
     }

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { setProxyConfig, getCurrentFundingRateNative, BinanceProxyError } from "./binanceProxyClient.js";
+import { setProxyConfig, getCurrentFundingRateNative, getAllTicker24hrNative, BinanceProxyError } from "./binanceProxyClient.js";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status });
@@ -127,5 +127,29 @@ describe("binanceProxyClient proxy failover", () => {
 
     expect(result.lastFundingRate).toBe("0.0001");
     expect(fetchMock).toHaveBeenCalledTimes(5);
+  });
+});
+
+describe("getAllTicker24hrNative", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    setProxyConfig(undefined, undefined);
+  });
+
+  it("calls the ticker/24hr endpoint without a symbol param and returns the full array", async () => {
+    setProxyConfig("https://primary.example", "secret1");
+    const allTickers = [
+      { symbol: "BTCUSDT", quoteVolume: "1000" },
+      { symbol: "ETHUSDT", quoteVolume: "500" },
+    ];
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(allTickers, 200));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await getAllTicker24hrNative();
+
+    expect(result).toEqual(allTickers);
+    const calledUrl = new URL(String(fetchMock.mock.calls[0][0]));
+    expect(calledUrl.searchParams.get("path")).toBe("/fapi/v1/ticker/24hr");
+    expect(calledUrl.searchParams.has("symbol")).toBe(false);
   });
 });
