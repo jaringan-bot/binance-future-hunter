@@ -1,13 +1,15 @@
 // Watchlist entry-alert (entryAlertCron.ts) -- DINAMIS, dihitung ulang tiap
 // run dari data live Binance (bukan hardcode kayak SNAPSHOT_WATCHLIST) supaya
 // otomatis nyesuain listing/delisting/naik-turun peringkat tanpa maintenance
-// manual daftar 200 baris.
+// manual daftar simbol.
 import * as binanceProxy from "./binanceProxyClient.js";
 
-// Dinaikkan bertahap 200 -> 300 (2026-08-25) buat lihat perilaku riil
+// Dinaikkan bertahap 200 -> 300 -> 400 (2026-08-25) buat lihat perilaku riil
 // (self-throttle proxy, CPU time) sebelum nambah pacing eksplisit -- lihat
 // [[project_whalescope-mcp_status]] soal budget rate-limiter 780/menit.
-export const ENTRY_WATCHLIST_SIZE = 300;
+// 300 sukses penuh (303 row D1, gak keputus). Universe total USDT-M
+// perpetual TRADING ~527 pair (dicek 2026-08-25), jadi 400 masih < separuh.
+export const ENTRY_WATCHLIST_SIZE = 400;
 
 export async function getTopUsdtPerpetualWatchlist(): Promise<string[]> {
   const [exchangeInfo, tickers] = await Promise.all([
