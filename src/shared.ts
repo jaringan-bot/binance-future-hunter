@@ -249,3 +249,28 @@ export function computeRealizedVolatility(
   const annualizedVol = periodVol * Math.sqrt(periodsPerYear);
   return { periodPct: periodVol * 100, annualizedPct: annualizedVol * 100 };
 }
+
+// <24 candle 1h dianggap histori log-return "missing" -> pakai fallback ATR-range.
+export const MIN_1H_CANDLES_FOR_RV = 24;
+
+// Fallback proxy RV (dipakai binance_get_realized_volatility) kalau histori 1h
+// log-return gak tersedia -- ATR harian di-annualize (bukan raw ratio un-annualized)
+// biar skalanya sebanding dengan RV log-return dan valid dibandingkan ke threshold
+// tier 60%/120%.
+export function computeFallbackRvProxy(
+  atr14: number,
+  price1d: number,
+  calibratedFactor = 0.8, // Offline-calibrated scaling factor to align daily ATR range with close-to-close RV
+): number {
+  if (price1d <= 0) return 0;
+  return (atr14 / price1d) * Math.sqrt(365) * calibratedFactor;
+}
+
+export type VolatilityTier = { tier: 1 | 2 | 3; multiplier: 1.0 | 1.25 | 1.6 };
+
+// rvAnnFraction = RV annualized sebagai fraction (0.6 = 60%), bukan *100.
+export function assignVolatilityTier(rvAnnFraction: number): VolatilityTier {
+  if (rvAnnFraction < 0.6) return { tier: 1, multiplier: 1.0 };
+  if (rvAnnFraction < 1.2) return { tier: 2, multiplier: 1.25 };
+  return { tier: 3, multiplier: 1.6 };
+}

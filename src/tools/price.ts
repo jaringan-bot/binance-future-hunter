@@ -11,9 +11,13 @@ import {
   errorResult,
   parseTimeParam,
   computeRealizedVolatility,
+  computeFallbackRvProxy,
+  assignVolatilityTier,
+  MIN_1H_CANDLES_FOR_RV,
   detailParam,
 } from "../shared.js";
 import { summarizeKlines, classifyPriceBias, truncateRows } from "../toolHelpers.js";
+import { computeATR } from "../gridBoundEngine.js";
 
 const RECENT_CANDLES = 5;
 
@@ -194,9 +198,10 @@ export function registerPriceTools(server: McpServer): void {
     },
     async ({ symbol }) => {
       try {
-        const [klines15m, klines1h] = await Promise.all([
+        const [klines15m, klines1h, klines1d] = await Promise.all([
           binanceProxy.getKlinesNative(symbol, "15m", 96),
           binanceProxy.getKlinesNative(symbol, "1h", 30),
+          binanceProxy.getKlinesNative(symbol, "1d", 20),
         ]);
 
         const closes15m = klines15m.map((k) => parseFloat(k[4]));
@@ -204,6 +209,19 @@ export function registerPriceTools(server: McpServer): void {
 
         const rv15m = computeRealizedVolatility(closes15m, 35040);
         const rv1h = computeRealizedVolatility(closes1h, 8760);
+
+        // Fallback proxy (ATR harian di-annualize) -- selalu dihitung sebagai
+        // cross-check, dipakai sebagai primary method kalau histori 1h kurang.
+        const { candles: candles1d } = summarizeKlines(klines1d);
+        const price1d = candles1d.at(-1)?.close ?? 0;
+        const atr14 = computeATR(candles1d, 14);
+        const rvRangeProxyAnn = computeFallbackRvProxy(atr14, price1d);
+
+        const isFallbackUsed = closes1h.length < MIN_1H_CANDLES_FOR_RV;
+        const rvLogreturnAnn = isFallbackUsed ? null : rv1h.annualizedPct / 100;
+        const primaryMethod = isFallbackUsed ? "atr_range_fallback" : "log_return_1h";
+        const tierSource = rvLogreturnAnn ?? rvRangeProxyAnn;
+        const { tier: assignedTier, multiplier: tierMultiplier } = assignVolatilityTier(tierSource);
 
         const text = [
           `# Realized Volatility — ${symbol}`,
@@ -215,6 +233,11 @@ export function registerPriceTools(server: McpServer): void {
           ``,
           `_RV annualized tinggi = range candle melebar dibanding biasanya; pakai angka per-periode untuk intuisi ` +
             `pergerakan riil per candle. Dihitung dari log-return close-to-close, bukan true range._`,
+          ``,
+          `**Tier Volatility**: Tier ${assignedTier} (multiplier x${tierMultiplier}) — dari ${primaryMethod === "log_return_1h" ? `RV log-return 1h (${(rvLogreturnAnn! * 100).toFixed(1)}% ann.)` : `fallback ATR-range proxy (${(rvRangeProxyAnn * 100).toFixed(1)}% ann.)`}.` +
+            (isFallbackUsed
+              ? ` _Fallback dipakai: histori 1h cuma ${closes1h.length} candle (<${MIN_1H_CANDLES_FOR_RV})._`
+              : ``),
         ].join("\n");
 
         return {
@@ -225,6 +248,12 @@ export function registerPriceTools(server: McpServer): void {
             rv15mPeriodPct: rv15m.periodPct,
             rv1hAnnualizedPct: rv1h.annualizedPct,
             rv1hPeriodPct: rv1h.periodPct,
+            rv_logreturn_ann: rvLogreturnAnn,
+            rv_range_proxy_ann: rvRangeProxyAnn,
+            primary_method: primaryMethod,
+            is_fallback_used: isFallbackUsed,
+            assigned_tier: assignedTier,
+            tier_multiplier: tierMultiplier,
           },
         };
       } catch (err) {
