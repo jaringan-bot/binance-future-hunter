@@ -8,7 +8,7 @@ import type { SymbolPipelineResult } from "../tools/fullPipeline.js";
 import * as pacing from "../pacing.js";
 
 vi.mock("../tools/fullPipeline.js", () => ({ runPipelineForSymbol: vi.fn() }));
-vi.mock("../d1Client.js", () => ({ getEntryAlertState: vi.fn(), upsertEntryAlertState: vi.fn() }));
+vi.mock("../d1Client.js", () => ({ getEntryAlertState: vi.fn(), upsertEntryAlertState: vi.fn(), insertEntryAlertRunLog: vi.fn() }));
 vi.mock("../telegram.js", () => ({ sendTelegramAlert: vi.fn() }));
 vi.mock("../entryWatchlist.js", () => ({ getTopUsdtPerpetualWatchlist: vi.fn() }));
 vi.mock("../pacing.js", () => ({ sleep: vi.fn().mockResolvedValue(undefined) }));
@@ -287,5 +287,31 @@ describe("runEntryAlertCheck", () => {
 
     expect(pacing.sleep).toHaveBeenCalledTimes(3);
     expect(pacing.sleep).toHaveBeenCalledWith(ENTRY_ALERT_PACING_DELAY_MS);
+  });
+
+  it("records a run-log summary (total/errors/watch/trade tally) after processing the batch, so heartbeatCron can tell market-quiet from backend-broken", async () => {
+    vi.mocked(entryWatchlist.getTopUsdtPerpetualWatchlist).mockResolvedValue([
+      "BTCUSDT",
+      "ETHUSDT",
+      "SOLUSDT",
+      "ADAUSDT",
+    ]);
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
+    vi.mocked(fullPipeline.runPipelineForSymbol).mockImplementation(async (symbol: string) => {
+      if (symbol === "BTCUSDT") return tradeResult(symbol); // TRADE, no error
+      if (symbol === "ETHUSDT") return watchResult(symbol); // WATCH, no error
+      if (symbol === "SOLUSDT") return erroredResult(symbol, "Self-throttle: ..."); // NO_TRADE, error
+      throw new Error("pipeline blew up"); // ADAUSDT -- thrown, not returned as a result
+    });
+
+    await runEntryAlertCheck(ENV);
+
+    expect(d1Client.insertEntryAlertRunLog).toHaveBeenCalledWith({
+      runAt: expect.any(Number),
+      total: 4,
+      errors: 2, // SOLUSDT (result.error set) + ADAUSDT (thrown)
+      watchCount: 1,
+      tradeCount: 1,
+    });
   });
 });

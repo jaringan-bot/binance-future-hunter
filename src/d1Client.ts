@@ -389,3 +389,49 @@ export async function upsertEntryAlertState(row: EntryAlertStateRow): Promise<vo
     .bind(row.symbol.toUpperCase(), row.lastDecision, row.lastAlertAt)
     .run();
 }
+
+// Satu row per tick entryAlertCron.ts (runEntryAlertCheck) -- dipakai
+// heartbeatCron.ts buat bedain "market emang sepi" vs "backend bermasalah"
+// pas gak ada alert TRADE/WATCH sama sekali dalam window lookback-nya.
+export interface EntryAlertRunLogRow {
+  runAt: number;
+  total: number;
+  errors: number;
+  watchCount: number;
+  tradeCount: number;
+}
+
+export async function insertEntryAlertRunLog(row: EntryAlertRunLogRow): Promise<void> {
+  await requireDb()
+    .prepare("INSERT INTO entry_alert_run_log (run_at, total, errors, watch_count, trade_count) VALUES (?, ?, ?, ?, ?)")
+    .bind(row.runAt, row.total, row.errors, row.watchCount, row.tradeCount)
+    .run();
+}
+
+export interface EntryAlertRunLogSummary {
+  total: number;
+  errors: number;
+}
+
+export async function getEntryAlertRunLogSummarySince(cutoffMs: number): Promise<EntryAlertRunLogSummary> {
+  const row = await requireDb()
+    .prepare("SELECT COALESCE(SUM(total), 0) as total, COALESCE(SUM(errors), 0) as errors FROM entry_alert_run_log WHERE run_at >= ?")
+    .bind(cutoffMs)
+    .first<EntryAlertRunLogSummary>();
+  return row ?? { total: 0, errors: 0 };
+}
+
+export async function pruneOldEntryAlertRunLog(cutoffMs: number): Promise<void> {
+  await requireDb().prepare("DELETE FROM entry_alert_run_log WHERE run_at < ?").bind(cutoffMs).run();
+}
+
+// Dipakai heartbeatCron.ts -- kalau ada minimal 1 alert TRADE/WATCH beneran
+// terkirim dalam window lookback, gak perlu heartbeat (user udah dapet
+// sinyal asli).
+export async function countEntryAlertsSince(cutoffMs: number): Promise<number> {
+  const row = await requireDb()
+    .prepare("SELECT COUNT(*) as count FROM entry_alert_state WHERE last_alert_at >= ?")
+    .bind(cutoffMs)
+    .first<{ count: number }>();
+  return row?.count ?? 0;
+}

@@ -10,6 +10,7 @@ import { scanWallCandidates } from "./cron/wallTrackingCron.js";
 import { snapshotBasisForSymbol, snapshotNonWatchlistBasis } from "./cron/marketSnapshotCron.js";
 import { snapshotWhaleWallet } from "./cron/hyperliquidWhaleCron.js";
 import { runEntryAlertCheck } from "./cron/entryAlertCron.js";
+import { checkHeartbeat } from "./cron/heartbeatCron.js";
 
 interface Env {
   PROXY_URL?: string;
@@ -58,6 +59,10 @@ const HYPERLIQUID_WHALE_CRON = "*/15 * * * *";
 // */15 normal terus). Range-step hasilnya SAMA (fire di menit 7,22,37,52)
 // tapi pakai operator step yang sama kayak */15 yang udah terbukti reliable.
 const ENTRY_ALERT_CRON = "7-59/15 * * * *";
+// 00.00/08.00/16.00 UTC = 07.00/15.00/23.00 WIB (UTC+7) -- heartbeat
+// entry-alert (heartbeatCron.ts), user request 2026-08-25.
+const HEARTBEAT_CRON = "0 0,8,16 * * *";
+const ENTRY_ALERT_RUN_LOG_RETENTION_MS = 24 * 3600 * 1000; // 24 jam -- heartbeat cuma lookback 8 jam, buffer 3x cukup.
 
 // Server ini STATELESS (sessionIdGenerator: undefined): setiap request
 // membuat instance server + transport baru. Ini pola resmi yang
@@ -243,6 +248,10 @@ export default {
   // - HYPERLIQUID_WHALE_CRON (*/15, tiap 15 menit): snapshot posisi wallet
   //   whale HYPERLIQUID_WHALE_WATCHLIST -> hyperliquid_whale_snapshots
   //   (dibaca hyperliquid_get_whale_wallet_positions).
+  // - HEARTBEAT_CRON (00.00/08.00/16.00 UTC = 07.00/15.00/23.00 WIB, 3x/hari):
+  //   kalau gak ada alert TRADE/WATCH sama sekali dalam 8 jam terakhir,
+  //   kirim 1 pesan Telegram yang bedain "market sepi" dari "backend
+  //   bermasalah" (heartbeatCron.ts, tally dari entry_alert_run_log).
   // - selain itu (*/5, tiap 5 menit, DEFAULT/fallback): dua hal per symbol
   //   di SNAPSHOT_WATCHLIST -- (1) market snapshot (basis futures-vs-spot +
   //   funding + OI, dibaca binance_get_basis_history), (2) 6 skor sinyal MM
@@ -283,6 +292,20 @@ export default {
     if (event.cron === ENTRY_ALERT_CRON) {
       ctx.waitUntil(
         runEntryAlertCheck({ TELEGRAM_BOT_TOKEN: env.TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID: env.TELEGRAM_CHAT_ID }),
+      );
+      // Prune entry_alert_run_log di sini (bukan cron ke-6 sendiri) -- retensi
+      // 24 jam gak butuh presisi tiap tick, sama alasan seperti prune lain.
+      ctx.waitUntil(
+        d1Client
+          .pruneOldEntryAlertRunLog(Date.now() - ENTRY_ALERT_RUN_LOG_RETENTION_MS)
+          .catch((err) => console.error("[cron] gagal prune entry_alert_run_log:", (err as Error)?.message ?? String(err))),
+      );
+      return;
+    }
+
+    if (event.cron === HEARTBEAT_CRON) {
+      ctx.waitUntil(
+        checkHeartbeat({ TELEGRAM_BOT_TOKEN: env.TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID: env.TELEGRAM_CHAT_ID }),
       );
       return;
     }

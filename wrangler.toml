@@ -22,7 +22,7 @@ binding = "DB"
 database_name = "whalescope-mcp-db"
 database_id = "3600a9bb-9261-492a-bf06-3a11b0448f4e"
 
-# Empat Cron Trigger -- akun ini sudah di Workers PAID plan, jadi limit slot
+# Lima Cron Trigger -- akun ini sudah di Workers PAID plan, jadi limit slot
 # jauh di atas 5 (bekas batasan Free plan yang mendasari komentar lama di
 # sini), dibedakan lewat event.cron di src/index.ts scheduled handler:
 # - */5: snapshot basis + sinyal MM futures-vs-spot untuk watchlist, plus
@@ -39,8 +39,12 @@ database_id = "3600a9bb-9261-492a-bf06-3a11b0448f4e"
 #   snapshot). Pakai range-step, BUKAN comma-list -- comma-list ("7,22,37,52")
 #   keterima saat registrasi tapi gak pernah beneran fire (lihat komentar
 #   ENTRY_ALERT_CRON di src/index.ts).
+# - 0 0,8,16 * * * (00.00/08.00/16.00 UTC = 07.00/15.00/23.00 WIB):
+#   heartbeatCron.ts -- kalau 8 jam terakhir gak ada alert TRADE/WATCH sama
+#   sekali, kirim 1 pesan yang jelasin kenapa (market sepi vs backend
+#   bermasalah, dari tally entry_alert_run_log). User request 2026-08-25.
 [triggers]
-crons = ["*/5 * * * *", "*/1 * * * *", "*/15 * * * *", "7-59/15 * * * *"]
+crons = ["*/5 * * * *", "*/1 * * * *", "*/15 * * * *", "7-59/15 * * * *", "0 0,8,16 * * *"]
 
 # Default Workers Paid subrequest budget (10.000/invocation) kena di
 # entryAlertCron.ts (2026-08-25, live via wrangler tail): 400 pair x call

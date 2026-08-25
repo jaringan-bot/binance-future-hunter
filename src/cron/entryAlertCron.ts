@@ -110,7 +110,12 @@ function formatEntryAlert(result: SymbolPipelineResult): string {
   return lines.join("\n");
 }
 
-export async function checkEntryAlertForSymbol(symbol: string, env: TelegramEnv, now: number = Date.now()): Promise<void> {
+export interface AlertCheckOutcome {
+  decision: SymbolPipelineResult["decision"];
+  hadError: boolean;
+}
+
+export async function checkEntryAlertForSymbol(symbol: string, env: TelegramEnv, now: number = Date.now()): Promise<AlertCheckOutcome> {
   const result = await runPipelineForSymbol(symbol, DEFAULT_PIPELINE_OPTS);
   // runPipelineForSymbol NEVER throws (catch internal -- lihat JSDoc-nya),
   // jadi kegagalan (termasuk RateLimitError self-throttle rateLimiter.ts)
@@ -130,7 +135,7 @@ export async function checkEntryAlertForSymbol(symbol: string, env: TelegramEnv,
   if (isAlertable && (isTransition || cooldownExpired)) {
     await sendTelegramAlert(env, formatEntryAlert(result));
     await d1Client.upsertEntryAlertState({ symbol, lastDecision: result.decision, lastAlertAt: now });
-    return;
+    return { decision: result.decision, hadError: result.error != null };
   }
 
   await d1Client.upsertEntryAlertState({
@@ -138,18 +143,32 @@ export async function checkEntryAlertForSymbol(symbol: string, env: TelegramEnv,
     lastDecision: result.decision,
     lastAlertAt: previous?.lastAlertAt ?? null,
   });
+  return { decision: result.decision, hadError: result.error != null };
 }
 
 export async function runEntryAlertCheck(env: TelegramEnv): Promise<void> {
   const watchlist = await getTopUsdtPerpetualWatchlist();
   const now = Date.now();
-  await mapWithConcurrency(watchlist, CONCURRENCY, async (symbol) => {
+  const outcomes = await mapWithConcurrency(watchlist, CONCURRENCY, async (symbol): Promise<AlertCheckOutcome> => {
     try {
-      await checkEntryAlertForSymbol(symbol, env, now);
+      return await checkEntryAlertForSymbol(symbol, env, now);
     } catch (err) {
       console.error(`[cron] gagal entry-alert check ${symbol}:`, (err as Error)?.message ?? String(err));
+      return { decision: "NO_TRADE", hadError: true };
     } finally {
       await pacing.sleep(ENTRY_ALERT_PACING_DELAY_MS);
     }
+  });
+
+  // Rekam tally tick ini -- heartbeatCron.ts (3x/hari) pakai ini buat
+  // bedain "market emang sepi" (error rate rendah) vs "backend bermasalah"
+  // (error rate tinggi) pas gak ada alert TRADE/WATCH sama sekali dalam
+  // window lookback-nya.
+  await d1Client.insertEntryAlertRunLog({
+    runAt: now,
+    total: outcomes.length,
+    errors: outcomes.filter((o) => o.hadError).length,
+    watchCount: outcomes.filter((o) => o.decision === "WATCH").length,
+    tradeCount: outcomes.filter((o) => o.decision === "TRADE").length,
   });
 }
