@@ -17,6 +17,7 @@ import * as d1Client from "../d1Client.js";
 import { sendTelegramAlert, type TelegramEnv } from "../telegram.js";
 import { getTopUsdtPerpetualWatchlist } from "../entryWatchlist.js";
 import { mapWithConcurrency } from "../concurrency.js";
+import { TRADE_RANKING_SCORE_THRESHOLD } from "../pipelineEngine.js";
 
 const COOLDOWN_MS = 4 * 60 * 60 * 1000;
 
@@ -43,6 +44,18 @@ const DEFAULT_PIPELINE_OPTS: PipelineOpts = {
 
 const ALERTABLE_DECISIONS = new Set(["TRADE", "WATCH"]);
 
+// WATCH bisa terjadi karena 2 alasan berbeda (lihat decidePipelineOutcome,
+// pipelineEngine.ts): grid risk HIGH_RISK (skor berapapun), ATAU rankingScore
+// di bawah TRADE_RANKING_SCORE_THRESHOLD. Alasan kedua terlalu sering & noise
+// buat notifikasi (banyak pair di bawah ambang), jadi WATCH cuma dianggap
+// layak alert kalau skornya sendiri >= ambang TRADE, atau grid risk-nya
+// HIGH_RISK (sinyal risiko nyata yang tetap perlu diketahui walau skor rendah).
+function isAlertWorthy(result: SymbolPipelineResult): boolean {
+  if (!ALERTABLE_DECISIONS.has(result.decision)) return false;
+  if (result.decision === "TRADE") return true;
+  return result.rankingScore >= TRADE_RANKING_SCORE_THRESHOLD || result.risk?.gridRisk?.status === "HIGH_RISK";
+}
+
 const DECISION_LABEL: Record<string, string> = {
   TRADE: "masuk TRADE (grid entry, whale-aligned)",
   WATCH: "masuk WATCH (mendekati entry, belum layak)",
@@ -63,7 +76,7 @@ export async function checkEntryAlertForSymbol(symbol: string, env: TelegramEnv,
   const result = await runPipelineForSymbol(symbol, DEFAULT_PIPELINE_OPTS);
   const previous = await d1Client.getEntryAlertState(symbol);
 
-  const isAlertable = ALERTABLE_DECISIONS.has(result.decision);
+  const isAlertable = isAlertWorthy(result);
   const isTransition = isAlertable && previous?.lastDecision !== result.decision;
   const cooldownExpired =
     isAlertable && previous?.lastAlertAt != null && now - previous.lastAlertAt > COOLDOWN_MS;

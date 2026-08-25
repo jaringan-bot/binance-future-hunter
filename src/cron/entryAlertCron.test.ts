@@ -29,6 +29,15 @@ function noTradeResult(symbol: string): SymbolPipelineResult {
   return { ...tradeResult(symbol), decision: "NO_TRADE" } as SymbolPipelineResult;
 }
 
+function lowScoreWatchResult(symbol: string, gridRiskStatus: "SAFE" | "MODERATE" | "HIGH_RISK" | "REJECT" = "MODERATE"): SymbolPipelineResult {
+  return {
+    ...tradeResult(symbol),
+    decision: "WATCH",
+    rankingScore: 30,
+    risk: { chosenLeverage: 5, initialCapitalSolved: 100, evaluatedLeverages: [], gridRisk: { status: gridRiskStatus } },
+  } as unknown as SymbolPipelineResult;
+}
+
 const ENV = { TELEGRAM_BOT_TOKEN: "abc", TELEGRAM_CHAT_ID: "999" };
 
 describe("checkEntryAlertForSymbol", () => {
@@ -144,6 +153,26 @@ describe("checkEntryAlertForSymbol", () => {
 
     expect(telegram.sendTelegramAlert).toHaveBeenCalledTimes(1);
     expect(d1Client.upsertEntryAlertState).toHaveBeenCalledWith({ symbol: "BTCUSDT", lastDecision: "TRADE", lastAlertAt: now });
+  });
+
+  it("does not alert when WATCH is driven by a low ranking score (below 55) and grid risk is not HIGH_RISK", async () => {
+    vi.mocked(fullPipeline.runPipelineForSymbol).mockResolvedValue(lowScoreWatchResult("BTCUSDT", "MODERATE"));
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
+
+    await checkEntryAlertForSymbol("BTCUSDT", ENV, 1_000_000);
+
+    expect(telegram.sendTelegramAlert).not.toHaveBeenCalled();
+    expect(d1Client.upsertEntryAlertState).toHaveBeenCalledWith({ symbol: "BTCUSDT", lastDecision: "WATCH", lastAlertAt: null });
+  });
+
+  it("still alerts on WATCH with a low ranking score when grid risk is HIGH_RISK", async () => {
+    vi.mocked(fullPipeline.runPipelineForSymbol).mockResolvedValue(lowScoreWatchResult("BTCUSDT", "HIGH_RISK"));
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
+
+    await checkEntryAlertForSymbol("BTCUSDT", ENV, 1_000_000);
+
+    expect(telegram.sendTelegramAlert).toHaveBeenCalledTimes(1);
+    expect(d1Client.upsertEntryAlertState).toHaveBeenCalledWith({ symbol: "BTCUSDT", lastDecision: "WATCH", lastAlertAt: 1_000_000 });
   });
 
   it("does not alert and just records state when the decision is NO_TRADE", async () => {
