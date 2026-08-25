@@ -29,6 +29,10 @@ function noTradeResult(symbol: string): SymbolPipelineResult {
   return { ...tradeResult(symbol), decision: "NO_TRADE" } as SymbolPipelineResult;
 }
 
+function erroredResult(symbol: string, message: string): SymbolPipelineResult {
+  return { ...noTradeResult(symbol), error: message } as SymbolPipelineResult;
+}
+
 function lowScoreWatchResult(symbol: string, gridRiskStatus: "SAFE" | "MODERATE" | "HIGH_RISK" | "REJECT" = "MODERATE"): SymbolPipelineResult {
   return {
     ...tradeResult(symbol),
@@ -41,7 +45,10 @@ function lowScoreWatchResult(symbol: string, gridRiskStatus: "SAFE" | "MODERATE"
 const ENV = { TELEGRAM_BOT_TOKEN: "abc", TELEGRAM_CHAT_ID: "999" };
 
 describe("checkEntryAlertForSymbol", () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
   afterEach(() => vi.restoreAllMocks());
 
   it("sends a Telegram alert and stores TRADE state when a symbol transitions into TRADE", async () => {
@@ -173,6 +180,21 @@ describe("checkEntryAlertForSymbol", () => {
 
     expect(telegram.sendTelegramAlert).toHaveBeenCalledTimes(1);
     expect(d1Client.upsertEntryAlertState).toHaveBeenCalledWith({ symbol: "BTCUSDT", lastDecision: "WATCH", lastAlertAt: 1_000_000 });
+  });
+
+  it("logs the internal pipeline error (e.g. rate-limit self-throttle) so it's visible in wrangler tail, without alerting", async () => {
+    vi.mocked(fullPipeline.runPipelineForSymbol).mockResolvedValue(
+      erroredResult("BTCUSDT", "Self-throttle: 781 request ke proxy Binance dalam 60 detik terakhir (limit internal 780/menit)"),
+    );
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
+
+    await checkEntryAlertForSymbol("BTCUSDT", ENV, 1_000_000);
+
+    expect(telegram.sendTelegramAlert).not.toHaveBeenCalled();
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining("BTCUSDT"),
+      expect.stringContaining("Self-throttle"),
+    );
   });
 
   it("does not alert and just records state when the decision is NO_TRADE", async () => {

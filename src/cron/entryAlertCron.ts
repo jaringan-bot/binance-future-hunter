@@ -74,6 +74,14 @@ function formatEntryAlert(result: SymbolPipelineResult): string {
 
 export async function checkEntryAlertForSymbol(symbol: string, env: TelegramEnv, now: number = Date.now()): Promise<void> {
   const result = await runPipelineForSymbol(symbol, DEFAULT_PIPELINE_OPTS);
+  // runPipelineForSymbol NEVER throws (catch internal -- lihat JSDoc-nya),
+  // jadi kegagalan (termasuk RateLimitError self-throttle rateLimiter.ts)
+  // masuk lewat result.error, bukan exception -- log eksplisit di sini
+  // supaya kelihatan di `wrangler tail`, karena upsertEntryAlertState di
+  // bawah cuma nyimpen lastDecision (mis. "NO_TRADE"), bukan alasannya.
+  if (result.error) {
+    console.error(`[entry-alert] ${symbol}:`, result.error);
+  }
   const previous = await d1Client.getEntryAlertState(symbol);
 
   const isAlertable = isAlertWorthy(result);
