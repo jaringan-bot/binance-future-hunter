@@ -31,6 +31,7 @@ import { registerCvdDivergenceTools } from "./tools/cvdDivergence.js";
 import { registerBlockTradesTools } from "./tools/blockTrades.js";
 import { registerFundingVelocityTools } from "./tools/fundingVelocity.js";
 import { registerStopLossLiquidityRiskTools } from "./tools/stopLossLiquidityRisk.js";
+import { registerTakerImbalanceAggregatorTools } from "./tools/takerImbalanceAggregator.js";
 import { resetToolRegistry } from "./toolWrapper.js";
 
 export function createServer(): McpServer {
@@ -68,5 +69,6 @@ export function createServer(): McpServer {
   registerBlockTradesTools(server);
   registerFundingVelocityTools(server);
   registerStopLossLiquidityRiskTools(server);
+  registerTakerImbalanceAggregatorTools(server);
   return server;
 }
