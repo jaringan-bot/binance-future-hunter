@@ -22,6 +22,20 @@ import type { AggTrade } from "../binanceProxyClient.js";
 // empirik di probe CVD (analyze_cvd_divergence): DOGEUSDT N rendah di
 // window waktu tetap ngasih spread yang gak monoton/gak reliable
 // dibanding BTCUSDT N tinggi.
+//
+// UPDATE 2026-08-26 -- investigasi N-stability lookbackTrades DITUTUP,
+// INKONKLUSIF. 3 ronde probe (single-snapshot -> time-distributed -> final
+// confirmative, kriteria pass/fail di-lock di muka) nguji N=500 vs N=1000:
+// BTCUSDT spread ke-N MEMBALIK arah antara probe #1 (single-snapshot) dan
+// #2 (distributed) -- hipotesis regime-mixing (span panjang ngerata-in
+// beberapa micro-regime) diajukan buat jelasin, DIUJI via Spearman
+// span-vs-deviation di probe #3 (20 titik/kombinasi), DAN GUGUR: BTCUSDT
+// sign-flip antara N=500/N=1000 DAN |r_s| di bawah ambang 0.40 di
+// KEDUANYA. Akar masalah N-instability BELUM ketemu -- investigasi
+// ditutup sesuai locked stopping rule (NO probe #4). Data mentah 3 probe
+// (fetch, slicing, hasil per-titik) itu working-session scratchpad, BUKAN
+// dikomit ke repo -- jangan diasumsikan ada di version control kalau
+// dicari lagi nanti.
 export interface TakerImbalanceResult {
   buyQty: number;
   sellQty: number;
@@ -136,8 +150,12 @@ export function registerTakerImbalanceAggregatorTools(server: McpServer): void {
               "sudah diprobe 5 ronde). 500 dipilih sebagai angka bulat order-of-magnitude yang lebih kecil dari N " +
               "30-menit TERKECIL yang teramati di probe CVD buat pair kurang likuid (DOGEUSDT ~1770-5821 trade/window, " +
               "lihat docs/mm_detection_framework.md) -- supaya kemungkinan besar tetap fillable bahkan di pair " +
-              "less-liquid, BUKAN hasil analisis statistik soal N optimal buat kualitas sinyal imbalance. Butuh probe " +
-              "series sendiri sebelum dianggap tervalidasi, sama seperti asumsi DOGEUSDT-class di CVD.",
+              "less-liquid, BUKAN hasil analisis statistik soal N optimal buat kualitas sinyal imbalance. " +
+              "INVESTIGASI N=500-vs-1000 SUDAH DIJALANIN (3 ronde probe, 2026-08-26) DAN DITUTUP INKONKLUSIF -- " +
+              "hipotesis regime-mixing yang sempat diajukan buat jelasin BTCUSDT-nya kebalik arah gugur diuji (lihat " +
+              "komentar UPDATE di atas), tapi akar masalah instability-nya sendiri BELUM ketemu. Default ini TETAP " +
+              "placeholder, bukan nilai tervalidasi -- jangan ulang metodologi span-vs-deviation yang sama tanpa " +
+              "hipotesis mekanisme baru.",
           ),
         maxLookbackSeconds: z
           .number()
