@@ -233,6 +233,47 @@ export function errorResult(err: unknown) {
   };
 }
 
+// Varian errorResult() dengan errorCode mesin-baca di structuredContent --
+// dipakai tool pure-calculation baru (slippage/CVD/block-trade/funding-
+// velocity/stop-loss-liquidity) yang butuh caller bisa branch programatis
+// pada jenis kegagalan tanpa parsing teks Indonesia di content[0].text.
+// errorResult() yang lama TIDAK diubah -- semua tool lain tetap pakai itu.
+export function errorResultWithCode(errorCode: string, message: string, extra?: Record<string, unknown>) {
+  return {
+    isError: true,
+    content: [{ type: "text" as const, text: message }],
+    structuredContent: { errorCode, ...extra },
+  };
+}
+
+// Satu level order book (Binance native): [priceString, qtyString] --
+// cocok sama OrderBookDepth.bids/.asks (binanceProxyClient.ts). Dipakai
+// tool pure-calculation yang nerima depth sebagai parameter caller
+// (bukan fetch sendiri), mis. estimate_slippage, estimate_stop_loss_liquidity_risk.
+export const depthLevelSchema = z.tuple([z.string(), z.string()]);
+
+// Satu aggTrade Binance native -- cocok sama AggTrade (binanceProxyClient.ts).
+// Dipakai tool pure-calculation yang nerima trade array sebagai parameter
+// caller (analyze_cvd_divergence, filter_block_trades).
+export const aggTradeSchema = z.object({
+  a: z.number(),
+  p: z.string(),
+  q: z.string(),
+  f: z.number(),
+  l: z.number(),
+  T: z.number(),
+  m: z.boolean(),
+});
+
+// Satu titik funding rate history -- cocok sama FundingRateHistoryPoint
+// (binanceProxyClient.ts). Dipakai compute_funding_velocity.
+export const fundingRateHistoryPointSchema = z.object({
+  symbol: z.string(),
+  fundingTime: z.number(),
+  fundingRate: z.string(),
+  markPrice: z.string(),
+});
+
 // RV = sqrt(mean(log_return^2)) * sqrt(periode/tahun) — realized volatility
 // standar dari log-return close-to-close.
 export function computeRealizedVolatility(
