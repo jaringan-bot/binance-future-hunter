@@ -274,6 +274,16 @@ export const fundingRateHistoryPointSchema = z.object({
   markPrice: z.string(),
 });
 
+// Satu titik open interest history -- cocok sama OpenInterestHistPoint
+// (binanceProxyClient.ts, dari /futures/data/openInterestHist, native
+// Binance shape). Dipakai whalescope_get_oi_velocity.
+export const openInterestHistPointSchema = z.object({
+  symbol: z.string(),
+  sumOpenInterest: z.string(),
+  sumOpenInterestValue: z.string(),
+  timestamp: z.number(),
+});
+
 // RV = sqrt(mean(log_return^2)) * sqrt(periode/tahun) — realized volatility
 // standar dari log-return close-to-close.
 export function computeRealizedVolatility(

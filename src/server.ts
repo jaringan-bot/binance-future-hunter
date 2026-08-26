@@ -32,6 +32,7 @@ import { registerBlockTradesTools } from "./tools/blockTrades.js";
 import { registerFundingVelocityTools } from "./tools/fundingVelocity.js";
 import { registerStopLossLiquidityRiskTools } from "./tools/stopLossLiquidityRisk.js";
 import { registerTakerImbalanceAggregatorTools } from "./tools/takerImbalanceAggregator.js";
+import { registerOiVelocityTools } from "./tools/oiVelocity.js";
 import { resetToolRegistry } from "./toolWrapper.js";
 
 export function createServer(): McpServer {
@@ -70,5 +71,6 @@ export function createServer(): McpServer {
   registerFundingVelocityTools(server);
   registerStopLossLiquidityRiskTools(server);
   registerTakerImbalanceAggregatorTools(server);
+  registerOiVelocityTools(server);
   return server;
 }
