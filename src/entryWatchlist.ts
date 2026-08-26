@@ -9,7 +9,7 @@ import * as binanceProxy from "./binanceProxyClient.js";
 // [[project_whalescope-mcp_status]] soal budget rate-limiter 780/menit.
 // 300 sukses penuh (303 row D1, gak keputus). Universe total USDT-M
 // perpetual TRADING ~527 pair (dicek 2026-08-25), jadi 400 masih < separuh.
-export const ENTRY_WATCHLIST_SIZE = 400;
+export const ENTRY_WATCHLIST_SIZE = 500;
 
 export async function getTopUsdtPerpetualWatchlist(): Promise<string[]> {
   const [exchangeInfo, tickers] = await Promise.all([
