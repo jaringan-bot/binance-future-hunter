@@ -49,6 +49,30 @@ function tradeSpan(trades: AggTrade[]): { min: number; max: number } {
 // sendiri juga baru diganti tanpa validasi ulang. JANGAN pakai default ini
 // buat keputusan trading nyata sebelum dicek terhadap histori pair yang
 // relevan.
+//
+// UPDATE 2026-08-26 (probe #2-#5, lihat docs/mm_detection_framework.md):
+// default DIGANTI ke 0.0536, TAPI validasinya TIMPANG antar pair:
+//
+// - BTCUSDT-class (N tinggi/likuid, ~17k-115k trades/window): TERVALIDASI
+//   lewat 5 ronde probe window 5->60 menit. Spread divergence (noise murni
+//   dari sampling window, BUKAN event decoupling spot-futures riil) turun
+//   monoton 40.07 -> 23.66 -> 15.94 -> 7.98 -> 5.36 poin. 0.0536 = spread
+//   penuh di window 60 menit (bukan setengah spread) -- dipilih FULL supaya
+//   seluruh rentang divergence yang terbukti murni noise di sample ini
+//   diklasifikasi NEUTRAL, cuma divergence yang MELEBIHI noise floor
+//   ke-observasi yang di-flag DIVERGENT. Kekhawatiran trade-concentration
+//   (top-3 trade dominasi CVD) sempat muncul di diagnosis awal tapi
+//   terbukti ARTEFAK metrik (denominator net-CVD yang collapse ke 0 pas
+//   flow balanced) -- metrik terkoreksi (top-3 notional / total notional)
+//   nunjukin 0/24 leg BTCUSDT+DOGEUSDT ngelewatin 20% di window manapun.
+// - DOGEUSDT-class (N rendah/less-liquid, ~1.7k-5.8k trades/window): window
+//   60 menit DIADOPSI by EKSTRAPOLASI dari pola shrink BTCUSDT -- BELUM
+//   diprobe independen di atas 30 menit (30-menit malah nunjukin spread
+//   NAIK 18.20->24.40, non-monoton, beda arah dari BTCUSDT). Threshold
+//   0.0536 yang sama juga BELUM divalidasi buat pair kelas ini. INI ASUMSI,
+//   bukan hasil empirik -- revisit kalau sinyal divergence di pair
+//   less-liquid terbukti gak reliable di praktik (mis. sering DIVERGENT
+//   palsu atau kebalik dari price action).
 export function computeCvdDivergence(
   spotTrades: AggTrade[],
   futuresTrades: AggTrade[],
@@ -95,7 +119,10 @@ export function registerCvdDivergenceTools(server: McpServer): void {
       description:
         "Bandingkan Cumulative Volume Delta (taker buy - taker sell) antara Spot dan Futures dari agg-trades yang " +
         "di-supply caller (BUKAN fetch sendiri -- pass hasil binance_get_agg_trades + binance_get_spot_agg_trades). " +
-        "Reject kalau window waktu kedua array gak cukup overlap (minOverlapRatio).",
+        "Reject kalau window waktu kedua array gak cukup overlap (minOverlapRatio). " +
+        "Rekomendasi window (empirikal, probe #2-#5 2026-08-26, lihat docs/mm_detection_framework.md): 60 menit " +
+        "kontinu untuk pair likuid/N-tinggi (BTCUSDT-class, TERVALIDASI 5 ronde probe). Pair kurang likuid/N-rendah " +
+        "(DOGEUSDT-class) pakai 60 menit by EKSTRAPOLASI, BELUM diprobe independen di atas 30 menit -- anggap asumsi.",
       inputSchema: {
         symbol: symbolSchema.optional().describe("Label header saja -- kalkulasi divergence-nya sendiri symbol-agnostic."),
         spotTrades: z.array(aggTradeSchema).max(5000).describe("Agg-trades Spot (binance_get_spot_agg_trades)."),
@@ -109,11 +136,13 @@ export function registerCvdDivergenceTools(server: McpServer): void {
         neutralThresholdPct: z
           .number()
           .min(0)
-          .default(0.05)
+          .default(0.0536)
           .describe(
             "Rasio (bukan literal persen) -- divergence buyPct di bawah ambang*100 poin persentase diklasifikasi NEUTRAL. " +
-              "Default 0.05 (5 poin persentase) BELUM DIVALIDASI ke data real -- backtest dulu ke pair yang relevan " +
-              "sebelum dipakai buat keputusan trading nyata.",
+              "Default 0.0536 (5.36 poin persentase) = noise-floor spread empirik BTCUSDT window 60-menit (probe " +
+              "#2-#5, 2026-08-26, lihat docs/mm_detection_framework.md) -- TERVALIDASI cuma untuk pair likuid/N-tinggi " +
+              "sekelas BTCUSDT. Pair kurang likuid/N-rendah (DOGEUSDT-class) pakai default ini by EKSTRAPOLASI, BELUM " +
+              "divalidasi independen -- backtest ulang sebelum dipakai buat keputusan trading nyata di pair itu.",
           ),
       },
       annotations: { readOnlyHint: true, openWorldHint: false },

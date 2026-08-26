@@ -58,6 +58,15 @@
 | **Trade besar** di bid/ask tanpa slippage signifikan | Eksekusi MM dengan liquidity yang sudah disiapkan |
 | **CVD futures dan CVD spot berlawanan arah** untuk pair yang sama | Absorpsi spesifik di sisi futures (leverage), bukan demand/supply riil spot |
 
+**`analyze_cvd_divergence` — window & threshold (empirik, probe #2-#5, 2026-08-26):**
+
+| Pair class | Window | `neutralThresholdPct` | Status |
+|---|---|---|---|
+| Likuid/N-tinggi (BTCUSDT-class, ~17k-115k trades/window) | 60 menit kontinu | 0.0536 (5.36 poin) | **Tervalidasi** — 5 ronde probe 5→60 menit, spread divergence turun monoton 40.07→23.66→15.94→7.98→5.36 poin |
+| Kurang likuid/N-rendah (DOGEUSDT-class, ~1.7k-5.8k trades/window) | 60 menit (diadopsi) | 0.0536 (sama) | **Asumsi, BELUM divalidasi** — diekstrapolasi dari pola BTCUSDT; probe langsung cuma sampai 30 menit, dan di situ spread NAIK (18.20→24.40), bukan turun. Revisit kalau sinyal divergence di pair less-liquid terbukti gak reliable |
+
+Kekhawatiran trade-concentration (top-3 trade dominasi CVD) yang sempat muncul di diagnosis awal probe series ini terbukti artefak metrik (denominator net-CVD collapse ke 0 pas flow balanced) — metrik terkoreksi (top-3 notional / total notional) nunjukin 0/24 leg (BTCUSDT+DOGEUSDT, semua width yang diprobe) ngelewatin 20%.
+
 ---
 
 ### 2.2 Taker Volume Divergence — *Medium Confidence*

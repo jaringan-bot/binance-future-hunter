@@ -87,6 +87,12 @@ describe("analyze_cvd_divergence tool handler", () => {
     const futures = makeTrades(50, 0.5, 0, 1000);
     const args = z.object(inputSchema).parse({ spotTrades: spot, futuresTrades: futures }) as Parameters<CvdToolHandler>[0];
 
+    // 0.0536 = empirical BTCUSDT 60-min noise-floor spread (probe #2-#5,
+    // 2026-08-26) -- see docs/mm_detection_framework.md. NOT independently
+    // validated for low-N/less-liquid pairs (DOGEUSDT-class).
+    expect(args.minOverlapRatio).toBe(0.8);
+    expect(args.neutralThresholdPct).toBe(0.0536);
+
     const result = await handler(args);
 
     expect(result.isError).toBeFalsy();

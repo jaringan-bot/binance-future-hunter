@@ -58,6 +58,15 @@
 | **Large trade** at bid/ask without significant slippage | MM execution using liquidity that was already prepared |
 | **Futures CVD and Spot CVD moving in opposite directions** for the same pair | Absorption specifically on the futures (leverage) side, not real spot supply/demand |
 
+**`analyze_cvd_divergence` — window & threshold (empirical, probe #2-#5, 2026-08-26):**
+
+| Pair class | Window | `neutralThresholdPct` | Status |
+|---|---|---|---|
+| Liquid/high-N (BTCUSDT-class, ~17k-115k trades/window) | 60-min continuous | 0.0536 (5.36 pts) | **Validated** — 5 probe rounds, 5→60 min; divergence spread shrank monotonically 40.07→23.66→15.94→7.98→5.36 points |
+| Less-liquid/low-N (DOGEUSDT-class, ~1.7k-5.8k trades/window) | 60 min (adopted) | 0.0536 (same) | **Adopted assumption, NOT independently validated** — extrapolated from BTCUSDT's pattern; direct probing only reached 30 min, where spread INCREASED (18.20→24.40) instead of shrinking. Revisit if divergence signals on illiquid pairs prove unreliable in practice |
+
+The trade-concentration concern raised during this probe series' diagnosis turned out to be a metric artifact (net-CVD denominator collapsing toward zero on balanced flow) — the corrected metric (top-3 notional ÷ total notional) showed 0/24 legs (BTCUSDT+DOGEUSDT, every width probed) exceeding 20%.
+
 ---
 
 ### 2.2 Taker Volume Divergence — *Medium Confidence*
