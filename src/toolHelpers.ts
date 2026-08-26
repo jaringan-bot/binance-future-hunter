@@ -49,6 +49,24 @@ export function truncateRows<T>(rows: T[], max = 15): TruncatedRows<T> {
   return { shown, totalCount, truncated };
 }
 
+// Precondition dipakai taker_imbalance_aggregator, whalescope_get_oi_velocity,
+// dan compute_funding_velocity: array time-series HARUS non-decreasing di
+// field waktu-nya. Generic (key-extractor) karena tiap caller punya nama
+// field beda (T buat AggTrade, timestamp buat OpenInterestHistPoint,
+// fundingTime buat FundingRateHistoryPoint) -- sebelum ini logic sama
+// persis di-duplikat 2x (taker_imbalance, oi_velocity) dengan field
+// berbeda; funding_velocity yang ke-3 jadi alasan konsolidasi ke sini.
+// Cek non-decreasing TIAP PASANGAN BERURUTAN, bukan cuma
+// windowEnd-windowStart > 0 -- itu bisa lolos meski titik TENGAH kebalik
+// urutan (mis. [0, 20000, 10000] punya end-start positif walau titik ke-2
+// dan ke-3 kebalik).
+export function isChronological<T>(points: T[], getTimeMs: (p: T) => number): boolean {
+  for (let i = 1; i < points.length; i++) {
+    if (getTimeMs(points[i]) < getTimeMs(points[i - 1])) return false;
+  }
+  return true;
+}
+
 export type PriceBias = "BULLISH" | "BEARISH" | "SIDEWAYS";
 
 export function classifyPriceBias(changePct: number): PriceBias {

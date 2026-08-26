@@ -9,7 +9,7 @@ import { z } from "zod";
 import { symbolSchema, aggTradeSchema, errorResultWithCode } from "../shared.js";
 import { registerSafeTool } from "../toolWrapper.js";
 import { ToolResponseBuilder } from "../responseBuilder.js";
-import { computeCvdFromTrades } from "../toolHelpers.js";
+import { computeCvdFromTrades, isChronological } from "../toolHelpers.js";
 import type { AggTrade } from "../binanceProxyClient.js";
 
 // KEPUTUSAN DESAIN: lookback_trades (jumlah trade tetap), BUKAN
@@ -74,12 +74,8 @@ function isValidTrade(t: AggTrade): boolean {
 // naik. Kalau kebalik/acak, "N trade terakhir" secara array-index bisa jadi
 // N trade PALING LAMA -- keliru diam-diam, makanya di-reject keras, bukan
 // di-sort ulang sendiri (silent-fix bisa nutupin bug di sisi caller).
-function isChronological(trades: AggTrade[]): boolean {
-  for (let i = 1; i < trades.length; i++) {
-    if (trades[i].T < trades[i - 1].T) return false;
-  }
-  return true;
-}
+// Cek-nya sendiri: isChronological (toolHelpers.ts), shared sama
+// whalescope_get_oi_velocity dan compute_funding_velocity.
 
 export function computeTakerImbalance(trades: AggTrade[], lookbackTrades: number, maxLookbackSeconds: number): TakerImbalanceResult {
   if (trades.length === 0) {
@@ -90,7 +86,7 @@ export function computeTakerImbalance(trades: AggTrade[], lookbackTrades: number
     return { ...EMPTY, errorCode: "INVALID_TRADE_DATA" };
   }
 
-  if (!isChronological(trades)) {
+  if (!isChronological(trades, (t) => t.T)) {
     return { ...EMPTY, errorCode: "TRADES_NOT_CHRONOLOGICAL" };
   }
 

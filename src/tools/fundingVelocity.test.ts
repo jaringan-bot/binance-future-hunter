@@ -21,6 +21,18 @@ describe("computeFundingVelocity", () => {
     expect(result.errorCode).toBe("NON_POSITIVE_ELAPSED_TIME");
   });
 
+  // Regression test for a gap found while porting this method to
+  // whalescope_get_oi_velocity: the old guard only checked
+  // windowEnd-windowStart > 0, which a swapped MIDDLE point can satisfy
+  // while still being out of order (positive overall span, point 2/3
+  // reversed). Must now be caught explicitly, not silently averaged into
+  // a plausible-looking OLS slope.
+  it("returns NON_CHRONOLOGICAL when a middle point is swapped out of order despite a positive overall span", () => {
+    const history = [point(0, "0.0001"), point(20_000, "0.0002"), point(10_000, "0.0003")];
+    const result = computeFundingVelocity(history, 4);
+    expect(result.errorCode).toBe("NON_CHRONOLOGICAL");
+  });
+
   it("returns MALFORMED_PAYLOAD when a fundingRate string doesn't parse", () => {
     const result = computeFundingVelocity([point(0, "0.0001"), point(8 * HOUR_MS, "not-a-number")], 4);
     expect(result.errorCode).toBe("MALFORMED_PAYLOAD");

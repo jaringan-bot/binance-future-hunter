@@ -18,6 +18,7 @@ import { z } from "zod";
 import { symbolSchema, fundingRateHistoryPointSchema, errorResultWithCode } from "../shared.js";
 import { registerSafeTool } from "../toolWrapper.js";
 import { ToolResponseBuilder } from "../responseBuilder.js";
+import { isChronological } from "../toolHelpers.js";
 import type { FundingRateHistoryPoint } from "../binanceProxyClient.js";
 
 const HOUR_MS = 3_600_000;
@@ -28,7 +29,7 @@ export interface FundingVelocityResult {
   pointsUsed: number;
   windowStartMs: number;
   windowEndMs: number;
-  errorCode?: "INSUFFICIENT_POINTS" | "NON_POSITIVE_ELAPSED_TIME" | "MALFORMED_PAYLOAD";
+  errorCode?: "INSUFFICIENT_POINTS" | "MALFORMED_PAYLOAD" | "NON_CHRONOLOGICAL" | "NON_POSITIVE_ELAPSED_TIME";
 }
 
 const EMPTY_RESULT: Omit<FundingVelocityResult, "errorCode"> = {
@@ -56,6 +57,17 @@ export function computeFundingVelocity(
       return { ...EMPTY_RESULT, errorCode: "MALFORMED_PAYLOAD" };
     }
     rates.push(r);
+  }
+
+  // Ditambah 2026-08-27: cek non-decreasing EKSPLISIT di tiap pasangan
+  // berurutan, bukan cuma windowEnd-windowStart > 0 -- itu bisa lolos
+  // meski titik TENGAH kebalik urutan (mis. fundingTime [0, 20000, 10000]
+  // punya end-start positif walau titik ke-2 dan ke-3 kebalik). Gap yang
+  // sama ditemukan & diperbaiki dulu di whalescope_get_oi_velocity, lalu
+  // di-porting balik ke sini -- lihat isChronological (toolHelpers.ts),
+  // shared sama taker_imbalance_aggregator dan oi_velocity.
+  if (!isChronological(window, (p) => p.fundingTime)) {
+    return { ...EMPTY_RESULT, errorCode: "NON_CHRONOLOGICAL" };
   }
 
   const windowStartMs = window[0].fundingTime;
@@ -116,8 +128,9 @@ export function registerFundingVelocityTools(server: McpServer): void {
       if (result.errorCode) {
         const messages: Record<string, string> = {
           INSUFFICIENT_POINTS: `Kurang dari 2 titik funding rate dalam window${symbol ? ` untuk ${symbol}` : ""} -- gak bisa hitung velocity.`,
-          NON_POSITIVE_ELAPSED_TIME: `Semua titik dalam window punya timestamp yang sama atau mundur${symbol ? ` untuk ${symbol}` : ""}.`,
           MALFORMED_PAYLOAD: `Ada fundingRate yang gak bisa di-parse jadi angka${symbol ? ` untuk ${symbol}` : ""}.`,
+          NON_CHRONOLOGICAL: `Array fundingHistory TIDAK urut waktu naik (fundingTime non-decreasing)${symbol ? ` untuk ${symbol}` : ""}.`,
+          NON_POSITIVE_ELAPSED_TIME: `Semua titik dalam window punya timestamp yang sama${symbol ? ` untuk ${symbol}` : ""}.`,
         };
         return errorResultWithCode(result.errorCode, messages[result.errorCode], { symbol });
       }
