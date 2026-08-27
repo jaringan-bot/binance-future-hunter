@@ -10,7 +10,7 @@ import { scanWallCandidates } from "./cron/wallTrackingCron.js";
 import { snapshotBasisForSymbol, snapshotNonWatchlistBasis } from "./cron/marketSnapshotCron.js";
 import { snapshotWhaleWallet } from "./cron/hyperliquidWhaleCron.js";
 import { runEntryAlertCheck } from "./cron/entryAlertCron.js";
-import { checkHeartbeat } from "./cron/heartbeatCron.js";
+import { checkHeartbeat, checkEntryAlertCronFreshness } from "./cron/heartbeatCron.js";
 
 interface Env {
   PROXY_URL?: string;
@@ -336,6 +336,16 @@ export default {
       );
       return;
     }
+
+    // Gap-detection untuk entry-alert cron (2026-08-27) -- piggyback di sini
+    // (*/5, paling sering setelah */1) karena ENTRY_ALERT_CRON sendiri bisa
+    // di-Cancel platform SEBELUM sempat lapor apa pun soal dirinya sendiri.
+    // Lihat checkEntryAlertCronFreshness() (heartbeatCron.ts) untuk detail.
+    ctx.waitUntil(
+      checkEntryAlertCronFreshness({ TELEGRAM_BOT_TOKEN: env.TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID: env.TELEGRAM_CHAT_ID }).catch(
+        (err) => console.error("[cron] gagal checkEntryAlertCronFreshness:", (err as Error)?.message ?? String(err)),
+      ),
+    );
 
     ctx.waitUntil(
       Promise.all(

@@ -421,6 +421,24 @@ export async function getEntryAlertRunLogSummarySince(cutoffMs: number): Promise
   return row ?? { total: 0, errors: 0 };
 }
 
+// Dipakai checkEntryAlertCronFreshness() (heartbeatCron.ts) -- BEDA dari
+// getEntryAlertRunLogSummarySince() di atas, yang cuma menjumlah total/errors
+// dari tick yang SUDAH SELESAI. Kalau sebuah tick di-CANCEL platform Cloudflare
+// (misal kena CPU-time cap) SEBELUM sempat insertEntryAlertRunLog(), tick itu
+// TIDAK PERNAH nongol di summary manapun -- gak nambah total, gak nambah
+// errors, cuma "hilang" begitu saja. Satu-satunya cara mendeteksi itu adalah
+// cek APAKAH ADA baris baru sama sekali dalam window terakhir (gap detection),
+// bukan menghitung isi baris yang ada. Insiden nyata 2026-08-27 (lihat
+// project_whalescope-mcp_status memory): beberapa tick entry-alert berturut-
+// turut ke-Cancel platform-level, entry_alert_run_log diam tanpa baris baru
+// selama >1 jam, TIDAK terdeteksi oleh checkHeartbeat() manapun (baik cek
+// "alertCount>0" atau cek error-rate) karena keduanya cuma pernah lihat data
+// dari tick yang berhasil selesai.
+export async function getLatestEntryAlertRunLogTimestamp(): Promise<number | null> {
+  const row = await requireDb().prepare("SELECT MAX(run_at) as latest FROM entry_alert_run_log").first<{ latest: number | null }>();
+  return row?.latest ?? null;
+}
+
 export async function pruneOldEntryAlertRunLog(cutoffMs: number): Promise<void> {
   await requireDb().prepare("DELETE FROM entry_alert_run_log WHERE run_at < ?").bind(cutoffMs).run();
 }
