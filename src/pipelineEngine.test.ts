@@ -19,6 +19,13 @@ function baseHardScreen(overrides: Partial<HardScreenInput> = {}): HardScreenInp
     maxAbsFundingRate: 0.0005,
     regime1h: "RANGING",
     regime4h: "RANGING",
+    // Defaults deliberately below both EMERGENCY PATCH fallback thresholds
+    // (ADX_FALLBACK_MIN=25, SPIKE_FALLBACK_MIN=4.0) so existing tests that
+    // don't care about the fallback aren't accidentally affected by it.
+    adx1h: 0,
+    volatilitySpike1h: 1,
+    adx4h: 0,
+    volatilitySpike4h: 1,
     ...overrides,
   };
 }
@@ -58,6 +65,72 @@ describe("evaluateHardScreen", () => {
     const result = evaluateHardScreen(baseHardScreen({ regime4h: "BREAKOUT" }));
     expect(result.passed).toBe(false);
     expect(result.reasons.some((r) => r.includes("Regime 4h"))).toBe(true);
+  });
+
+  // EMERGENCY PATCH fallback (2026-08-27) -- see ADX_FALLBACK_MIN/
+  // SPIKE_FALLBACK_MIN in pipelineEngine.ts. Cases below are the exact
+  // real/anchor data points from the RegimeCap investigation
+  // (regimecap_data_collection_2026-08-27.md, regimecap_group_d_analysis_
+  // 2026-08-27.md, WhaleScope prompt workspace, not checked into this repo).
+  describe("EMERGENCY PATCH fallback (regime label flicker)", () => {
+    it("rejects a RUNEUSDT-like case: regime already relabeled TRENDING_UP but ADX/spike still extreme", () => {
+      // Real 4h numbers observed live post-flicker: ADX 53.79, volatilitySpike 4.973x.
+      const result = evaluateHardScreen(
+        baseHardScreen({ regime4h: "TRENDING_UP", adx4h: 53.79, volatilitySpike4h: 4.973 }),
+      );
+      expect(result.passed).toBe(false);
+      expect(result.reasons.some((r) => r.includes("EMERGENCY PATCH"))).toBe(true);
+    });
+
+    it("does NOT reject an XRPUSDT-like case: strong trend, but spike below the fallback threshold", () => {
+      // Real 4h anchor numbers: ADX 42.24, volatilitySpike 1.162x -- high ADX
+      // alone must NOT trigger the fallback (ADX has weak separating power,
+      // see RegimeCap investigation Group A vs Group B analysis).
+      const result = evaluateHardScreen(
+        baseHardScreen({ regime4h: "TRENDING_UP", adx4h: 42.24, volatilitySpike4h: 1.162 }),
+      );
+      expect(result.passed).toBe(true);
+    });
+
+    it("does NOT reject Group A (Pure Trend) members", () => {
+      // ETHUSDT 25.52/1.056, SOLUSDT 31.39/1.342 -- both real 4h observed values.
+      for (const [adx, spike] of [
+        [25.52, 1.056],
+        [31.39, 1.342],
+      ]) {
+        const result = evaluateHardScreen(
+          baseHardScreen({ regime4h: "TRENDING_UP", adx4h: adx, volatilitySpike4h: spike }),
+        );
+        expect(result.passed).toBe(true);
+      }
+    });
+
+    it("does NOT reject Group D (Mature Trend/Cooling) members -- not proven to need capping", () => {
+      // BTCUSDT 32.50/0.534, BNBUSDT 48.70/0.663, HYPEUSDT 26.84/0.646,
+      // ZECUSDT 33.04/0.924 -- real 4h observed values, all ADX>25 but
+      // volatilitySpike<1.0 (well below SPIKE_FALLBACK_MIN=4.0 either way).
+      for (const [adx, spike] of [
+        [32.5, 0.534],
+        [48.7, 0.663],
+        [26.84, 0.646],
+        [33.04, 0.924],
+      ]) {
+        const result = evaluateHardScreen(
+          baseHardScreen({ regime4h: "TRENDING_UP", adx4h: adx, volatilitySpike4h: spike }),
+        );
+        expect(result.passed).toBe(true);
+      }
+    });
+
+    it("does not double-count when regime is already BREAKOUT AND numeric fallback would also match", () => {
+      const result = evaluateHardScreen(
+        baseHardScreen({ regime4h: "BREAKOUT", adx4h: 53.79, volatilitySpike4h: 4.973 }),
+      );
+      expect(result.passed).toBe(false);
+      // Only the string-label reason should fire, not also the fallback reason
+      // (fallback's own `regime4h !== "BREAKOUT"` guard prevents this).
+      expect(result.reasons.filter((r) => r.includes("Regime 4h")).length).toBe(1);
+    });
   });
 
   it("collects ALL failing reasons, not just the first", () => {

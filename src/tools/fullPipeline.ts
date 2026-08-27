@@ -203,7 +203,22 @@ function realizedVolPct(candles: KlineCandle[]): number {
   return periodVol * Math.sqrt(periodsPerYear) * 100;
 }
 
-function computeRegimeFromKlines(klines: KlineTuple[], oiChangePct: number, cvdBuyPct: number): RegimeResult {
+// EMERGENCY PATCH (2026-08-27, lihat pipelineEngine.ts ADX_FALLBACK_MIN/
+// SPIKE_FALLBACK_MIN): dulu adx/volatilitySpikeRatio dihitung di sini cuma
+// buat argumen classifyRegime() lalu DIBUANG -- HardScreenInput di
+// pipelineEngine.ts cuma nerima regime1h/regime4h sebagai string label
+// (MarketRegime), bukan angka mentahnya. Itu sebabnya bug RUNEUSDT-flicker
+// (regime label bisa geser dari BREAKOUT ke TRENDING_UP meski ADX/spike
+// masih ekstrem) gak ketahuan sama hard-screen -- gak ada fallback numerik
+// yang bisa dicek karena angkanya udah gak ada. RegimeWithMetrics
+// mempertahankan adx & volatilitySpikeRatio di return value supaya bisa
+// di-thread ke HardScreenInput di bawah.
+interface RegimeWithMetrics extends RegimeResult {
+  adx: number;
+  volatilitySpikeRatio: number;
+}
+
+function computeRegimeFromKlines(klines: KlineTuple[], oiChangePct: number, cvdBuyPct: number): RegimeWithMetrics {
   const { candles } = summarizeKlines(klines);
   const adxResult = calculateADX(candles, 14);
   const recentCandles = candles.slice(-10);
@@ -218,7 +233,7 @@ function computeRegimeFromKlines(klines: KlineTuple[], oiChangePct: number, cvdB
   const priorVolumeAvg = priorCandles.reduce((sum, c) => sum + c.volume, 0) / (priorCandles.length || 1);
   const volumeSpikeRatio = priorVolumeAvg > 0 && lastCandle ? lastCandle.volume / priorVolumeAvg : 1;
 
-  return classifyRegime({
+  const classified = classifyRegime({
     adx: adxResult.adx,
     plusDI: adxResult.plusDI,
     minusDI: adxResult.minusDI,
@@ -228,15 +243,25 @@ function computeRegimeFromKlines(klines: KlineTuple[], oiChangePct: number, cvdB
     volatilitySpikeRatio,
     volumeSpikeRatio,
   });
+
+  return { ...classified, adx: adxResult.adx, volatilitySpikeRatio };
 }
 
-function safeComputeRegime(klines: KlineTuple[], oiChangePct: number, cvdBuyPct: number): RegimeResult {
+function safeComputeRegime(klines: KlineTuple[], oiChangePct: number, cvdBuyPct: number): RegimeWithMetrics {
   const { candles } = summarizeKlines(klines);
   if (candles.length < REGIME_MIN_CANDLES) {
     return {
       regime: "RANGING",
       confidence: 0,
       reason: `Data klines tidak cukup untuk analisis regime (dapat ${candles.length}, butuh minimal ${REGIME_MIN_CANDLES}) -- fallback RANGING confidence 0, JANGAN dibaca sebagai sinyal ranging sungguhan.`,
+      // adx/volatilitySpikeRatio gak bisa dihitung dari <21 candle -- 0/1
+      // dipilih supaya fallback EMERGENCY PATCH di evaluateHardScreen()
+      // (ADX_FALLBACK_MIN=25, SPIKE_FALLBACK_MIN=4.0) TIDAK ikut trigger
+      // dari data yang gak valid ini (0 tidak akan pernah >25, 1 tidak akan
+      // pernah >4.0) -- konsisten dengan confidence:0 di atas, bukan sinyal
+      // sungguhan.
+      adx: 0,
+      volatilitySpikeRatio: 1,
     };
   }
   return computeRegimeFromKlines(klines, oiChangePct, cvdBuyPct);
@@ -365,6 +390,12 @@ export async function runPipelineForSymbol(
       maxAbsFundingRate: opts.maxAbsFundingRate,
       regime1h: regime1h.regime,
       regime4h: regime4h.regime,
+      // EMERGENCY PATCH (2026-08-27) -- lihat ADX_FALLBACK_MIN/
+      // SPIKE_FALLBACK_MIN di pipelineEngine.ts.
+      adx1h: regime1h.adx,
+      volatilitySpike1h: regime1h.volatilitySpikeRatio,
+      adx4h: regime4h.adx,
+      volatilitySpike4h: regime4h.volatilitySpikeRatio,
     };
     const hardScreen = evaluateHardScreen(hardScreenInput);
 

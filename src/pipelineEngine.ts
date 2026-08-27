@@ -19,6 +19,39 @@ function clampPct(value: number): number {
 // inilah yang bikin "reject early" di desain 2-wave pipeline benar-benar
 // menghemat call proxy, bukan cuma kosmetik urutan kode.
 // ─────────────────────────────────────────────────────────────
+// EMERGENCY PATCH (2026-08-27, temporary fallback pending shadow-mode
+// calibration -- see regimecap_threshold_proposal_2026-08-27.md and
+// regimecap_pipelineengine_impact_scope_2026-08-27.md, NOT checked into this
+// repo, kept in the WhaleScope prompt workspace). Root cause: `regime1h`/
+// `regime4h` string labels alone (`=== "BREAKOUT"`) can flicker to
+// TRENDING_UP within hours while ADX/volatilitySpike stay extreme (live-
+// reproduced on RUNEUSDT: ADX 53.79, volatilitySpike 4.973x, label read
+// TRENDING_UP not BREAKOUT). This hard-screen used to gate ONLY on the
+// string label -- see evaluateHardScreen() below, which now ALSO checks
+// these raw numbers as a fallback.
+//
+// ADX_FALLBACK_MIN = 25: NOT a discriminator (confirmed weak separating
+// power between healthy-trend and tail-risk cases in the RegimeCap
+// investigation -- both RUNEUSDT and ordinary trending majors show ADX>25).
+// Reused purely as the same "is this candidate trending at all" floor
+// already used elsewhere in this codebase (matches binance_market_regime's
+// own TRENDING_UP/DOWN classification cutoff).
+//
+// SPIKE_FALLBACK_MIN = 4.0: the actual discriminator. Deliberately set
+// CLOSER to the one real tail-risk data point we have (RUNEUSDT, 4.973x)
+// than the separate RegimeCap composite-score proposal's Y=3.0 (which sat
+// near the middle of an entirely empty 1.342x-4.973x data gap). Emergency
+// patches should bias toward MINIMIZING false-positive rejects (an
+// unnecessarily-skipped healthy-trend symbol costs one alert) over
+// minimizing false-negatives the way a fully-calibrated formula eventually
+// should -- so this constant is intentionally conservative/high, not the
+// "best guess middle" value from the composite-score proposal. Confidence:
+// LOW-MEDIUM (n=1 tail-risk anchor). MUST be revisited once shadow-mode
+// data (or more real tail-risk cases) exist -- do not treat this number as
+// final.
+const ADX_FALLBACK_MIN = 25;
+const SPIKE_FALLBACK_MIN = 4.0;
+
 export interface HardScreenInput {
   /**
    * DIDERIVASI dari fetch ticker24hr Wave 1, BUKAN dari fetch exchangeInfo
@@ -36,6 +69,18 @@ export interface HardScreenInput {
   maxAbsFundingRate: number;
   regime1h: MarketRegime;
   regime4h: MarketRegime;
+  /**
+   * EMERGENCY PATCH fields (2026-08-27) -- raw ADX(14)/volatilitySpikeRatio
+   * from the SAME klines window already used to compute regime1h/regime4h
+   * (fullPipeline.ts computeRegimeFromKlines), threaded through so the
+   * BREAKOUT-label fallback below has real numbers to check instead of
+   * trusting the (flicker-prone) string label alone. See ADX_FALLBACK_MIN/
+   * SPIKE_FALLBACK_MIN comment above for threshold reasoning.
+   */
+  adx1h: number;
+  volatilitySpike1h: number;
+  adx4h: number;
+  volatilitySpike4h: number;
 }
 
 export interface HardScreenResult {
@@ -65,6 +110,24 @@ export function evaluateHardScreen(input: HardScreenInput): HardScreenResult {
   }
   if (input.regime4h === "BREAKOUT") {
     reasons.push("Regime 4h terdeteksi BREAKOUT -- grid bot tidak cocok untuk kondisi breakout.");
+  }
+  // EMERGENCY PATCH fallback (2026-08-27, TEMPORARY, LOW-MEDIUM confidence --
+  // see ADX_FALLBACK_MIN/SPIKE_FALLBACK_MIN comment above): catches the
+  // RUNEUSDT-flicker case where regime1h/regime4h already relabeled away
+  // from "BREAKOUT" (so the two checks above miss it) but ADX/volatilitySpike
+  // are still extreme. ADDITIVE ONLY -- does not replace or weaken the
+  // string-label checks above, RANGING/ACCUMULATION/DISTRIBUTION/
+  // TRENDING_UP/DOWN symbols are unaffected unless they ALSO clear both
+  // numeric thresholds.
+  if (input.regime1h !== "BREAKOUT" && input.adx1h > ADX_FALLBACK_MIN && input.volatilitySpike1h > SPIKE_FALLBACK_MIN) {
+    reasons.push(
+      `Regime 1h dilabel ${input.regime1h} (bukan BREAKOUT) TAPI ADX ${input.adx1h.toFixed(1)} & volatilitySpike ${input.volatilitySpike1h.toFixed(2)}x melewati ambang darurat (>${ADX_FALLBACK_MIN}/>${SPIKE_FALLBACK_MIN}x) -- kemungkinan kondisi breakout yang label regime-nya sudah bergeser (lihat RUNEUSDT case, RegimeCap investigation). EMERGENCY PATCH, threshold LOW-MEDIUM confidence.`,
+    );
+  }
+  if (input.regime4h !== "BREAKOUT" && input.adx4h > ADX_FALLBACK_MIN && input.volatilitySpike4h > SPIKE_FALLBACK_MIN) {
+    reasons.push(
+      `Regime 4h dilabel ${input.regime4h} (bukan BREAKOUT) TAPI ADX ${input.adx4h.toFixed(1)} & volatilitySpike ${input.volatilitySpike4h.toFixed(2)}x melewati ambang darurat (>${ADX_FALLBACK_MIN}/>${SPIKE_FALLBACK_MIN}x) -- kemungkinan kondisi breakout yang label regime-nya sudah bergeser (lihat RUNEUSDT case, RegimeCap investigation). EMERGENCY PATCH, threshold LOW-MEDIUM confidence.`,
+    );
   }
 
   return { passed: reasons.length === 0, reasons };
@@ -99,8 +162,23 @@ export interface Tier1ScoreResult {
 // RANGING paling ideal untuk grid bot (harga terkurung di range = grid
 // ke-harvest terus), ACCUMULATION/DISTRIBUTION juga relatif kondusif
 // (konsolidasi), TRENDING paling berisiko (harga cenderung keluar range).
-// BREAKOUT didefinisikan (=0) cuma untuk exhaustiveness Record -- praktiknya
-// tidak pernah sampai sini karena sudah difilter evaluateHardScreen().
+// BREAKOUT didefinisikan (=0) cuma untuk exhaustiveness Record.
+//
+// UPDATE 2026-08-27 (lihat RegimeCap investigation, regimecap_*_2026-08-27.md
+// di WhaleScope prompt workspace): komentar sebelumnya di sini bilang kondisi
+// BREAKOUT "praktiknya tidak pernah sampai sini karena sudah difilter
+// evaluateHardScreen()" -- klaim ini TERBUKTI SALAH. Kasus RUNEUSDT (ADX
+// 53.79, volatilitySpike 4.973x) menunjukkan regime1h/regime4h bisa
+// dilabel TRENDING_UP (bukan BREAKOUT) meski kondisinya identik breakout --
+// evaluateHardScreen() yang lama (string-match murni) meloloskannya, lalu di
+// sini dia akan dapat favorability TRENDING_UP=0.5 (medium-supportive)
+// alih-alih BREAKOUT=0 yang seharusnya. Fallback numerik EMERGENCY PATCH
+// sudah ditambahkan di evaluateHardScreen() (ADX_FALLBACK_MIN/
+// SPIKE_FALLBACK_MIN) untuk menutup celah ini di level hard-screen -- kalau
+// fallback itu trigger, symbol tetap ke-reject di sini duluan sebelum
+// REGIME_FAVORABILITY sempat dipakai. Tapi threshold fallback itu sendiri
+// LOW-MEDIUM confidence (n=1 anchor) dan BELUM final -- jangan anggap celah
+// ini 100% tertutup.
 const REGIME_FAVORABILITY: Record<MarketRegime, number> = {
   RANGING: 1.0,
   ACCUMULATION: 0.9,
