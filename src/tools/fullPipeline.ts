@@ -34,6 +34,7 @@ import {
   type MmTier,
 } from "./detectMmActivity.js";
 import { getPairThreshold } from "./config.js";
+import * as d1Client from "../d1Client.js";
 import { computeGridBounds, type GridBoundResult, type GridBoundOptions } from "../gridBoundEngine.js";
 import {
   evaluateHardScreen,
@@ -67,6 +68,43 @@ const DEFAULT_BASIS_THRESHOLD = 0.0005;
 // diekspor) -- jumlah candle minimum supaya classifyRegime() dapat window
 // recent(10)/prior(10) yang valid.
 const REGIME_MIN_CANDLES = 21;
+
+// SHADOW-MODE LOGGING (2026-08-27, temporary, additive -- see
+// regimecap_shadow_mode_design_2026-08-27.md in the WhaleScope prompt
+// workspace, not checked into this repo). Purely observational: fills the
+// 1.4x-4.9x volatilitySpike blind spot the emergency patch's
+// SPIKE_FALLBACK_MIN=4.0 (pipelineEngine.ts) was picked without any real
+// data for. NEVER read by evaluateHardScreen()/scoreTier1Signals() -- must
+// not influence any live decision, alert, or score.
+//
+// Fixed sample (not the full ~500-pair watchlist, for storage/cost
+// control): 16 symbols already known from the RegimeCap investigation
+// (continuity with existing Group A/B/D anchor data) + 24 new symbols
+// spanning market-cap/beta tiers the 4-major-only historical scan didn't
+// cover (that scan was flagged as a likely underestimate specifically
+// because RUNEUSDT, the one real tail-risk anchor, is itself a
+// higher-beta altcoin, not a major).
+const SHADOW_LOG_SAMPLE_SYMBOLS = new Set([
+  // Known from prior investigation (continuity with existing anchor data)
+  "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT",
+  "AVAXUSDT", "LINKUSDT", "LTCUSDT", "TRXUSDT", "SUIUSDT", "NEARUSDT", "ZECUSDT",
+  "HYPEUSDT", "RUNEUSDT",
+  // New for market-cap/beta diversity
+  "TIAUSDT", "STXUSDT", "IMXUSDT", "GALAUSDT", "SANDUSDT", "FTMUSDT", "ALGOUSDT",
+  "APTUSDT", "ARBUSDT", "OPUSDT", "INJUSDT", "SEIUSDT", "ATOMUSDT", "ETCUSDT",
+  "BCHUSDT", "WLDUSDT", "AAVEUSDT", "FILUSDT", "XLMUSDT", "DOTUSDT", "ENAUSDT",
+  "1000PEPEUSDT", "ORDIUSDT", "COTIUSDT",
+]);
+// Lower bound set BELOW Group D's lowest actually-observed volatilitySpike
+// (BTCUSDT 0.534x, regimecap_data_collection_2026-08-27.md) -- the task's
+// own suggested "~0.8x-1.0x" would have silently excluded that exact
+// control-group data point, contradicting the stated goal of keeping
+// Group A/D visible as negative controls. Deliberately widened, not a
+// blind copy of the suggested number.
+const SHADOW_LOG_SPIKE_MIN = 0.4;
+// Upper bound: just above the one real tail-risk anchor (RUNEUSDT 4.973x)
+// to still capture extreme cases without unbounded storage growth.
+const SHADOW_LOG_SPIKE_MAX = 6.0;
 
 const MARGIN_MODE_CAVEAT =
   "GridInputParams (gridRiskEngine.ts) tidak punya field margin-mode -- semua perhitungan likuidasi/risiko di " +
@@ -398,6 +436,37 @@ export async function runPipelineForSymbol(
       volatilitySpike4h: regime4h.volatilitySpikeRatio,
     };
     const hardScreen = evaluateHardScreen(hardScreenInput);
+
+    // SHADOW-MODE LOGGING (2026-08-27, additive, see SHADOW_LOG_* constants
+    // above). Awaited (not fire-and-forget / ctx.waitUntil()) deliberately:
+    // this only fires for the fixed ~40-symbol sample intersected with the
+    // spike band below (typically well under 40 rows/tick, not all ~500
+    // symbols), so the added latency is small and bounded -- simpler and
+    // safer than threading ctx through fullPipeline.ts's several call
+    // layers for an unmanaged background write that Cloudflare could kill
+    // before it lands if the invocation completes first. .catch() ensures
+    // a logging failure can NEVER affect hardScreen/decision/alert output.
+    if (
+      SHADOW_LOG_SAMPLE_SYMBOLS.has(upperSymbol) &&
+      regime4h.volatilitySpikeRatio >= SHADOW_LOG_SPIKE_MIN &&
+      regime4h.volatilitySpikeRatio <= SHADOW_LOG_SPIKE_MAX
+    ) {
+      await d1Client
+        .insertRegimeShadowLog({
+          symbol: upperSymbol,
+          capturedAt: Date.now(),
+          timeframe: "4h",
+          regime: regime4h.regime,
+          adx: regime4h.adx,
+          volatilitySpike: regime4h.volatilitySpikeRatio,
+          entryClose: currentPrice,
+          hardScreenPassed: hardScreen.passed,
+          hardScreenReason: hardScreen.passed ? null : hardScreen.reasons.join(" | "),
+        })
+        .catch((err) => {
+          console.error(`[shadow-log] gagal insert untuk ${upperSymbol}:`, (err as Error)?.message ?? String(err));
+        });
+    }
 
     const hardScreenSection: HardScreenSection = {
       passed: hardScreen.passed,

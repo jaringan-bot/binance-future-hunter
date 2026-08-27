@@ -435,3 +435,76 @@ export async function countEntryAlertsSince(cutoffMs: number): Promise<number> {
     .first<{ count: number }>();
   return row?.count ?? 0;
 }
+
+// ─────────────────────────────────────────────────────────────
+// regime_shadow_log -- shadow-mode observation for RegimeCap threshold
+// calibration (2026-08-27, migration 0007). Additive only, never read by
+// evaluateHardScreen()/scoreTier1Signals() -- see fullPipeline.ts caller
+// for the sampling/band logic that decides which rows get written.
+// ─────────────────────────────────────────────────────────────
+export interface RegimeShadowLogRow {
+  symbol: string;
+  capturedAt: number;
+  timeframe: string;
+  regime: string;
+  adx: number;
+  volatilitySpike: number;
+  entryClose: number;
+  hardScreenPassed: boolean;
+  hardScreenReason: string | null;
+}
+
+export async function insertRegimeShadowLog(row: RegimeShadowLogRow): Promise<void> {
+  await requireDb()
+    .prepare(
+      "INSERT INTO regime_shadow_log (symbol, captured_at, timeframe, regime, adx, volatility_spike, entry_close, hard_screen_passed, hard_screen_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(
+      row.symbol,
+      row.capturedAt,
+      row.timeframe,
+      row.regime,
+      row.adx,
+      row.volatilitySpike,
+      row.entryClose,
+      row.hardScreenPassed ? 1 : 0,
+      row.hardScreenReason,
+    )
+    .run();
+}
+
+export interface MaturingShadowLogRow {
+  id: number;
+  symbol: string;
+  capturedAt: number;
+  entryClose: number;
+}
+
+// Design for the (not-yet-implemented, see regimecap_shadow_mode_design_
+// 2026-08-27.md) forward-return job: rows old enough that forward_return_20
+// (20 candles x 4h = 80h) can be computed, but not yet filled in.
+export async function getMaturingRegimeShadowLogs(nowMs: number, limit = 50): Promise<MaturingShadowLogRow[]> {
+  const cutoff = nowMs - 20 * 4 * 3600 * 1000;
+  const result = await requireDb()
+    .prepare(
+      "SELECT id, symbol, captured_at, entry_close FROM regime_shadow_log WHERE captured_at <= ? AND forward_computed_at IS NULL ORDER BY captured_at ASC LIMIT ?",
+    )
+    .bind(cutoff, limit)
+    .all<{ id: number; symbol: string; captured_at: number; entry_close: number }>();
+  return result.results.map((r) => ({ id: r.id, symbol: r.symbol, capturedAt: r.captured_at, entryClose: r.entry_close }));
+}
+
+export interface ForwardReturns {
+  r5: number | null;
+  r10: number | null;
+  r20: number | null;
+}
+
+export async function updateRegimeShadowLogForwardReturns(id: number, returns: ForwardReturns, computedAt: number): Promise<void> {
+  await requireDb()
+    .prepare(
+      "UPDATE regime_shadow_log SET forward_return_5 = ?, forward_return_10 = ?, forward_return_20 = ?, forward_computed_at = ? WHERE id = ?",
+    )
+    .bind(returns.r5, returns.r10, returns.r20, computedAt, id)
+    .run();
+}
