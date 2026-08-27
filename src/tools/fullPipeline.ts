@@ -162,6 +162,18 @@ export interface PipelineOpts {
   maxAbsFundingRate: number;
 }
 
+// Lookup bulk ticker24hr/premiumIndex (dari getAllTicker24hrNative() +
+// getBulkFundingRatesNative(), binanceProxyClient.ts) -- dipakai caller yang
+// proses BANYAK symbol dalam 1 tick (entryAlertCron.ts) buat gantiin 2 dari
+// 8 call per-symbol Wave 1 (ticker24hr + premiumIndex) dengan 2 call bulk
+// SEKALI per tick. Opsional: kalau tidak dioper, runPipelineForSymbol() balik
+// ke fetch per-symbol biasa (whalescope_full_pipeline, 1-20 symbol/call, gak
+// worth bulk-fetch overhead-nya).
+export interface PrefetchedTickerFunding {
+  ticker: Map<string, binanceProxy.Ticker24hr>;
+  funding: Map<string, binanceProxy.PremiumIndexPoint>;
+}
+
 // ─────────────────────────────────────────────────────────────
 // HELPER: hitung RegimeResult dari 1 set klines mentah + oiChangePct/cvdBuyPct
 // yang SUDAH dihitung (reuse, bukan fetch baru) -- mereplikasi PERSIS resep
@@ -241,7 +253,13 @@ function obiAtDepth(orderBook: binanceProxy.OrderBookDepth, depth: number): numb
  * runPipelineForSymbol() -- seluruh decision chain untuk SATU symbol, 2-wave
  * fetch orchestration:
  *
- * WAVE 1 (paralel): ticker24hr, funding rate, klines 1h (limit=max(lookback,40)),
+ * WAVE 1 (paralel): ticker24hr, funding rate (KEDUANYA bisa dioper lewat
+ * parameter `prefetched` -- caller yang proses banyak symbol sekaligus,
+ * mis. entryAlertCron.ts, bulk-fetch sekali per tick via
+ * getAllTicker24hrNative()/getBulkFundingRatesNative() lalu oper Map-nya,
+ * gantiin 2 call per-symbol jadi 2 call bulk total; kalau tidak dioper,
+ * fallback ke call per-symbol lama -- lihat PrefetchedTickerFunding di
+ * atas), klines 1h (limit=max(lookback,40)),
  * klines 4h (limit=40), open interest + histori 1h (limit=2), agg trades
  * (limit=100), fetchMarketContext() (proxy-safe, timeout sendiri). Dari sini
  * dihitung regime1h/regime4h -> evaluateHardScreen(). GAGAL DI SINI = LANGSUNG
@@ -264,15 +282,46 @@ function obiAtDepth(orderBook: binanceProxy.OrderBookDepth, depth: number): numb
  * Seluruh badan fungsi dibungkus try/catch -- satu symbol gagal TIDAK PERNAH
  * throw ke pemanggil, cuma balik { decision: "NO_TRADE", error }.
  */
-export async function runPipelineForSymbol(symbol: string, opts: PipelineOpts): Promise<SymbolPipelineResult> {
+export async function runPipelineForSymbol(
+  symbol: string,
+  opts: PipelineOpts,
+  prefetched?: PrefetchedTickerFunding,
+): Promise<SymbolPipelineResult> {
   const preHardScreenNotes: string[] = [];
 
   try {
     const klineLimit = Math.max(opts.lookbackBars, 40);
+    const upperSymbol = symbol.toUpperCase();
+
+    // Ticker: bulk-map miss diperlakukan SAMA PERSIS kayak fetch per-symbol
+    // gagal (.catch(() => null) di bawah) -- "not tradable" udah punya jalur
+    // null-safe (lihat derivasi `tradable` di bawah), jadi aman diam-diam
+    // jatuh ke situ. Tetap di-log supaya kelihatan di wrangler tail kalau
+    // watchlist somehow gak sinkron sama listing Binance saat ini.
+    if (prefetched && !prefetched.ticker.has(upperSymbol)) {
+      console.error(`[fullPipeline] ${symbol} tidak ada di bulk ticker24hr -- diperlakukan not-tradable`);
+    }
+    const tickerPromise = prefetched
+      ? Promise.resolve(prefetched.ticker.get(upperSymbol) ?? null)
+      : binanceProxy.getTicker24hrNative(symbol).catch(() => null);
+
+    // Funding: BEDA dari ticker -- funding.markPrice/lastFundingRate diakses
+    // tanpa null-guard di bawah, jadi bulk-map miss TIDAK boleh diam-diam
+    // jalan dengan data undefined (bisa salah lolos/gagal hard-screen funding
+    // check). Fallback ke call per-symbol lama, cuma untuk symbol yang miss
+    // itu -- bukan skip, bukan asumsi nilai default.
+    const fundingMissing = prefetched && !prefetched.funding.has(upperSymbol);
+    if (fundingMissing) {
+      console.error(`[fullPipeline] ${symbol} tidak ada di bulk premiumIndex -- fallback ke call per-symbol`);
+    }
+    const fundingPromise =
+      prefetched && !fundingMissing
+        ? Promise.resolve(prefetched.funding.get(upperSymbol)!)
+        : binanceProxy.getCurrentFundingRateNative(symbol);
 
     const [tickerResult, funding, klines1h, klines4h, oiCurrent, oiHist2, aggTrades, contextualRisk] = await Promise.all([
-      binanceProxy.getTicker24hrNative(symbol).catch(() => null),
-      binanceProxy.getCurrentFundingRateNative(symbol),
+      tickerPromise,
+      fundingPromise,
       binanceProxy.getKlinesNative(symbol, "1h", klineLimit),
       binanceProxy.getKlinesNative(symbol, "4h", 40),
       binanceProxy.getOpenInterestNative(symbol),

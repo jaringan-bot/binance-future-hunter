@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { registerFullPipelineTools } from "./fullPipeline.js";
+import { registerFullPipelineTools, runPipelineForSymbol, type PipelineOpts, type PrefetchedTickerFunding } from "./fullPipeline.js";
 import * as binanceProxy from "../binanceProxyClient.js";
 import type { KlineTuple } from "../binanceProxyClient.js";
 
@@ -368,5 +368,90 @@ describe("whalescope_full_pipeline tool handler", () => {
     expect(parsed.margin_mode).toBe("ISOLATED");
     expect(parsed.max_leverage_options).toEqual([3, 5, 10]);
     expect(parsed.concurrency).toBe(6);
+  });
+});
+
+// Sama nilainya kayak DEFAULT_PIPELINE_OPTS di entryAlertCron.ts -- caller
+// nyata dari parameter `prefetched` ini.
+const TEST_OPTS: PipelineOpts = {
+  riskUsd: 20,
+  marginMode: "ISOLATED",
+  maxLeverageOptions: [3, 5, 10],
+  lookbackBars: 50,
+  atrPeriod: 14,
+  atrMult: 1.0,
+  slExtraAtr: 1.5,
+  slPctBuffer: 1.0,
+  minQuoteVolumeUsd: 5_000_000,
+  maxAbsFundingRate: 0.0005,
+};
+
+describe("runPipelineForSymbol -- prefetched ticker/funding (bulk-fetch opsional)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    defaultMockSetup();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  it("uses the prefetched ticker+funding maps and skips both per-symbol proxy calls when the symbol is present in both", async () => {
+    const prefetched: PrefetchedTickerFunding = {
+      ticker: new Map([
+        ["BTCUSDT", { symbol: "BTCUSDT", lastPrice: "200", priceChange: "0", priceChangePercent: "0", highPrice: "201", lowPrice: "199", volume: "1", quoteVolume: "9999999" }],
+      ]),
+      funding: new Map([
+        ["BTCUSDT", { symbol: "BTCUSDT", markPrice: "200", indexPrice: "200", estimatedSettlePrice: "200", lastFundingRate: "0.0003", nextFundingTime: 0, interestRate: "0", time: 0 }],
+      ]),
+    };
+
+    const result = await runPipelineForSymbol("BTCUSDT", TEST_OPTS, prefetched);
+
+    expect(binanceProxy.getTicker24hrNative).not.toHaveBeenCalled();
+    expect(binanceProxy.getCurrentFundingRateNative).not.toHaveBeenCalled();
+    // Bukti nilai dari MAP (200 / 9999999 / 0.0003) beneran dipakai, bukan
+    // fallback ke data mock per-symbol default (100 / 10000000 / 0.0001).
+    expect(result.hardScreen.quoteVolumeUsd).toBe(9999999);
+    expect(result.hardScreen.fundingRate).toBe(0.0003);
+  });
+
+  it("falls back to the per-symbol funding call (not a silent default) when the symbol is missing from the bulk funding map, while still skipping the ticker call, and logs why", async () => {
+    const prefetched: PrefetchedTickerFunding = {
+      ticker: new Map([
+        ["BTCUSDT", { symbol: "BTCUSDT", lastPrice: "200", priceChange: "0", priceChangePercent: "0", highPrice: "201", lowPrice: "199", volume: "1", quoteVolume: "9999999" }],
+      ]),
+      funding: new Map(), // BTCUSDT sengaja tidak ada
+    };
+
+    const result = await runPipelineForSymbol("BTCUSDT", TEST_OPTS, prefetched);
+
+    expect(binanceProxy.getTicker24hrNative).not.toHaveBeenCalled();
+    expect(binanceProxy.getCurrentFundingRateNative).toHaveBeenCalledTimes(1);
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining("premiumIndex"));
+    // Fallback call balikin data mock per-symbol default (funding rate 0.0001).
+    expect(result.hardScreen.fundingRate).toBe(0.0001);
+  });
+
+  it("treats a bulk-ticker miss as not-tradable (same null-safe path as a per-symbol fetch failure) instead of calling the per-symbol endpoint, and logs why", async () => {
+    const prefetched: PrefetchedTickerFunding = {
+      ticker: new Map(), // BTCUSDT sengaja tidak ada
+      funding: new Map([
+        ["BTCUSDT", { symbol: "BTCUSDT", markPrice: "200", indexPrice: "200", estimatedSettlePrice: "200", lastFundingRate: "0.0003", nextFundingTime: 0, interestRate: "0", time: 0 }],
+      ]),
+    };
+
+    const result = await runPipelineForSymbol("BTCUSDT", TEST_OPTS, prefetched);
+
+    expect(binanceProxy.getTicker24hrNative).not.toHaveBeenCalled();
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining("ticker24hr"));
+    // tradable=false (lastPrice/quoteVolume dari ticker null) -> hard screen gagal.
+    expect(result.hardScreen.quoteVolumeUsd).toBe(0);
+    expect(result.hardScreen.passed).toBe(false);
+  });
+
+  it("falls back to per-symbol calls for both when prefetched is omitted entirely (whalescope_full_pipeline's existing behavior, unchanged)", async () => {
+    const result = await runPipelineForSymbol("BTCUSDT", TEST_OPTS);
+
+    expect(binanceProxy.getTicker24hrNative).toHaveBeenCalledTimes(1);
+    expect(binanceProxy.getCurrentFundingRateNative).toHaveBeenCalledTimes(1);
+    expect(result.hardScreen.passed).toBe(true);
   });
 });

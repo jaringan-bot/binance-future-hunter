@@ -51,8 +51,22 @@ crons = ["*/5 * * * *", "*/1 * * * *", "*/15 * * * *", "7-59/15 * * * *", "0 0,8
 # asli per symbol (termasuk retry fetchWithRetry + 3-tier failover
 # binanceProxyClient.ts) ternyata ~34/symbol, bukan cuma 12-17 teoritis --
 # budget abis di sekitar symbol ke-295, sisanya gagal "Too many
-# subrequests by single Worker invocation". CPU time invocation itu cuma
-# ~18 detik (jauh dari cap 15 menit CPU cron) -- subrequest COUNT yang
-# jadi bottleneck, bukan compute, jadi aman dinaikkan tinggi.
+# subrequests by single Worker invocation". Subrequest COUNT yang jadi
+# bottleneck di kejadian itu, bukan compute, jadi aman dinaikkan tinggi.
+#
+# CPU time vs wall-clock -- DUA limit terpisah buat Cron Trigger di Workers
+# Paid, JANGAN ketuker (komentar versi sebelumnya di sini salah nyampur
+# keduanya): cap CPU time buat cron interval < 1 jam (SEMUA 5 cron di
+# [triggers] atas ini `*/1`/`*/5`/`*/15`) itu 30 DETIK -- 15 menit cuma
+# berlaku buat cron interval >= 1 jam. Cap 15 menit yang beneran kena di
+# sini adalah WALL-CLOCK (durasi invocation dari cron fire sampai
+# ctx.waitUntil() kelar), limit terpisah dari CPU time.
+# Sample nyata 500-pair via wrangler tail (2026-08-27, ENTRY_ALERT_CRON):
+# cpuTime 11.86 detik (~40% dari cap 30 detik CPU) -- headroom REAL jauh
+# lebih tipis dari ~18 detik "jauh dari 15 menit" yang diklaim sebelumnya,
+# karena cap-nya emang bukan 15 menit. wallTime 12m13.5s (~81% dari cap
+# 15 menit wall-clock) -- INI constraint yang lebih ketat secara praktis,
+# bukan CPU time maupun subrequest count. Baru 1 sample live, belum
+# dipantau across multiple tick -- jangan anggap ini angka pasti/stabil.
 [limits]
 subrequests = 20000

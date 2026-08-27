@@ -12,7 +12,13 @@
 // WATCH->TRADE atau sebaliknya, beda decision = alert baru), ATAU kalau
 // decision-nya SAMA kayak cycle lalu tapi cooldown 4 jam sejak alert
 // terakhir sudah lewat (reminder, bukan spam tiap tick).
-import { runPipelineForSymbol, type PipelineOpts, type SymbolPipelineResult } from "../tools/fullPipeline.js";
+import {
+  runPipelineForSymbol,
+  type PipelineOpts,
+  type SymbolPipelineResult,
+  type PrefetchedTickerFunding,
+} from "../tools/fullPipeline.js";
+import * as binanceProxy from "../binanceProxyClient.js";
 import * as d1Client from "../d1Client.js";
 import { sendTelegramAlert, type TelegramEnv } from "../telegram.js";
 import { getTopUsdtPerpetualWatchlist } from "../entryWatchlist.js";
@@ -124,8 +130,13 @@ export interface AlertCheckOutcome {
   hadError: boolean;
 }
 
-export async function checkEntryAlertForSymbol(symbol: string, env: TelegramEnv, now: number = Date.now()): Promise<AlertCheckOutcome> {
-  const result = await runPipelineForSymbol(symbol, DEFAULT_PIPELINE_OPTS);
+export async function checkEntryAlertForSymbol(
+  symbol: string,
+  env: TelegramEnv,
+  now: number = Date.now(),
+  prefetched?: PrefetchedTickerFunding,
+): Promise<AlertCheckOutcome> {
+  const result = await runPipelineForSymbol(symbol, DEFAULT_PIPELINE_OPTS, prefetched);
   // runPipelineForSymbol NEVER throws (catch internal -- lihat JSDoc-nya),
   // jadi kegagalan (termasuk RateLimitError self-throttle rateLimiter.ts)
   // masuk lewat result.error, bukan exception -- log eksplisit di sini
@@ -155,12 +166,40 @@ export async function checkEntryAlertForSymbol(symbol: string, env: TelegramEnv,
   return { decision: result.decision, hadError: result.error != null };
 }
 
+// Bulk-fetch ticker24hr + premiumIndex SEKALI di awal tick (tanpa symbol
+// param, Binance balikin semua pair) -- gantiin 2 dari ~8-13 call per-symbol
+// Wave 1 (getTicker24hrNative + getCurrentFundingRateNative di
+// fullPipeline.ts) yang tadinya kepanggil 500x/tick jadi cuma 2 call total.
+// SENGAJA try/catch terpisah dari fan-out di bawah -- kalau bulk fetch ini
+// gagal, `prefetched` tetap undefined dan checkEntryAlertForSymbol ->
+// runPipelineForSymbol jatuh balik ke call per-symbol lama (PrefetchedTickerFunding
+// opsional), bukan bikin seluruh tick gagal cuma gara-gara 1 dari 2 call ini.
+async function fetchBulkTickerFunding(): Promise<PrefetchedTickerFunding | undefined> {
+  try {
+    const [tickerList, fundingList] = await Promise.all([
+      binanceProxy.getAllTicker24hrNative(),
+      binanceProxy.getBulkFundingRatesNative(),
+    ]);
+    return {
+      ticker: new Map(tickerList.map((t) => [t.symbol, t])),
+      funding: new Map(fundingList.map((f) => [f.symbol, f])),
+    };
+  } catch (err) {
+    console.error(
+      "[entry-alert] gagal bulk fetch ticker24hr/premiumIndex, fallback ke call per-symbol:",
+      (err as Error)?.message ?? String(err),
+    );
+    return undefined;
+  }
+}
+
 export async function runEntryAlertCheck(env: TelegramEnv): Promise<void> {
   const watchlist = await getTopUsdtPerpetualWatchlist();
   const now = Date.now();
+  const prefetched = await fetchBulkTickerFunding();
   const outcomes = await mapWithConcurrency(watchlist, CONCURRENCY, async (symbol): Promise<AlertCheckOutcome> => {
     try {
-      return await checkEntryAlertForSymbol(symbol, env, now);
+      return await checkEntryAlertForSymbol(symbol, env, now, prefetched);
     } catch (err) {
       console.error(`[cron] gagal entry-alert check ${symbol}:`, (err as Error)?.message ?? String(err));
       return { decision: "NO_TRADE", hadError: true };
