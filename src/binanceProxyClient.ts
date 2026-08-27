@@ -521,6 +521,27 @@ export async function getSpotAggTrades(symbol: string, limit: number): Promise<A
   return callProxy<AggTrade[]>("/api/v3/aggTrades", { symbol: symbol.toUpperCase(), limit }, "spot");
 }
 
+// Ranged/paginated variants -- expose startTime/endTime/fromId (native
+// Binance aggTrades params, already supported by the endpoint but not by
+// the limit-only wrappers above). Dipakai aggTradesPaginator.ts buat
+// paginate mundur nutupin window durasi tertentu (analyze_cvd_divergence),
+// beda dari getAggTrades/getSpotAggTrades yang cuma ambil N trade terakhir
+// tanpa jaminan durasi waktu.
+export interface AggTradesRangeParams {
+  startTime?: number;
+  endTime?: number;
+  fromId?: number;
+  limit: number;
+}
+
+export async function getAggTradesRange(symbol: string, params: AggTradesRangeParams): Promise<AggTrade[]> {
+  return callProxy<AggTrade[]>("/fapi/v1/aggTrades", { symbol: symbol.toUpperCase(), ...params });
+}
+
+export async function getSpotAggTradesRange(symbol: string, params: AggTradesRangeParams): Promise<AggTrade[]> {
+  return callProxy<AggTrade[]>("/api/v3/aggTrades", { symbol: symbol.toUpperCase(), ...params }, "spot");
+}
+
 export interface SpotAvgPrice { mins: number; price: string; }
 export async function getSpotAvgPrice(symbol: string): Promise<SpotAvgPrice> {
   return callProxy<SpotAvgPrice>("/api/v3/avgPrice", { symbol: symbol.toUpperCase() }, "spot");
