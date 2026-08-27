@@ -7,6 +7,22 @@ export interface TelegramEnv {
   TELEGRAM_CHAT_ID?: string;
 }
 
+// Legacy Telegram "Markdown" parse_mode treats _ * ` [ as entity delimiters
+// that must appear in balanced pairs across the WHOLE message. Enum-derived
+// strings interpolated into alert text (e.g. MarketStructureCondition values
+// like "LONG_LIQUIDATION_RISK", "BULLISH_ACCUMULATION") contain underscores,
+// so depending on which combination of values shows up together, the total
+// underscore count across the message can land on odd -- Telegram then
+// rejects the whole send with "can't find end of the entity" (found live,
+// 2026-08-27, RegimeCap investigation session -- see
+// project_whalescope-mcp_status memory for the exact failing combinations).
+// Escape every dynamic/enum-derived string before interpolating it into a
+// parse_mode:"Markdown" message so no combination of values can ever break
+// pairing again, regardless of what future enum values get added.
+export function escapeMarkdown(text: string): string {
+  return text.replace(/([_*`[])/g, "\\$1");
+}
+
 export async function sendTelegramAlert(env: TelegramEnv, text: string): Promise<void> {
   if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) {
     console.error("[telegram] TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID belum di-set, alert dilewati:", text);

@@ -11,7 +11,13 @@ import * as pacing from "../pacing.js";
 vi.mock("../tools/fullPipeline.js", () => ({ runPipelineForSymbol: vi.fn() }));
 vi.mock("../binanceProxyClient.js", () => ({ getAllTicker24hrNative: vi.fn(), getBulkFundingRatesNative: vi.fn() }));
 vi.mock("../d1Client.js", () => ({ getEntryAlertState: vi.fn(), upsertEntryAlertState: vi.fn(), insertEntryAlertRunLog: vi.fn() }));
-vi.mock("../telegram.js", () => ({ sendTelegramAlert: vi.fn() }));
+vi.mock("../telegram.js", () => ({
+  sendTelegramAlert: vi.fn(),
+  // Real implementation, not mocked -- formatEntryAlert()'s escaping behavior
+  // (and the tests asserting on its output below) needs the actual function,
+  // only sendTelegramAlert (the network call) is stubbed.
+  escapeMarkdown: (text: string) => text.replace(/([_*`[])/g, "\\$1"),
+}));
 vi.mock("../entryWatchlist.js", () => ({ getTopUsdtPerpetualWatchlist: vi.fn() }));
 vi.mock("../pacing.js", () => ({ sleep: vi.fn().mockResolvedValue(undefined) }));
 
@@ -106,7 +112,43 @@ describe("checkEntryAlertForSymbol", () => {
     expect(message).not.toContain("35.78099949618541");
     expect(message).toContain("0.357902");
     expect(message).not.toContain("0.35790218401913754");
-    expect(message).toContain("BULLISH_ACCUMULATION · SM Bias BULLISH vs Retail CROWDED_SHORT");
+    // Markdown-escaped (see escapeMarkdown test below) -- underscores in
+    // enum values must never reach Telegram unescaped, regardless of parity.
+    expect(message).toContain("BULLISH\\_ACCUMULATION · SM Bias BULLISH vs Retail CROWDED\\_SHORT");
+  });
+
+  it("escapes enum underscores so an odd-total combination can't break Telegram Markdown parsing", async () => {
+    // LONG_LIQUIDATION_RISK (2 underscores) + CROWDED_LONG (1) = 3, ODD total --
+    // this exact combination broke legacy "Markdown" parse_mode in production
+    // (2026-08-27, "can't find end of the entity" HTTP 400) before escaping
+    // was added. Asserting the raw values never appear unescaped proves the
+    // fix, independent of which specific combination happens to show up.
+    const result = {
+      ...tradeResult("XRPUSDT"),
+      tier1: {
+        smartMoney: {
+          condition: "LONG_LIQUIDATION_RISK",
+          smartMoneyBias: "BEARISH",
+          retailSentiment: "CROWDED_LONG",
+          confidenceScore: 60,
+          divergenceScore: -0.4,
+        },
+        mm: { totalScore: 2, tier: "MODERATE", activeSignals: [] },
+        obi: { depth5: 0, depth10: 0, depth20: 0 },
+        cvd: { buyPct: 0, cvd: 0 },
+        oi: { changePct: 0 },
+        regime1h: { regime: "RANGING", confidence: 0.5, reason: "" },
+        regime4h: { regime: "RANGING", confidence: 0.5, reason: "" },
+      },
+    } as unknown as SymbolPipelineResult;
+    vi.mocked(fullPipeline.runPipelineForSymbol).mockResolvedValue(result);
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
+
+    await checkEntryAlertForSymbol("XRPUSDT", ENV, 1_000_000);
+
+    const message = vi.mocked(telegram.sendTelegramAlert).mock.calls[0][1];
+    expect(message).not.toMatch(/LONG_LIQUIDATION_RISK|CROWDED_LONG/);
+    expect(message).toContain("LONG\\_LIQUIDATION\\_RISK · SM Bias BEARISH vs Retail CROWDED\\_LONG");
   });
 
   it("sends a Telegram alert and stores TRADE state when a symbol transitions into TRADE", async () => {

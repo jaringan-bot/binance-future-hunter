@@ -20,7 +20,7 @@ import {
 } from "../tools/fullPipeline.js";
 import * as binanceProxy from "../binanceProxyClient.js";
 import * as d1Client from "../d1Client.js";
-import { sendTelegramAlert, type TelegramEnv } from "../telegram.js";
+import { sendTelegramAlert, escapeMarkdown, type TelegramEnv } from "../telegram.js";
 import { getTopUsdtPerpetualWatchlist } from "../entryWatchlist.js";
 import { mapWithConcurrency } from "../concurrency.js";
 import { TRADE_RANKING_SCORE_THRESHOLD } from "../pipelineEngine.js";
@@ -106,21 +106,23 @@ const DECISION_ICON: Record<string, string> = {
 function formatEntryAlert(result: SymbolPipelineResult): string {
   const icon = DECISION_ICON[result.decision] ?? "ℹ️";
   const lines = [
-    `${icon} *${result.symbol}* ${DECISION_LABEL[result.decision] ?? result.decision}`,
+    `${icon} *${escapeMarkdown(result.symbol)}* ${escapeMarkdown(DECISION_LABEL[result.decision] ?? result.decision)}`,
     `📊 Ranking score: ${result.rankingScore.toFixed(1)}`,
   ];
   const g = result.gridBotConfig;
   if (g) {
     lines.push(
       "",
-      `📈 Range: ${fmtPrice(g.lower)} - ${fmtPrice(g.upper)} (${g.gridType}, ${g.gridCount} grid)`,
-      `⚙️ Leverage: ${g.leverage ?? "-"} (${g.marginMode})`,
+      `📈 Range: ${fmtPrice(g.lower)} - ${fmtPrice(g.upper)} (${escapeMarkdown(g.gridType)}, ${g.gridCount} grid)`,
+      `⚙️ Leverage: ${g.leverage ?? "-"} (${escapeMarkdown(g.marginMode)})`,
       `🛑 SL: ${fmtPrice(g.stopLoss)}  🎯 TP: ${fmtPrice(g.takeProfit)}`,
     );
   }
   const sm = result.tier1?.smartMoney;
   if (sm) {
-    lines.push(`🐋 ${sm.condition} · SM Bias ${sm.smartMoneyBias} vs Retail ${sm.retailSentiment}`);
+    lines.push(
+      `🐋 ${escapeMarkdown(sm.condition)} · SM Bias ${escapeMarkdown(sm.smartMoneyBias)} vs Retail ${escapeMarkdown(sm.retailSentiment)}`,
+    );
   }
   return lines.join("\n");
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { sendTelegramAlert } from "./telegram.js";
+import { sendTelegramAlert, escapeMarkdown } from "./telegram.js";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status });
@@ -58,5 +58,27 @@ describe("sendTelegramAlert", () => {
     ).resolves.toBeUndefined();
 
     expect(errorSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("escapeMarkdown", () => {
+  it("escapes underscores so odd-count enum combinations can't break legacy Markdown parsing", () => {
+    // Real values seen live (2026-08-27) that broke sendMessage before this fix:
+    // MarketStructureCondition/RetailSentiment enum values interpolated raw.
+    expect(escapeMarkdown("BULLISH_ACCUMULATION")).toBe("BULLISH\\_ACCUMULATION");
+    expect(escapeMarkdown("LONG_LIQUIDATION_RISK")).toBe("LONG\\_LIQUIDATION\\_RISK");
+    expect(escapeMarkdown("SHORT_SQUEEZE_RISK")).toBe("SHORT\\_SQUEEZE\\_RISK");
+    expect(escapeMarkdown("CROWDED_LONG")).toBe("CROWDED\\_LONG");
+    expect(escapeMarkdown("CROWDED_SHORT")).toBe("CROWDED\\_SHORT");
+  });
+
+  it("escapes *, `, and [ in addition to _", () => {
+    expect(escapeMarkdown("a*b`c[d_e")).toBe("a\\*b\\`c\\[d\\_e");
+  });
+
+  it("leaves plain text (no Markdown-special characters) unchanged", () => {
+    expect(escapeMarkdown("NEUTRAL")).toBe("NEUTRAL");
+    expect(escapeMarkdown("BTCUSDT")).toBe("BTCUSDT");
+    expect(escapeMarkdown("ISOLATED")).toBe("ISOLATED");
   });
 });
