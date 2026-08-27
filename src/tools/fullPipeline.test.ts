@@ -219,6 +219,57 @@ describe("whalescope_full_pipeline tool handler", () => {
     expect(gridBotConfig.lower).toBeGreaterThan(0);
     expect(gridBotConfig.stopLoss).toBeLessThan(gridBotConfig.lower);
     expect([3, 5, 10]).toContain(gridBotConfig.leverage);
+
+    // Reused fixture's OI trend is a smooth ramp (no single step dominates
+    // the net window movement) -- earlyExhaustionWarning must stay false,
+    // and rankingScore must NOT be discounted below what the same fixture
+    // produces further below with a genuine dominant-spike OI series.
+    const tier1 = r.tier1 as { oi: { changePct: number; earlyExhaustionWarning: boolean } };
+    expect(tier1.oi.earlyExhaustionWarning).toBe(false);
+  });
+
+  it("flags OI early-exhaustion (dominant single-step jump vs net window movement) and discounts rankingScore vs the equivalent non-spiked fixture", async () => {
+    // Same TRADE-favorable base as the test above, EXCEPT the last 5 points
+    // of the 24-point OI history (the 4h window compute_oi_velocity actually
+    // uses) have ONE big spike (900->1200) partially reverting (1200->1000)
+    // instead of a smooth ramp -- net window change stays positive (+100,
+    // so oiDeltaPct > 0 and BULLISH_ACCUMULATION condition-matching is
+    // unaffected), but the single 300-point step dwarfs the ~200-point net
+    // OLS-fitted movement, so this SHOULD trigger the structural
+    // maxStepDelta > netChangeAbs rule.
+    vi.mocked(binanceProxy.getAggTrades).mockResolvedValue(makeAggTrades(70));
+    vi.mocked(binanceProxy.getOpenInterestHistNative).mockImplementation(async (_symbol, _period, limit) => {
+      if (limit === 24) {
+        const base = [900, 900, 900, 900, 900, 900, 900, 900, 900, 900, 900, 900, 900, 900, 900, 900, 900, 900, 900, 900, 900, 900, 1200, 1000];
+        return base.map((v, i) => ({ symbol: "BTCUSDT", sumOpenInterest: String(v), sumOpenInterestValue: "0", timestamp: i * 3_600_000 }));
+      }
+      return [
+        { symbol: "BTCUSDT", sumOpenInterest: "950", sumOpenInterestValue: "0", timestamp: 0 },
+        { symbol: "BTCUSDT", sumOpenInterest: "1000", sumOpenInterestValue: "0", timestamp: 1 },
+      ];
+    });
+    vi.mocked(binanceProxy.getTopTraderPositionRatio).mockResolvedValue([
+      { symbol: "BTCUSDT", longAccount: "0.6", longShortRatio: "1.6", shortAccount: "0.4", timestamp: 0 },
+    ]);
+    vi.mocked(binanceProxy.getGlobalAccountRatio).mockResolvedValue([
+      { symbol: "BTCUSDT", longAccount: "0.4", longShortRatio: "0.6", shortAccount: "0.6", timestamp: 0 },
+    ]);
+    vi.mocked(binanceProxy.getOrderBookDepth).mockResolvedValue(makeOrderBook(7, 3));
+
+    const args = z.object(inputSchema).parse({ symbols: "BTCUSDT" });
+    const result = await handler(args);
+
+    const structured = result.structuredContent as { results: Array<Record<string, unknown>> };
+    const r = structured.results[0];
+    const tier1 = r.tier1 as { oi: { changePct: number; earlyExhaustionWarning: boolean }; smartMoney: { confidenceScore: number } };
+
+    expect(tier1.oi.changePct).toBeGreaterThan(0); // net window change still positive -- condition-matching unaffected
+    expect(tier1.oi.earlyExhaustionWarning).toBe(true);
+    expect((r.reasoning as string[]).some((line) => line.includes("Early-Exhaustion"))).toBe(true);
+    // rankingScore must be lower than the non-spiked TRADE fixture above,
+    // proving the confidence discount actually fed into scoring (not just
+    // a flag that's computed but ignored).
+    expect((r.rankingScore as number)).toBeLessThan(70);
   });
 
   it("short-circuits to NO_TRADE on hard-screen BREAKOUT rejection without calling Wave-2-only fetches", async () => {

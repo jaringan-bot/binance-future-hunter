@@ -19,6 +19,7 @@ import * as binanceProxy from "../binanceProxyClient.js";
 import type { KlineTuple } from "../binanceProxyClient.js";
 import { symbolSchema, errorResult } from "../shared.js";
 import { computeCvdFromTrades, summarizeKlines, calculateADX, type KlineCandle } from "../toolHelpers.js";
+import { computeOiVelocity } from "./oiVelocity.js";
 import { classifyRegime, type MarketRegime, type RegimeResult } from "./marketRegime.js";
 import { analyzeSmartMoneyDivergence, type MarketStructureCondition } from "../smartMoneyAnalysis.js";
 import {
@@ -98,7 +99,7 @@ export interface Tier1Section {
   mm: { totalScore: number; tier: MmTier; activeSignals: string[] };
   obi: { depth5: number; depth10: number; depth20: number };
   cvd: { buyPct: number; cvd: number };
-  oi: { changePct: number };
+  oi: { changePct: number; earlyExhaustionWarning: boolean };
   regime1h: RegimeResult;
   regime4h: RegimeResult;
 }
@@ -363,11 +364,43 @@ export async function runPipelineForSymbol(symbol: string, opts: PipelineOpts): 
     const topTraderPositionRatio = topTraderLatest ? parseFloat(topTraderLatest.longShortRatio) : 1;
     const globalAccountRatio = globalLatest ? parseFloat(globalLatest.longShortRatio) : 1;
 
-    const oiValuesWave2 = oiHist24.map((p) => parseFloat(p.sumOpenInterest));
-    const oiDelta4hPct =
-      oiValuesWave2.length >= 5 && oiValuesWave2[oiValuesWave2.length - 5] !== 0
-        ? ((oiValuesWave2[oiValuesWave2.length - 1] - oiValuesWave2[oiValuesWave2.length - 5]) / oiValuesWave2[oiValuesWave2.length - 5]) * 100
-        : 0;
+    // OI trend 4-jam smart-money (2026-08-27): DULU 2-point endpoint delta
+    // (index len-1 vs len-5 dari 24 titik oiHist24 yang di-fetch) -- SAMA
+    // bug class yang diperbaiki di compute_funding_velocity (endpoint delta
+    // bisa "flat" walau ada spike di tengah window). Sekarang reuse
+    // computeOiVelocity() (oiVelocity.ts, fungsi murni SAMA yang dipakai
+    // whalescope_get_oi_velocity, TIDAK diduplikasi) -- OLS penuh atas 5
+    // titik terakhir (window 4 jam TETAP SAMA, cuma metodenya yang
+    // diganti) + maxStepDelta. oiHist24 SUDAH difetch di atas (limit=24,
+    // shape OpenInterestHistPoint identik dengan yang computeOiVelocity
+    // terima) -- ZERO subrequest tambahan.
+    const OI_SMART_MONEY_WINDOW_POINTS = 5; // 5 titik x 1h = 4 jam, window yang SAMA dengan kode lama
+    let oiDelta4hPct = 0;
+    let oiEarlyExhaustionWarning = false;
+    if (oiHist24.length >= OI_SMART_MONEY_WINDOW_POINTS) {
+      const oiVelocityResult = computeOiVelocity(oiHist24, OI_SMART_MONEY_WINDOW_POINTS);
+      if (!oiVelocityResult.errorCode) {
+        const windowHours = (oiVelocityResult.windowEndMs - oiVelocityResult.windowStartMs) / 3_600_000;
+        const netChangeAbs = oiVelocityResult.oiVelocityPerHour * windowHours;
+        const firstValueInWindow = parseFloat(oiHist24[oiHist24.length - OI_SMART_MONEY_WINDOW_POINTS].sumOpenInterest);
+        oiDelta4hPct = firstValueInWindow !== 0 ? (netChangeAbs / firstValueInWindow) * 100 : 0;
+
+        // EARLY-EXHAUSTION (2026-08-27): "satu lompatan mendominasi"
+        // didefinisikan SECARA STRUKTURAL -- |maxStepDelta| (lompatan
+        // 1-step terbesar) > |netChangeAbs| (pergerakan BERSIH sepanjang
+        // window) -- dibandingkan ke kuantitas lain dari perhitungan yang
+        // SAMA, BUKAN ke rasio eksternal yang ditebak (mis. "3x"), jadi
+        // gak nambah konstanta arbitrer baru. KETERBATASAN JUJUR: rule
+        // asli di skill files juga mensyaratkan "no confirmed reversal"
+        // setelah lompatan -- itu TIDAK bisa dicek di sini karena
+        // computeOiVelocity() cuma balikin magnitude absolut maxStepDelta
+        // (gak ada arah atau posisi lompatannya dalam array). Rule di
+        // bawah ini CUMA ngecek "ada lompatan dominan", bukan "lompatan
+        // itu gak dikonfirmasi reversal" -- disederhanakan secara EKSPLISIT,
+        // bukan diam-diam.
+        oiEarlyExhaustionWarning = Math.abs(oiVelocityResult.maxStepDelta) > Math.abs(netChangeAbs);
+      }
+    }
 
     const obi = { depth5: obiAtDepth(orderBook, 5), depth10: obiAtDepth(orderBook, 10), depth20: obiAtDepth(orderBook, 20) };
 
@@ -381,6 +414,24 @@ export async function runPipelineForSymbol(symbol: string, opts: PipelineOpts): 
       orderBookImbalancePct: obi.depth20,
       priceBias: priceBias24h,
     });
+
+    // Discount POST-HOC di layer orchestration (fullPipeline.ts), BUKAN di
+    // dalam analyzeSmartMoneyDivergence()/scoreTier1Signals() -- kedua fungsi
+    // murni itu TETAP tidak diubah/tidak diduplikasi mathnya. Multiplier 0.5
+    // REUSE konvensi yang SUDAH ada di scoreTier1Signals() (pipelineEngine.ts)
+    // buat SHORT_SQUEEZE_RISK ("sinyal directionally-relevant tapi kurang
+    // pasti" -> confidence x0.5) -- BUKAN angka baru yang ditebak.
+    const EARLY_EXHAUSTION_CONFIDENCE_MULTIPLIER = 0.5;
+    const effectiveSmartMoneyConfidence = oiEarlyExhaustionWarning
+      ? smartMoney.confidenceScore * EARLY_EXHAUSTION_CONFIDENCE_MULTIPLIER
+      : smartMoney.confidenceScore;
+
+    if (oiEarlyExhaustionWarning) {
+      preHardScreenNotes.push(
+        `OI Early-Exhaustion: lompatan 1-step OI melebihi net movement window 4 jam -- smart money confidence didiskon x${EARLY_EXHAUSTION_CONFIDENCE_MULTIPLIER} ` +
+          `(dari ${smartMoney.confidenceScore.toFixed(1)} jadi ${effectiveSmartMoneyConfidence.toFixed(1)}) sebelum masuk scoring Tier-1.`,
+      );
+    }
 
     // 6 skor MM murni (detectMmActivity.ts) -- REUSE cvd/oiChangePct dari
     // Wave 1 dan klines 1h Wave 1 (slice 20 candle terakhir, sama seperti
@@ -435,7 +486,7 @@ export async function runPipelineForSymbol(symbol: string, opts: PipelineOpts): 
     const tier1ScoreInput: Tier1ScoreInput = {
       mmTotalScore,
       smartMoneyCondition: smartMoney.condition,
-      smartMoneyConfidenceScore: smartMoney.confidenceScore,
+      smartMoneyConfidenceScore: effectiveSmartMoneyConfidence,
       regime1h,
       regime4h,
       obiBidPct20: obi.depth20,
@@ -579,7 +630,10 @@ export async function runPipelineForSymbol(symbol: string, opts: PipelineOpts): 
       mm: { totalScore: mmTotalScore, tier: mmTier, activeSignals: activeMmSignals },
       obi,
       cvd: { buyPct: cvd.buyPct, cvd: cvd.cvd },
-      oi: { changePct: oiChangePct },
+      // changePct = OI delta Wave 1 (oiHist2, ~1h, dipakai regime/hardScreen/
+      // mmSignals) -- BEDA dari oiDelta4hPct (Wave 2, window 4 jam, dipakai
+      // smart money divergence, itu yang di-flag earlyExhaustionWarning ini).
+      oi: { changePct: oiChangePct, earlyExhaustionWarning: oiEarlyExhaustionWarning },
       regime1h,
       regime4h,
     };
