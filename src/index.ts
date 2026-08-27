@@ -3,7 +3,7 @@ import { createServer } from "./server.js";
 import * as binanceProxy from "./binanceProxyClient.js";
 import * as kvConfig from "./kvConfig.js";
 import * as d1Client from "./d1Client.js";
-import { SNAPSHOT_WATCHLIST, HYPERLIQUID_WHALE_WATCHLIST } from "./shared.js";
+import { SNAPSHOT_WATCHLIST, WALL_SCAN_WATCHLIST, HYPERLIQUID_WHALE_WATCHLIST } from "./shared.js";
 import { computeMmSignals } from "./tools/detectMmActivity.js";
 import { isAuthorized } from "./adminUsage.js";
 import { scanWallCandidates } from "./cron/wallTrackingCron.js";
@@ -237,7 +237,10 @@ export default {
   // Empat Cron Trigger (lihat [triggers] di wrangler.toml), dibedakan lewat
   // event.cron string:
   // - WALL_SCAN_CRON (*/1, tiap 1 menit): scan wall kandidat order book
-  //   untuk SNAPSHOT_WATCHLIST -> wall_tracking (dibaca
+  //   untuk WALL_SCAN_WATCHLIST (shared.ts -- subset 15 pair pertama dari
+  //   SNAPSHOT_WATCHLIST by market cap, BUKAN full 50, cut manual buat
+  //   nurunin overage Vercel Hobby -- WALL_SCAN adalah ~95% driver-nya
+  //   karena getOrderBookDepth NO_CACHE by design) -> wall_tracking (dibaca
   //   binance_get_orderbook_wall_persistence).
   // - ENTRY_ALERT_CRON (7,22,37,52 -- tiap 15 menit, offset dari grid */5 &
   //   */15 lainnya): whalescope_full_pipeline penuh untuk top-200 pair
@@ -277,7 +280,7 @@ export default {
     if (event.cron === WALL_SCAN_CRON) {
       ctx.waitUntil(
         Promise.all(
-          SNAPSHOT_WATCHLIST.map(async (symbol) => {
+          WALL_SCAN_WATCHLIST.map(async (symbol) => {
             try {
               await scanWallCandidates(symbol);
             } catch (err) {

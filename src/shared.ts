@@ -88,6 +88,19 @@ export const SNAPSHOT_WATCHLIST = [
   "ALGOUSDT",
 ] as const;
 
+// Watchlist WALL_SCAN_CRON (tiap 1 menit, getOrderBookDepth NO_CACHE) --
+// subset 15 pair pertama dari SNAPSHOT_WATCHLIST (market cap tertinggi),
+// BUKAN full 50. Cut manual, bukan adaptive filter (lihat Task F -- adaptive
+// tiering butuh state-management yang gak sepadan buat pengurangan marginal
+// di atas cut statis ini). Alasan: WALL_SCAN adalah ~95% driver overage
+// Vercel Hobby (240% limit invocation/bulan) karena getOrderBookDepth
+// NO_CACHE by design (butuh snapshot-to-snapshot real, gak bisa di-cache).
+// 15 pair x 1 call/menit x 43.200 menit/bulan = 648.000 call/bulan (vs 50
+// pair = 2.160.000/bulan) -- reduksi ~70%. SNAPSHOT_WATCHLIST (cron 5-menit,
+// signal_history/market_snapshots) TETAP 50 pair, TIDAK disentuh -- array
+// ini urutan-subset, bukan pengganti.
+export const WALL_SCAN_WATCHLIST = SNAPSHOT_WATCHLIST.slice(0, 15);
+
 // Address wallet whale Hyperliquid yang di-poll cron tiap 15 menit
 // (hyperliquidWhaleCron.ts) buat lacak delta posisi (akumulasi/distribusi).
 // TIDAK auto-generated -- Hyperliquid gak punya API leaderboard resmi
