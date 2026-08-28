@@ -344,7 +344,7 @@ export async function runPipelineForSymbol(
         ? Promise.resolve(prefetched.funding.get(upperSymbol)!)
         : binanceProxy.getCurrentFundingRateNative(symbol);
 
-    const [tickerResult, funding, klines1h, klines4h, oiCurrent, oiHist2, aggTrades, contextualRisk] = await Promise.all([
+    const [tickerResult, funding, klines1h, klines4h, oiCurrent, oiHist2, aggTrades] = await Promise.all([
       tickerPromise,
       fundingPromise,
       binanceProxy.getKlinesNative(symbol, "1h", klineLimit),
@@ -352,7 +352,6 @@ export async function runPipelineForSymbol(
       binanceProxy.getOpenInterestNative(symbol),
       binanceProxy.getOpenInterestHistNative(symbol, "1h", 2),
       binanceProxy.getAggTrades(symbol, 100),
-      fetchMarketContext(symbol),
     ]);
 
     // "not tradable" DIDERIVASI dari ticker24hr, BUKAN fetch exchangeInfo
@@ -446,6 +445,21 @@ export async function runPipelineForSymbol(
       getPairThreshold(symbol),
       binanceProxy.getSpotPrice(symbol).catch(() => null),
     ]);
+
+    // fetchMarketContext SEBELUMNYA di Wave 1 Promise.all dengan fetch
+    // internal sendiri (klines1h/OI/oiHist/aggTrades/topTrader = 5
+    // subrequest) -- kelimanya SUDAH di-fetch: 4 di Wave 1, topTrader di
+    // Wave 2 baris di atas. Oper langsung, nol subrequest tambahan. Pindah
+    // ke sini (post-hard-screen) juga berarti pair yang GAGAL hard-screen
+    // tidak lagi bayar fetchMarketContext sama sekali -- contextualRisk cuma
+    // dipakai di leverage loop di bawah, tidak pernah di jalur reject.
+    const contextualRisk = await fetchMarketContext(symbol, {
+      klines1h,
+      oiCurrent,
+      oiHist2,
+      aggTrades,
+      topTrader,
+    });
 
     const topTraderLatest = topTrader[topTrader.length - 1];
     const globalLatest = globalRatio[globalRatio.length - 1];

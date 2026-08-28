@@ -3,13 +3,16 @@ import * as fullPipeline from "../tools/fullPipeline.js";
 import * as binanceProxy from "../binanceProxyClient.js";
 import * as d1Client from "../d1Client.js";
 import * as telegram from "../telegram.js";
-import * as entryWatchlist from "../entryWatchlist.js";
 import { checkEntryAlertForSymbol, runEntryAlertCheck, ENTRY_ALERT_PACING_DELAY_MS } from "./entryAlertCron.js";
 import type { SymbolPipelineResult } from "../tools/fullPipeline.js";
 import * as pacing from "../pacing.js";
 
 vi.mock("../tools/fullPipeline.js", () => ({ runPipelineForSymbol: vi.fn() }));
-vi.mock("../binanceProxyClient.js", () => ({ getAllTicker24hrNative: vi.fn(), getBulkFundingRatesNative: vi.fn() }));
+vi.mock("../binanceProxyClient.js", () => ({
+  getAllTicker24hrNative: vi.fn(),
+  getBulkFundingRatesNative: vi.fn(),
+  getFuturesExchangeInfo: vi.fn(),
+}));
 vi.mock("../d1Client.js", () => ({ getEntryAlertState: vi.fn(), upsertEntryAlertState: vi.fn(), insertEntryAlertRunLog: vi.fn() }));
 vi.mock("../telegram.js", () => ({
   sendTelegramAlert: vi.fn(),
@@ -18,8 +21,37 @@ vi.mock("../telegram.js", () => ({
   // only sendTelegramAlert (the network call) is stubbed.
   escapeMarkdown: (text: string) => text.replace(/([_*`[])/g, "\\$1"),
 }));
-vi.mock("../entryWatchlist.js", () => ({ getTopUsdtPerpetualWatchlist: vi.fn() }));
+// entryWatchlist SENGAJA tidak di-mock -- selectUsdtPerpetualWatchlist murni,
+// dipakai apa adanya supaya dedup ticker24hr (1 fetch dipakai watchlist +
+// prefetch) benar-benar teruji, bukan di-bypass mock.
 vi.mock("../pacing.js", () => ({ sleep: vi.fn().mockResolvedValue(undefined) }));
+
+// Set mock exchangeInfo + ticker24hr supaya selectUsdtPerpetualWatchlist
+// menghasilkan tepat `symbols` (urutan = ranking volume desc). ticker entry
+// dilengkapi field minimum yang dipakai prefetch Map + hard-screen.
+function mockWatchlist(symbols: string[]): void {
+  vi.mocked(binanceProxy.getFuturesExchangeInfo).mockResolvedValue({
+    symbols: symbols.map((s) => ({
+      symbol: s,
+      filters: [],
+      status: "TRADING",
+      contractType: "PERPETUAL",
+      quoteAsset: "USDT",
+    })),
+  } as never);
+  vi.mocked(binanceProxy.getAllTicker24hrNative).mockResolvedValue(
+    symbols.map((s, i) => ({
+      symbol: s,
+      lastPrice: "1",
+      priceChange: "0",
+      priceChangePercent: "0",
+      highPrice: "0",
+      lowPrice: "0",
+      volume: "0",
+      quoteVolume: String(symbols.length - i),
+    })) as never,
+  );
+}
 
 function tradeResult(symbol: string): SymbolPipelineResult {
   return {
@@ -348,16 +380,14 @@ describe("runEntryAlertCheck", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.spyOn(console, "error").mockImplementation(() => {});
-    // Default: bulk fetch sukses tapi kosong -- test yang gak peduli soal
-    // prefetched (mayoritas, karena runPipelineForSymbol di-mock total)
-    // gak perlu setup ulang ini satu-satu.
-    vi.mocked(binanceProxy.getAllTicker24hrNative).mockResolvedValue([]);
+    // Default: premiumIndex sukses tapi kosong. exchangeInfo + ticker24hr
+    // di-set per-test lewat mockWatchlist().
     vi.mocked(binanceProxy.getBulkFundingRatesNative).mockResolvedValue([]);
   });
   afterEach(() => vi.restoreAllMocks());
 
   it("isolates a per-symbol failure -- one rejecting pipeline call doesn't block the other symbol", async () => {
-    vi.mocked(entryWatchlist.getTopUsdtPerpetualWatchlist).mockResolvedValue(["BTCUSDT", "ETHUSDT"]);
+    mockWatchlist(["BTCUSDT", "ETHUSDT"]);
     vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
     vi.mocked(fullPipeline.runPipelineForSymbol).mockImplementation(async (symbol: string) => {
       if (symbol === "BTCUSDT") throw new Error("pipeline blew up");
@@ -371,7 +401,7 @@ describe("runEntryAlertCheck", () => {
   });
 
   it("paces each symbol with a delay so sustained throughput stays within the entry-alert rate budget", async () => {
-    vi.mocked(entryWatchlist.getTopUsdtPerpetualWatchlist).mockResolvedValue(["BTCUSDT", "ETHUSDT", "SOLUSDT"]);
+    mockWatchlist(["BTCUSDT", "ETHUSDT", "SOLUSDT"]);
     vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
     vi.mocked(fullPipeline.runPipelineForSymbol).mockImplementation(async (symbol: string) => tradeResult(symbol));
 
@@ -382,12 +412,7 @@ describe("runEntryAlertCheck", () => {
   });
 
   it("records a run-log summary (total/errors/watch/trade tally) after processing the batch, so heartbeatCron can tell market-quiet from backend-broken", async () => {
-    vi.mocked(entryWatchlist.getTopUsdtPerpetualWatchlist).mockResolvedValue([
-      "BTCUSDT",
-      "ETHUSDT",
-      "SOLUSDT",
-      "ADAUSDT",
-    ]);
+    mockWatchlist(["BTCUSDT", "ETHUSDT", "SOLUSDT", "ADAUSDT"]);
     vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
     vi.mocked(fullPipeline.runPipelineForSymbol).mockImplementation(async (symbol: string) => {
       if (symbol === "BTCUSDT") return tradeResult(symbol); // TRADE, no error
@@ -407,13 +432,30 @@ describe("runEntryAlertCheck", () => {
     });
   });
 
+  it("fetches ticker24hr exactly once per tick -- the SAME response feeds watchlist selection and the prefetch Map (dedup, was 2 full fetches)", async () => {
+    mockWatchlist(["BTCUSDT", "ETHUSDT"]);
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
+    vi.mocked(fullPipeline.runPipelineForSymbol).mockImplementation(async (symbol: string) => tradeResult(symbol));
+
+    await runEntryAlertCheck(ENV);
+
+    expect(binanceProxy.getFuturesExchangeInfo).toHaveBeenCalledTimes(1);
+    expect(binanceProxy.getAllTicker24hrNative).toHaveBeenCalledTimes(1);
+    expect(binanceProxy.getBulkFundingRatesNative).toHaveBeenCalledTimes(1);
+  });
+
   it("bulk-fetches ticker24hr + premiumIndex once and hands both as lookup Maps into every symbol's runPipelineForSymbol call", async () => {
-    vi.mocked(entryWatchlist.getTopUsdtPerpetualWatchlist).mockResolvedValue(["BTCUSDT", "ETHUSDT"]);
+    vi.mocked(binanceProxy.getFuturesExchangeInfo).mockResolvedValue({
+      symbols: [
+        { symbol: "BTCUSDT", filters: [], status: "TRADING", contractType: "PERPETUAL", quoteAsset: "USDT" },
+        { symbol: "ETHUSDT", filters: [], status: "TRADING", contractType: "PERPETUAL", quoteAsset: "USDT" },
+      ],
+    } as never);
     vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
     vi.mocked(binanceProxy.getAllTicker24hrNative).mockResolvedValue([
       { symbol: "BTCUSDT", lastPrice: "60000", priceChange: "0", priceChangePercent: "0", highPrice: "0", lowPrice: "0", volume: "0", quoteVolume: "1000000000" },
       { symbol: "ETHUSDT", lastPrice: "3000", priceChange: "0", priceChangePercent: "0", highPrice: "0", lowPrice: "0", volume: "0", quoteVolume: "500000000" },
-    ]);
+    ] as never);
     vi.mocked(binanceProxy.getBulkFundingRatesNative).mockResolvedValue([
       { symbol: "BTCUSDT", markPrice: "60000", indexPrice: "60000", estimatedSettlePrice: "60000", lastFundingRate: "0.0001", nextFundingTime: 0, interestRate: "0", time: 0 },
       { symbol: "ETHUSDT", markPrice: "3000", indexPrice: "3000", estimatedSettlePrice: "3000", lastFundingRate: "0.0002", nextFundingTime: 0, interestRate: "0", time: 0 },
@@ -422,8 +464,6 @@ describe("runEntryAlertCheck", () => {
 
     await runEntryAlertCheck(ENV);
 
-    // getAllTicker24hrNative/getBulkFundingRatesNative -- 1 call TOTAL untuk
-    // seluruh watchlist (bukan per symbol) -- inti dari task bulk-fetch ini.
     expect(binanceProxy.getAllTicker24hrNative).toHaveBeenCalledTimes(1);
     expect(binanceProxy.getBulkFundingRatesNative).toHaveBeenCalledTimes(1);
 
@@ -442,20 +482,19 @@ describe("runEntryAlertCheck", () => {
     expect(prefetchedArg?.funding.get("BTCUSDT")?.lastFundingRate).toBe("0.0001");
   });
 
-  it("falls back to prefetched=undefined (per-symbol fetch inside runPipelineForSymbol) when the bulk fetch itself fails, without failing the whole tick", async () => {
-    vi.mocked(entryWatchlist.getTopUsdtPerpetualWatchlist).mockResolvedValue(["BTCUSDT", "ETHUSDT"]);
+  it("falls back to prefetched=undefined (per-symbol fetch inside runPipelineForSymbol) when premiumIndex bulk fetch fails, without failing the whole tick", async () => {
+    mockWatchlist(["BTCUSDT", "ETHUSDT"]);
     vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
-    vi.mocked(binanceProxy.getAllTicker24hrNative).mockRejectedValue(new Error("proxy 500"));
-    vi.mocked(binanceProxy.getBulkFundingRatesNative).mockResolvedValue([]);
+    vi.mocked(binanceProxy.getBulkFundingRatesNative).mockRejectedValue(new Error("proxy 500"));
     vi.mocked(fullPipeline.runPipelineForSymbol).mockImplementation(async (symbol: string) => tradeResult(symbol));
 
     await runEntryAlertCheck(ENV);
 
     expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining("gagal bulk fetch"),
+      expect.stringContaining("gagal bulk fetch premiumIndex"),
       expect.stringContaining("proxy 500"),
     );
-    // Tick masih jalan penuh buat kedua symbol -- bulk-fetch gagal TIDAK
+    // Tick masih jalan penuh buat kedua symbol -- premiumIndex gagal TIDAK
     // menggagalkan seluruh tick, cuma jatuh balik ke prefetched=undefined.
     expect(fullPipeline.runPipelineForSymbol).toHaveBeenCalledWith("BTCUSDT", expect.anything(), undefined);
     expect(fullPipeline.runPipelineForSymbol).toHaveBeenCalledWith("ETHUSDT", expect.anything(), undefined);

@@ -1,11 +1,33 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import * as binanceProxy from "./binanceProxyClient.js";
-import { getTopUsdtPerpetualWatchlist, ENTRY_WATCHLIST_SIZE } from "./entryWatchlist.js";
+import {
+  getTopUsdtPerpetualWatchlist,
+  selectUsdtPerpetualWatchlist,
+  ENTRY_WATCHLIST_SIZE,
+} from "./entryWatchlist.js";
 
 vi.mock("./binanceProxyClient.js", () => ({
   getFuturesExchangeInfo: vi.fn(),
   getAllTicker24hrNative: vi.fn(),
 }));
+
+describe("selectUsdtPerpetualWatchlist (pure, no fetch)", () => {
+  it("filters to TRADING USDT PERPETUAL and ranks by quote volume desc, capped at size", () => {
+    const symbols = [
+      { symbol: "BTCUSDT", filters: [], status: "TRADING", contractType: "PERPETUAL", quoteAsset: "USDT" },
+      { symbol: "ETHUSDT", filters: [], status: "TRADING", contractType: "PERPETUAL", quoteAsset: "USDT" },
+      { symbol: "OLDUSDT", filters: [], status: "SETTLING", contractType: "PERPETUAL", quoteAsset: "USDT" },
+      { symbol: "BTCUSDC", filters: [], status: "TRADING", contractType: "PERPETUAL", quoteAsset: "USDC" },
+    ];
+    const tickers = [
+      { symbol: "BTCUSDT", quoteVolume: "500" },
+      { symbol: "ETHUSDT", quoteVolume: "1000" },
+      { symbol: "OLDUSDT", quoteVolume: "999999" },
+      { symbol: "BTCUSDC", quoteVolume: "999999" },
+    ];
+    expect(selectUsdtPerpetualWatchlist(symbols as never, tickers as never, 10)).toEqual(["ETHUSDT", "BTCUSDT"]);
+  });
+});
 
 describe("getTopUsdtPerpetualWatchlist", () => {
   afterEach(() => vi.restoreAllMocks());

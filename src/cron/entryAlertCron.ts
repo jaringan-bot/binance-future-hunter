@@ -21,7 +21,7 @@ import {
 import * as binanceProxy from "../binanceProxyClient.js";
 import * as d1Client from "../d1Client.js";
 import { sendTelegramAlert, escapeMarkdown, type TelegramEnv } from "../telegram.js";
-import { getTopUsdtPerpetualWatchlist } from "../entryWatchlist.js";
+import { selectUsdtPerpetualWatchlist } from "../entryWatchlist.js";
 import { mapWithConcurrency } from "../concurrency.js";
 import { TRADE_RANKING_SCORE_THRESHOLD } from "../pipelineEngine.js";
 import * as pacing from "../pacing.js";
@@ -181,37 +181,51 @@ export async function checkEntryAlertForSymbol(
   return { decision: result.decision, hadError: result.error != null };
 }
 
-// Bulk-fetch ticker24hr + premiumIndex SEKALI di awal tick (tanpa symbol
-// param, Binance balikin semua pair) -- gantiin 2 dari ~8-13 call per-symbol
-// Wave 1 (getTicker24hrNative + getCurrentFundingRateNative di
-// fullPipeline.ts) yang tadinya kepanggil 500x/tick jadi cuma 2 call total.
-// SENGAJA try/catch terpisah dari fan-out di bawah -- kalau bulk fetch ini
-// gagal, `prefetched` tetap undefined dan checkEntryAlertForSymbol ->
-// runPipelineForSymbol jatuh balik ke call per-symbol lama (PrefetchedTickerFunding
-// opsional), bukan bikin seluruh tick gagal cuma gara-gara 1 dari 2 call ini.
-async function fetchBulkTickerFunding(): Promise<PrefetchedTickerFunding | undefined> {
+interface WatchlistBundle {
+  watchlist: string[];
+  prefetched: PrefetchedTickerFunding | undefined;
+}
+
+// Resolve watchlist + prefetch Map ticker24hr/premiumIndex dalam SATU set
+// fetch per tick. Dulu 4 subrequest: getFuturesExchangeInfo +
+// getAllTicker24hrNative (di getTopUsdtPerpetualWatchlist) + LAGI
+// getAllTicker24hrNative + getBulkFundingRatesNative (di fetchBulkTickerFunding
+// lama). Sekarang 3: exchangeInfo + ticker24hr + premiumIndex, masing-masing
+// SEKALI -- response ticker24hr yang SAMA dipakai buat seleksi watchlist DAN
+// Map prefetch.
+//
+// exchangeInfo + ticker24hr WAJIB sukses: tanpa keduanya tidak ada watchlist
+// dan tick tidak bisa jalan (perilaku sama dengan getTopUsdtPerpetualWatchlist
+// lama yang throw). premiumIndex TERPISAH try/catch: gagal di situ = prefetched
+// undefined -> runPipelineForSymbol jatuh balik ke fetch ticker+funding
+// per-symbol (PrefetchedTickerFunding opsional), BUKAN menggagalkan tick.
+async function resolveWatchlistAndPrefetch(): Promise<WatchlistBundle> {
+  const [exchangeInfo, tickerList] = await Promise.all([
+    binanceProxy.getFuturesExchangeInfo(),
+    binanceProxy.getAllTicker24hrNative(),
+  ]);
+  const watchlist = selectUsdtPerpetualWatchlist(exchangeInfo.symbols, tickerList);
+
+  let prefetched: PrefetchedTickerFunding | undefined;
   try {
-    const [tickerList, fundingList] = await Promise.all([
-      binanceProxy.getAllTicker24hrNative(),
-      binanceProxy.getBulkFundingRatesNative(),
-    ]);
-    return {
+    const fundingList = await binanceProxy.getBulkFundingRatesNative();
+    prefetched = {
       ticker: new Map(tickerList.map((t) => [t.symbol, t])),
       funding: new Map(fundingList.map((f) => [f.symbol, f])),
     };
   } catch (err) {
     console.error(
-      "[entry-alert] gagal bulk fetch ticker24hr/premiumIndex, fallback ke call per-symbol:",
+      "[entry-alert] gagal bulk fetch premiumIndex, fallback ke call per-symbol:",
       (err as Error)?.message ?? String(err),
     );
-    return undefined;
+    prefetched = undefined;
   }
+  return { watchlist, prefetched };
 }
 
 export async function runEntryAlertCheck(env: TelegramEnv): Promise<void> {
-  const watchlist = await getTopUsdtPerpetualWatchlist();
   const now = Date.now();
-  const prefetched = await fetchBulkTickerFunding();
+  const { watchlist, prefetched } = await resolveWatchlistAndPrefetch();
   const outcomes = await mapWithConcurrency(watchlist, CONCURRENCY, async (symbol): Promise<AlertCheckOutcome> => {
     try {
       return await checkEntryAlertForSymbol(symbol, env, now, prefetched);
