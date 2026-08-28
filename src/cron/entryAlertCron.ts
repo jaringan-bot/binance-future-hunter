@@ -32,7 +32,13 @@ const COOLDOWN_MS = 4 * 60 * 60 * 1000;
 // Concurrency rendah (bukan default 6 whalescope_full_pipeline) -- watchlist
 // di sini jauh lebih besar (400 vs maks 20/tool-call), jaga jarak dari
 // MAX_REQUESTS_PER_WINDOW (rateLimiter.ts).
-const CONCURRENCY = 4;
+//
+// 4 -> 3 (2026-08-28): tiap whalescope_full_pipeline internal burst ~8 fetch
+// paralel (2-wave). 4 pipeline paralel = ~32 request simultan -> spike rate
+// yang trip Binance `-1003` walau rata-rata jauh di bawah limit. 3 nurunin
+// peak burst ~25%, wall-clock ~8.7 menit (250 pair / 3, masih < cap 15 menit).
+// Bagian mitigasi IP rate-ban ([[project_whalescope_vps_ip_ratelimit]]).
+const CONCURRENCY = 3;
 
 // PACING -- ditemukan live 2026-08-25 via wrangler tail: tanpa delay ini,
 // 355/400 pair di watchlist gagal dalam 1 tick (346 kena RateLimitError

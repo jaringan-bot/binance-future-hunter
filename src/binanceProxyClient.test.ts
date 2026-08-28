@@ -129,6 +129,15 @@ describe("binanceProxyClient proxy failover", () => {
     expect(String(fetchMock.mock.calls[1][0])).toContain("secondary.example");
   });
 
+  it("on a 418 with no secondary, surfaces the 418 rather than failing over to direct", async () => {
+    setProxyConfig("https://primary.example", "secret1"); // no secondary, direct enabled by default
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ code: -1003, msg: "IP banned" }, 418));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getCurrentFundingRateNative("BTCUSDT")).rejects.toThrow(/418/);
+    expect(fetchMock).toHaveBeenCalledTimes(1); // did NOT try direct
+  });
+
   it("round-robins the first-tried endpoint across calls when both are configured", async () => {
     setProxyConfig("https://primary.example", "secret1", "https://secondary.example", "secret2");
     const fetchMock = vi.fn().mockImplementation(() => jsonResponse(fundingBody, 200));
