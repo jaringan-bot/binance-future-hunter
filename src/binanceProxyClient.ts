@@ -359,12 +359,14 @@ async function callProxy<T>(
       const status = err instanceof BinanceProxyError ? err.status : undefined;
       const isFailoverWorthy = status === undefined || FAILOVER_STATUS.has(status);
       let nextTier = tiers[i + 1];
-      // A 418 is a Binance IP weight-ban. Failing over to another RELAY IP
-      // (secondary) can help; failing over to `direct` cannot -- direct is
-      // WAF-blocked from the CF edge anyway, and hitting Binance again mid-ban
-      // just risks extending it. So for a 418, skip a `direct` next tier and
-      // surface the informative 418 instead of a WAF 403.
-      if (status === 418 && nextTier?.label === "direct") nextTier = undefined as unknown as ProxyTier;
+      // 418 (IP weight-ban) and 451 (geo-block) both mean "this path can't
+      // reach Binance right now". Falling over to `direct` (worker -> Binance
+      // from the CF edge) cannot help: it is WAF-blocked, and for 451 the CF
+      // edge is often in the same restricted region. Skip `direct` for these
+      // and surface the real status instead of a WAF 403.
+      if ((status === 418 || status === 451) && nextTier?.label === "direct") {
+        nextTier = undefined as unknown as ProxyTier;
+      }
       if (!isFailoverWorthy || !nextTier) throw err;
       console.log(`[proxy-failover] ${tiers[i].label} gagal (${status ?? "network error"}), coba ${nextTier.label} untuk ${path}`);
     }

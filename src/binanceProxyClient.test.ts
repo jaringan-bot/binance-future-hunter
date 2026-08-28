@@ -138,6 +138,18 @@ describe("binanceProxyClient proxy failover", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1); // did NOT try direct
   });
 
+  it("a 451 on the last relay tier does not fall through to direct", async () => {
+    setProxyConfig("https://primary.example", "secret1", "https://secondary.example", "secret2");
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ code: -1003 }, 418)) // primary banned
+      .mockResolvedValueOnce(jsonResponse("<html>451</html>", 451)); // secondary geo-blocked
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getCurrentFundingRateNative("BTCUSDT")).rejects.toThrow(/451/);
+    expect(fetchMock).toHaveBeenCalledTimes(2); // primary + secondary, NOT direct
+  });
+
   it("round-robins the first-tried endpoint across calls when both are configured", async () => {
     setProxyConfig("https://primary.example", "secret1", "https://secondary.example", "secret2");
     const fetchMock = vi.fn().mockImplementation(() => jsonResponse(fundingBody, 200));
