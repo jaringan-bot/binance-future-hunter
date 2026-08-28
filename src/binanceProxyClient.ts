@@ -29,6 +29,7 @@ const SHORT_CACHE_PATHS = new Set([
   "/fapi/v2/ticker/price",
   "/api/v3/ticker/price",
   "/api/v3/ticker/24hr",
+  "/api/v3/ticker",
   "/api/v3/ticker/bookTicker",
   "/fapi/v1/symbolAdlRisk",
   "/fapi/v1/insuranceBalance",
@@ -93,6 +94,7 @@ const PROXY_ALLOWED_PATHS = new Set([
   "/futures/data/basis",
   "/api/v3/ticker/price",
   "/api/v3/ticker/24hr",
+  "/api/v3/ticker",
   "/api/v3/ticker/bookTicker",
   "/api/v3/depth",
   "/api/v3/klines",
@@ -507,6 +509,19 @@ export interface SpotTicker24hr {
 }
 export async function getSpotTicker24hr(symbol: string): Promise<SpotTicker24hr> {
   return callProxy<SpotTicker24hr>("/api/v3/ticker/24hr", { symbol: symbol.toUpperCase() }, "spot");
+}
+
+export interface SpotRollingTicker {
+  symbol: string; priceChange: string; priceChangePercent: string; weightedAvgPrice: string;
+  openPrice: string; highPrice: string; lowPrice: string; lastPrice: string;
+  volume: string; quoteVolume: string;
+  openTime: number; closeTime: number; firstId: number; lastId: number; count: number;
+}
+// Rolling-window ticker (/api/v3/ticker) -- arbitrary windowSize 1m-7d,
+// beda dari /api/v3/ticker/24hr yang fixed 24 jam. Buat baca momentum
+// spot di jendela 1h/4h dsb.
+export async function getSpotRollingTicker(symbol: string, windowSize: string): Promise<SpotRollingTicker> {
+  return callProxy<SpotRollingTicker>("/api/v3/ticker", { symbol: symbol.toUpperCase(), windowSize }, "spot");
 }
 
 export interface SpotBookTicker { symbol: string; bidPrice: string; bidQty: string; askPrice: string; askQty: string; }

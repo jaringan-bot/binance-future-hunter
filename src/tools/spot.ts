@@ -442,6 +442,81 @@ export function registerSpotTools(server: McpServer): void {
   );
 
 
+  // ─────────────────────────────────────────────────────────────
+  // SPOT ROLLING-WINDOW TICKER — /api/v3/ticker, jendela bebas 1m-7d.
+  // Beda dari binance_get_spot_ticker_24hr yang fixed 24 jam: ini buat
+  // baca momentum spot di jendela pendek (1h/4h) atau panjang (3d/7d)
+  // tanpa harus hitung sendiri dari klines.
+  // ─────────────────────────────────────────────────────────────
+  registerSafeTool(
+    server,
+    "binance_get_spot_rolling_ticker",
+    {
+      title: "Ticker Spot Jendela Bebas (rolling window)",
+      description:
+        "Statistik SPOT untuk jendela waktu BEBAS (windowSize 1m-59m / 1h-23h / 1d-7d, default 1h) -- harga buka/tutup, " +
+        "high/low, %change, VWAP, volume. Beda dari binance_get_spot_ticker_24hr yang fixed 24 jam. Buat baca momentum " +
+        "spot di timeframe pilihan tanpa derivasi manual dari klines.",
+      inputSchema: {
+        symbol: symbolSchema,
+        windowSize: z
+          .string()
+          .regex(
+            /^([1-9]|[1-5][0-9])m$|^([1-9]|1[0-9]|2[0-3])h$|^[1-7]d$/,
+            "windowSize harus format seperti '30m', '1h', '4h', '3d' (1-59m / 1-23h / 1-7d)",
+          )
+          .optional()
+          .default("1h"),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ symbol, windowSize }) => {
+      try {
+        const t = await binanceProxy.getSpotRollingTicker(symbol, windowSize);
+        const open = parseFloat(t.openPrice);
+        const last = parseFloat(t.lastPrice);
+        const high = parseFloat(t.highPrice);
+        const low = parseFloat(t.lowPrice);
+        const changePct = parseFloat(t.priceChangePercent);
+        const rangePct = low > 0 ? ((high - low) / low) * 100 : 0;
+
+        const text = [
+          `# Ticker Spot (${windowSize}) — ${symbol}`,
+          ``,
+          `- Buka: ${fmtPrice(open)}  →  Terakhir: ${fmtPrice(last)}  (${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}%)`,
+          `- High / Low: ${fmtPrice(high)} / ${fmtPrice(low)}  (range ${rangePct.toFixed(2)}%)`,
+          `- VWAP: ${fmtPrice(parseFloat(t.weightedAvgPrice))}`,
+          `- Volume: ${fmtNum(parseFloat(t.volume), 2)} ${symbol.replace(/USDT$|USDC$|BUSD$/, "")} / ${fmtNum(parseFloat(t.quoteVolume), 0)} quote`,
+          `- Jumlah trade: ${t.count} (${fmtTime(t.openTime)} → ${fmtTime(t.closeTime)})`,
+        ].join("\n");
+
+        return {
+          content: [{ type: "text", text }],
+          structuredContent: {
+            symbol,
+            windowSize,
+            openPrice: open,
+            lastPrice: last,
+            high,
+            low,
+            priceChange: parseFloat(t.priceChange),
+            priceChangePercent: changePct,
+            rangePercent: rangePct,
+            weightedAvgPrice: parseFloat(t.weightedAvgPrice),
+            volume: parseFloat(t.volume),
+            quoteVolume: parseFloat(t.quoteVolume),
+            tradeCount: t.count,
+            openTime: t.openTime,
+            closeTime: t.closeTime,
+          },
+        };
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+
   registerSafeTool(
     server,
     "binance_check_spot_listing",

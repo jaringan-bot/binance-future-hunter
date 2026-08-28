@@ -93,6 +93,7 @@ const ALLOWED_PATHS_BY_MARKET = {
   spot: new Set([
     "/api/v3/ticker/price",
     "/api/v3/ticker/24hr",
+    "/api/v3/ticker",
     "/api/v3/ticker/bookTicker",
     "/api/v3/depth",
     "/api/v3/klines",

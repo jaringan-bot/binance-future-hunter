@@ -71,6 +71,7 @@ const CATALOG_METADATA: Record<string, CatalogMetadata> = {
   binance_get_spot_klines: { category: "spot", tokenCost: "medium", useCase: "Candle spot, bandingkan volatilitas vs futures", dependencies: [] },
   binance_get_spot_agg_trades: { category: "spot", tokenCost: "medium", useCase: "CVD spot riil (bukan leverage-driven)", dependencies: [] },
   binance_get_spot_avg_price: { category: "spot", tokenCost: "low", useCase: "Harga rata-rata bergerak window 5 menit", dependencies: [] },
+  binance_get_spot_rolling_ticker: { category: "spot", tokenCost: "low", useCase: "Statistik spot jendela bebas 1m-7d (momentum 1h/4h tanpa derivasi klines)", dependencies: [] },
   binance_check_spot_listing: { category: "spot", tokenCost: "low", useCase: "Cek apakah pair beneran listed di Binance Spot", dependencies: [] },
   binance_analyze_pair: { category: "composite", tokenCost: "high", useCase: "Overview cepat 1 pair dari 6 sudut sekaligus (raw data)", dependencies: ["funding", "oi", "ratios", "trades", "orderbook", "technical"] },
   binance_compare_symbols: { category: "composite", tokenCost: "medium", useCase: "Bandingkan 1 metrik across 2-10 pair sekaligus", dependencies: ["funding", "technical", "ratios", "trades"] },

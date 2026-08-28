@@ -6,3 +6,5 @@ dist/
 .env
 .dev.vars
 proxy/package-lock.json
+
+.claude/
