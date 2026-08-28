@@ -65,19 +65,20 @@ conversation with Claude, without needing a separate exchange dashboard.
 
 ## Weaknesses
 
-- **Not a real-time stream.** Every tool is request/response (snapshot or
-  periodic history) — no second-by-second push events (e.g. a fresh
-  liquidation happening right now). Adding that would require extra
-  infrastructure components currently out of this project's scope.
-- **No liquidation history.** The `binance_get_liquidation_history` tool
-  (previously via Coinalyze) was removed 2026-08-22 — Binance has no public
-  market-wide REST endpoint for this, and the real-time WebSocket route
-  (`!forceOrder@arr`) hits the same WAF block as `fapi.binance.com` (tested
-  directly via a Durable Object, see
-  [`docs/superpowers/specs/2026-08-11-realtime-liquidation-stream-design.md`](docs/superpowers/specs/2026-08-11-realtime-liquidation-stream-design.md)).
-  A fix needs a paid always-on relay (Vercel Pro ~$20/month or a small VPS
-  ~$5/month) — not built yet, tracked as a known limitation until there's
-  budget/need for it.
+- **Most tools are request/response.** Funding/OI/klines/order book/ratios are
+  all snapshots or periodic history. Streaming data is limited to
+  `binance_get_realtime_liquidations` + `binance_get_contract_events` (via the
+  VPS stream gateway, below) — no tick-by-tick push for price / order book.
+- **Liquidations: SAMPLED, not exhaustive.** Since 2026-08-28,
+  `binance_get_realtime_liquidations` reads a 24h buffer from an always-on
+  WebSocket (`!forceOrder@arr` via `dstream.binance.com`) held on an Oracle
+  Singapore VPS (`stream-gateway/`, outside Cloudflare — the Worker itself is
+  still WAF-blocked from Binance; `fstream.binance.com` is silently
+  black-holed from the VPS IP, `dstream` carries the same feed). Binance
+  throttles the stream to 1 event/symbol/second, so this is a sample. Still
+  enough to confirm stop-hunt liquidation clusters in
+  `binance_detect_mm_activity` (a 3rd, price-anchored, hunt-side proxy). No
+  long liquidation history (24h buffer).
 - **Initial setup needs a Vercel proxy** (required) — not plug-and-play,
   there's a one-time manual configuration step.
 - No on-chain wallet data, and no data from exchanges other than Binance
@@ -298,11 +299,13 @@ Full detail (including raw test data per claim): Section 10,
   (`/futures/data/openInterestHist`); check directly if you need a long
   range.
 - No on-chain wallet data.
-- **No liquidation history at all, PERMANENTLY REMOVED** — Binance has no
-  public market-wide REST endpoint for this, and the real-time WebSocket
-  route hits the same WAF block as `fapi.binance.com` (confirmed
-  independently 3 times). The fix would need a paid relay (~$5-20/month),
-  already explicitly declined — this status is final, not "not built yet."
+- **Liquidations are near-real-time + SAMPLED, with no long history.**
+  `binance_get_realtime_liquidations` reads a 24h buffer from the VPS stream
+  gateway (`!forceOrder@arr` via `dstream.binance.com` — `fstream.binance.com`
+  is black-holed from the VPS IP). Binance throttles to 1 event/symbol/second
+  → a sample, not every liquidation. No public market-wide REST endpoint for
+  a historical backfill. The Cloudflare Worker itself still can't open a WS
+  to Binance directly (WAF).
 - **`binance_detect_mm_activity`: spoofing is now REAL 2-snapshot
   detection** (~1-2 seconds slower because of it, explicit 1500ms gap
   between the 2 fetches — see `binance_get_orderbook_delta`), no longer a

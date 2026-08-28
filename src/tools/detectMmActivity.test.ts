@@ -95,7 +95,7 @@ describe("calculateStopHuntScore", () => {
     const result = calculateStopHuntScore({ high: 115, low: 95, open: 100.5, close: 100, prevOpen: 99, prevClose: 101, oiDropPct: -3 });
     expect(result.score).toBe(0.9);
     expect(result.evidence).toContain("forced-liquidation cascade");
-    expect(result.evidence).toContain("BUKAN data liquidation riil");
+    expect(result.evidence).toContain("bukan hitungan liquidation riil");
   });
 
   it("does not raise score when oiDropPct is above threshold (-1%, not a drop)", () => {
@@ -127,7 +127,7 @@ describe("calculateStopHuntScore", () => {
     });
     expect(result.score).toBe(0.9);
     expect(result.evidence).toContain("Konsentrasi trade agresif");
-    expect(result.evidence).toContain("BUKAN data liquidation riil");
+    expect(result.evidence).toContain("TANPA data liquidation-by-price riil");
   });
 
   it("does not raise score when aggressive sell volume is spread out, not concentrated in the wick zone", () => {
@@ -172,6 +172,60 @@ describe("calculateStopHuntScore", () => {
       trades,
     });
     expect(result.score).toBe(0.1);
+  });
+
+  function liqAt(side: "BUY" | "SELL", price: number, notionalUsd: number) {
+    return { side, price, notional_usd: notionalUsd };
+  }
+
+  it("raises the full pattern to 0.98 when a REAL liquidation cluster sits in the wick zone (hunt of longs)", () => {
+    // upper-wick / hunt-of-longs fixture, wick zone [100.5, 115].
+    // SELL liquidations (longs forced out) inside the zone, >= 3 events.
+    const liquidations = [liqAt("SELL", 108, 20000), liqAt("SELL", 111, 15000), liqAt("SELL", 113, 30000)];
+    const result = calculateStopHuntScore({
+      high: 115, low: 95, open: 100.5, close: 100, prevOpen: 99, prevClose: 101,
+      liquidations,
+    });
+    expect(result.score).toBe(0.98);
+    expect(result.evidence).toMatch(/liquidation RIIL|liquidation riil/i);
+    expect(result.evidence).not.toContain("TANPA data liquidation-by-price riil");
+  });
+
+  it("real cluster confirmation also works on the moderate tier (0.5 -> 0.72)", () => {
+    const liquidations = [liqAt("SELL", 110, 60000)]; // 1 event but >= $50k notional
+    const result = calculateStopHuntScore({
+      high: 113, low: 95, open: 101.3, close: 100, prevOpen: 99, prevClose: 100.5,
+      liquidations,
+    });
+    expect(result.score).toBe(0.72);
+  });
+
+  it("wrong-side liquidations (BUY during a hunt of longs) do not count as a real cluster", () => {
+    const liquidations = [liqAt("BUY", 108, 90000), liqAt("BUY", 111, 90000)];
+    const result = calculateStopHuntScore({
+      high: 115, low: 95, open: 100.5, close: 100, prevOpen: 99, prevClose: 101,
+      liquidations,
+    });
+    expect(result.score).toBe(0.8); // unchanged base
+  });
+
+  it("liquidations outside the wick price zone do not count", () => {
+    const liquidations = [liqAt("SELL", 96, 90000), liqAt("SELL", 97, 90000), liqAt("SELL", 98, 90000)];
+    const result = calculateStopHuntScore({
+      high: 115, low: 95, open: 100.5, close: 100, prevOpen: 99, prevClose: 101,
+      liquidations,
+    });
+    expect(result.score).toBe(0.8);
+  });
+
+  it("a real cluster outranks the 2-proxy tier (0.95 -> 0.98)", () => {
+    const trades = [tradeAt(110, 5, true), tradeAt(112, 5, true)];
+    const liquidations = [liqAt("SELL", 110, 20000), liqAt("SELL", 112, 20000), liqAt("SELL", 113, 20000)];
+    const result = calculateStopHuntScore({
+      high: 115, low: 95, open: 100.5, close: 100, prevOpen: 99, prevClose: 101,
+      oiDropPct: -3, trades, liquidations,
+    });
+    expect(result.score).toBe(0.98);
   });
 });
 

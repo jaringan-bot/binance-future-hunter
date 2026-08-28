@@ -130,17 +130,24 @@ Kekhawatiran trade-concentration (top-3 trade dominasi CVD) yang sempat muncul d
 
 ## 4. Sinyal Stop Hunt
 
-### 4.1 Liquidation Cluster (Waktu) Reversal — **DIHAPUS PERMANEN (2026-08-22)**
+### 4.1 Liquidation Cluster Reversal — **data liquidation RIIL tersedia lagi via stream gateway VPS (2026-08-28)**
 
-> ⚠️ **Section ini gak berlaku lagi, dan statusnya FINAL — bukan "belum dibangun".** `binance_get_liquidation_history` (satu-satunya sumber liquidation, via Coinalyze) dihapus — Binance gak punya REST publik market-wide buat data ini, dan jalur WebSocket real-time (`!forceOrder@arr`) kena WAF block yang sama kayak `fapi.binance.com`, dikonfirmasi independen **3 kali** (2026-08-11, 2026-08-12, dan 2026-08-22) lewat `wrangler deploy` spike test riil, lihat
-> [`docs/superpowers/specs/2026-08-11-realtime-liquidation-stream-design.md`](superpowers/specs/2026-08-11-realtime-liquidation-stream-design.md).
-> Satu-satunya solusi (relay always-on berbayar, ~$5-20/bulan, di luar Cloudflare) **sudah ditolak eksplisit oleh user** — data liquidation-by-price riil TIDAK AKAN tersedia di project ini kecuali keputusan itu berubah. Jangan disarankan lagi tanpa diminta ulang.
+> **Sejarah**: `binance_get_liquidation_history` (via Coinalyze) dihapus 2026-08-22 — Binance gak punya REST publik market-wide, dan WebSocket `fstream.binance.com` (`!forceOrder@arr`) kena block dari Cloudflare Workers/DO (3x dikonfirmasi). Solusi butuh relay always-on berbayar, yang saat itu ditolak.
 >
-> **Update 2026-08-22 — mitigasi permanen via 2 proxy independen:** sinyal `stopHunt` di `binance_detect_mm_activity` sekarang (1) cek wick SIMETRIS — upper wick (hunt of longs) DAN lower wick (hunt of shorts), dulu cuma upper wick (bug, downside stop-hunt gak pernah kedeteksi), dan (2) pakai **2 proxy forced-liquidation independen**, masing-masing bisa menaikkan confidence tier sendiri-sendiri (dan keduanya sekaligus naikkan lebih tinggi lagi):
-> - **OI-drop proxy**: open interest turun ≥2% berbarengan sama candle wick itu (REUSE OI-history fetch yang sudah ada buat sinyal `oiDivergence`, bukan fetch baru) — mass stop-out ngurangin OI.
-> - **Trade-volume concentration proxy** (baru): dari 100 aggTrades terakhir yang SUDAH di-fetch buat CVD (REUSE, bukan fetch baru), cek apakah volume trade AGRESIF searah arah hunt (sell buat hunt-of-longs, buy buat hunt-of-shorts) terkonsentrasi ≥30% TEPAT di zona harga wick candle itu (bukan tersebar di seluruh range) — proxy "ada eksekusi besar persis di level itu", dari data trade PUBLIK Binance (bukan liquidation-tagged, tapi price-anchored).
+> **2026-08-28 — infra baru bikin ini possible lagi.** Oracle VPS Singapore (`146.235.17.228`, ~$3.6/bln, bukan Cloudflare) sekarang jalanin `whale-stream-gateway` (`stream-gateway/` di repo): satu WebSocket always-on ke `dstream.binance.com/stream?streams=!forceOrder@arr/!contractInfo` (NB: `fstream.binance.com` di-black-hole dari IP SG — accept upgrade, kirim nol data; `dstream` serve feed `!forceOrder@arr` yang sama termasuk simbol USD-M dan TIDAK di-filter), buffer ke SQLite, expose `GET /stream/liquidations?symbol=&sinceMs=&minNotionalUsd=` di balik Caddy yang sama. Tool baru `binance_get_realtime_liquidations` + `binance_get_contract_events`.
 >
-> Tier: 0 proxy → 0.8/0.5 (base), 1 proxy → 0.9/0.6, 2 proxy sekaligus → 0.95/0.65. Keduanya **BUKAN data liquidation riil** — cuma korelasi (OI-drop + wick) dan (konsentrasi trade + wick), TETAP TANPA konfirmasi liquidation-by-price yang sesungguhnya (Binance gak expose trade mana yang liquidation-triggered). Lihat Section 8/11 di bawah.
+> **Feed di-SAMPEL Binance** (maks 1 event/symbol/detik) — bukan tiap liquidation. Jadi tetap dipakai sebagai **confidence-boost**, bukan trigger tunggal.
+>
+> **Sinyal `stopHunt` di `binance_detect_mm_activity` sekarang punya 3 konfirmasi** (wick SIMETRIS — upper=hunt of longs, lower=hunt of shorts — tetap prasyarat):
+> 1. **OI-drop proxy**: OI turun ≥2% berbarengan candle wick (REUSE OI-history fetch, bukan fetch baru).
+> 2. **Trade-volume concentration proxy**: dari 100 aggTrades terakhir (REUSE dari CVD), volume trade agresif searah hunt terkonsentrasi ≥30% di zona harga wick.
+> 3. **Liquidation cluster RIIL** (baru): dari stream gateway, cluster liquidasi di sisi hunt (`SELL` buat hunt-of-longs, `BUY` buat hunt-of-shorts) dengan harga DI DALAM zona wick — ≥3 event ATAU ≥$50k notional. Ini bukan proxy, ini data liquidation-by-price langsung (walau sampled). Best-effort: kalau gateway down/degraded, `computeMmSignals` pass `undefined` dan stopHunt fallback ke proxy 1+2 saja.
+>
+> **Tier** (full pattern / partial wick>0.6):
+> - cluster liquidasi RIIL ada → **0.98 / 0.72** (tertinggi, mengalahkan kombinasi proxy)
+> - else: 0 proxy → 0.8/0.5 · 1 proxy → 0.9/0.6 · 2 proxy → 0.95/0.65
+>
+> Thresholds (−2% OI, 30% konsentrasi, 3 event / $50k) semua heuristik disengaja, BELUM dikalibrasi ke data riil. Lihat Section 8/11.
 
 ---
 

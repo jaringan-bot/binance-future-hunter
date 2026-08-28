@@ -34,6 +34,7 @@ import { ToolResponseBuilder } from "../responseBuilder.js";
 import { fmtPct, fmtNum } from "../format.js";
 import { fetchOrderBookDelta, calculateSpoofingScoreFromDelta } from "./orderbookDelta.js";
 import { recordNonWatchlistQuery } from "../queryFrequency.js";
+import { fetchLiquidations } from "../streamGatewayClient.js";
 
 export interface SignalScore {
   score: number; // 0-1
@@ -110,6 +111,17 @@ const OI_DROP_THRESHOLD_PCT = -2;
 // heuristik disengaja sama seperti OI_DROP_THRESHOLD_PCT di atas.
 const WICK_ZONE_VOLUME_CONCENTRATION_THRESHOLD = 0.3;
 
+// REAL liquidation-by-price confirmation, available again since the VPS
+// stream gateway (docs/mm_detection_framework.md Section 4.1). A cluster of
+// forced liquidations ON THE HUNT SIDE, at prices INSIDE the wick zone, is
+// direct evidence -- not a proxy. Feed is Binance-sampled (1/symbol/s) so we
+// keep it a confidence BOOST on an already-passing wick+body+reversal
+// pattern, never a sole trigger. Either enough events or enough notional
+// counts; thresholds are deliberate heuristics (not calibrated), same
+// footing as OI_DROP_THRESHOLD_PCT.
+const REAL_LIQ_CLUSTER_MIN_EVENTS = 3;
+const REAL_LIQ_CLUSTER_MIN_USD = 50_000;
+
 export interface WickZoneVolumeConcentration {
   zoneVolume: number;
   totalDirectionalVolume: number;
@@ -153,8 +165,9 @@ export function calculateStopHuntScore(params: {
   prevClose: number;
   oiDropPct?: number; // % perubahan OI window yang sama, REUSE dari oiHist fetch (computeMmSignals) -- bukan fetch baru
   trades?: { p: string; q: string; m: boolean }[]; // REUSE 100 aggTrades terakhir (computeMmSignals) -- bukan fetch baru
+  liquidations?: { side: string; price: number; notional_usd: number }[]; // dari stream gateway (computeMmSignals) -- data liquidation RIIL, sampled
 }): SignalScore {
-  const { high, low, open, close, prevOpen, prevClose, oiDropPct, trades } = params;
+  const { high, low, open, close, prevOpen, prevClose, oiDropPct, trades, liquidations } = params;
   const range = high - low || 1;
   const upperWickRatio = (high - Math.max(open, close)) / range;
   const lowerWickRatio = (Math.min(open, close) - low) / range;
@@ -182,7 +195,7 @@ export function calculateStopHuntScore(params: {
 
   const hasOiDropProxy = oiDropPct !== undefined && oiDropPct <= OI_DROP_THRESHOLD_PCT;
   const oiNote = hasOiDropProxy
-    ? ` OI turun ${oiDropPct!.toFixed(2)}% bersamaan (proxy forced-liquidation cascade -- BUKAN data liquidation riil, tidak tersedia/WAF-blocked).`
+    ? ` OI turun ${oiDropPct!.toFixed(2)}% bersamaan (proxy forced-liquidation cascade -- indikasi tak-langsung, bukan hitungan liquidation riil).`
     : "";
 
   // Zona wick = bagian candle yang jadi "tusukan" (upper: dari body atas ke
@@ -197,26 +210,52 @@ export function calculateStopHuntScore(params: {
     hasVolumeProxy = volumeConcentration.concentrationRatio >= WICK_ZONE_VOLUME_CONCENTRATION_THRESHOLD;
   }
   const volumeNote = hasVolumeProxy
-    ? ` Konsentrasi trade agresif ${(volumeConcentration!.concentrationRatio * 100).toFixed(0)}% di zona wick (proxy eksekusi besar tepat di level itu -- BUKAN data liquidation riil, tidak tersedia/WAF-blocked).`
+    ? ` Konsentrasi trade agresif ${(volumeConcentration!.concentrationRatio * 100).toFixed(0)}% di zona wick (proxy eksekusi besar tepat di level itu).`
+    : "";
+
+  // REAL liquidation cluster: forced liquidations on the hunt side, at
+  // prices inside the wick zone. hunt of longs -> SELL liquidations
+  // (longs force-sold); hunt of shorts -> BUY liquidations (shorts covered).
+  let hasRealLiqCluster = false;
+  let realLiqCount = 0;
+  let realLiqNotional = 0;
+  if (direction !== null && liquidations && liquidations.length > 0) {
+    const zoneLow = direction === "longs" ? Math.max(open, close) : low;
+    const zoneHigh = direction === "longs" ? high : Math.min(open, close);
+    const wantSide = direction === "longs" ? "SELL" : "BUY";
+    for (const l of liquidations) {
+      if (l.side !== wantSide) continue;
+      if (l.price < zoneLow || l.price > zoneHigh) continue;
+      realLiqCount += 1;
+      realLiqNotional += l.notional_usd || 0;
+    }
+    hasRealLiqCluster =
+      realLiqCount >= REAL_LIQ_CLUSTER_MIN_EVENTS || realLiqNotional >= REAL_LIQ_CLUSTER_MIN_USD;
+  }
+  const realLiqNote = hasRealLiqCluster
+    ? ` Dikonfirmasi data liquidation RIIL: ${realLiqCount} event ~$${realLiqNotional.toLocaleString("en-US", { maximumFractionDigits: 0 })} di zona wick (stream gateway, feed di-sampel Binance 1/symbol/detik).`
     : "";
 
   const confirmCount = (hasOiDropProxy ? 1 : 0) + (hasVolumeProxy ? 1 : 0);
   const proxyLabel = [hasOiDropProxy ? "OI history" : null, hasVolumeProxy ? "trade-volume concentration" : null]
     .filter((v): v is string => v !== null)
     .join(" + ");
+  const liqClause = hasRealLiqCluster
+    ? "dengan konfirmasi liquidation-by-price RIIL (sampled)"
+    : "TANPA data liquidation-by-price riil (feed sampel kosong untuk zona/window ini)";
 
   if (wickRatio > 0.7 && bodyRatio < 0.2 && reversal) {
-    const score = confirmCount === 2 ? 0.95 : confirmCount === 1 ? 0.9 : 0.8;
+    const score = hasRealLiqCluster ? 0.98 : confirmCount === 2 ? 0.95 : confirmCount === 1 ? 0.9 : 0.8;
     return {
       score,
-      evidence: `Wick panjang (${(wickRatio * 100).toFixed(0)}% dari range, ${dirLabel}) + body kecil + reversal candle -- pola stop-hunt klasik.${oiNote}${volumeNote} Dari klines${proxyLabel ? ` + ${proxyLabel}` : ""}, TANPA data liquidation-by-price riil (tidak tersedia, WAF-blocked).`,
+      evidence: `Wick panjang (${(wickRatio * 100).toFixed(0)}% dari range, ${dirLabel}) + body kecil + reversal candle -- pola stop-hunt klasik.${realLiqNote}${oiNote}${volumeNote} Dari klines${proxyLabel ? ` + ${proxyLabel}` : ""}, ${liqClause}.`,
     };
   }
   if (wickRatio > 0.6) {
-    const score = confirmCount === 2 ? 0.65 : confirmCount === 1 ? 0.6 : 0.5;
+    const score = hasRealLiqCluster ? 0.72 : confirmCount === 2 ? 0.65 : confirmCount === 1 ? 0.6 : 0.5;
     return {
       score,
-      evidence: `Wick cukup panjang (${(wickRatio * 100).toFixed(0)}% dari range) tapi belum full pola stop-hunt (butuh body kecil + reversal searah wick).${oiNote}${volumeNote}`,
+      evidence: `Wick cukup panjang (${(wickRatio * 100).toFixed(0)}% dari range) tapi belum full pola stop-hunt (butuh body kecil + reversal searah wick).${realLiqNote}${oiNote}${volumeNote}`,
     };
   }
   return { score: 0.1, evidence: `Tidak ada wick signifikan (${(wickRatio * 100).toFixed(0)}% dari range).` };
@@ -323,6 +362,19 @@ export async function computeMmSignals(symbol: string): Promise<MmSignals> {
     spotPrice = null;
   }
 
+  // REAL liquidation-by-price for the stop-hunt signal, from the VPS stream
+  // gateway. Best-effort: if the gateway is down / degraded, stopHunt falls
+  // back to its OI-drop + trade-concentration proxies. Last ~90 min covers
+  // the current 1h wick candle; calculateStopHuntScore filters to the wick
+  // price zone + hunt side itself.
+  let recentLiquidations: { side: string; price: number; notional_usd: number }[] | undefined;
+  try {
+    const liq = await fetchLiquidations({ symbol, sinceMs: Date.now() - 90 * 60 * 1000, limit: 500 });
+    if (!liq.degraded) recentLiquidations = liq.events;
+  } catch {
+    recentLiquidations = undefined;
+  }
+
   const cvd = computeCvdFromTrades(aggTrades);
   const { changePct: priceChangePct, candles } = summarizeKlines(klines);
   const lastCandle = candles[candles.length - 1];
@@ -367,6 +419,9 @@ export async function computeMmSignals(symbol: string): Promise<MmSignals> {
           // di atas) -- gak fetch baru. 100 trade terakhir juga cuma approksimasi
           // window candle wick ini (bukan time-bounded ke candle itu spesifik).
           trades: aggTrades,
+          // Data liquidation RIIL dari stream gateway (undefined kalau gateway
+          // down/degraded -- stopHunt fallback ke proxy).
+          liquidations: recentLiquidations,
         })
       : { score: 0.1, evidence: "Candle tidak cukup untuk analisis stop-hunt." },
     basisArb: calculateBasisArbScore({
@@ -394,12 +449,13 @@ export function registerMmDetectionTools(server: McpServer): void {
         "1 skor + tier (Weak/Moderate/Strong/Extreme) -- ganti 5-6 tool call manual. BUKAN rekomendasi trading. " +
         "Spoofing pakai 2-snapshot order book RIIL (~1-2 detik lebih lambat dari tool lain karenanya, sama " +
         "mekanisme dengan binance_get_orderbook_delta) -- BUKAN heuristik 1-snapshot lagi. Stop-hunt cek wick " +
-        "simetris + 2 proxy independen (OI-drop dan konsentrasi trade agresif per level harga di zona wick, " +
-        "reuse fetch yang sudah ada) buat confidence forced-liquidation lebih tinggi, TETAP TANPA data " +
-        "liquidation-by-price riil (tidak tersedia, WAF-blocked, permanen) -- lihat docs/mm_detection_framework.md " +
-        "untuk batasan lengkap. Confidence tiap sinyal beda-beda: spoofing/basisArb/fundingExtreme pakai data " +
-        "resmi Binance langsung (lebih tinggi), stop-hunt masih proxy tak-langsung (lebih rendah, evidence text " +
-        "tiap response bilang proxy mana yang aktif). Snapshot juga disimpan tiap 5 menit ke D1 " +
+        "simetris + 2 proxy independen (OI-drop, konsentrasi trade agresif di zona wick) DAN -- sejak stream " +
+        "gateway VPS -- data liquidation-by-price RIIL (cluster liquidasi di zona wick, sisi hunt); feed di-sampel " +
+        "Binance (1/symbol/detik) jadi tetap confidence-boost di atas pola wick+body+reversal, bukan trigger " +
+        "tunggal, dan fallback ke proxy kalau gateway degraded -- lihat docs/mm_detection_framework.md untuk " +
+        "batasan lengkap. Confidence tiap sinyal beda-beda: spoofing/basisArb/fundingExtreme pakai data " +
+        "resmi Binance langsung (lebih tinggi), stop-hunt tertinggi kalau ada cluster liquidasi riil, turun ke " +
+        "proxy tak-langsung kalau tidak (evidence text tiap response bilang mana yang aktif). Snapshot juga disimpan tiap 5 menit ke D1 " +
         "(binance_backtest_signal untuk validasi empiris).",
       inputSchema: { symbol: symbolSchema },
       annotations: { readOnlyHint: true, openWorldHint: true },

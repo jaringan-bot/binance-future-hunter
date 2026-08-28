@@ -1,5 +1,16 @@
 # Real-Time Liquidation Stream — Design
 
+> **UPDATE 2026-08-28 — SUPERSEDED / dibangun dengan arsitektur berbeda.**
+> Bukan Durable Object di worker (spec di bawah), tapi komponen always-on
+> `whale-stream-gateway` di Oracle VPS Singapore (`stream-gateway/` di repo):
+> Node + `node:sqlite`, WS ke `dstream.binance.com` (BUKAN `fstream` — itu
+> di-black-hole dari IP VPS: accept upgrade, kirim nol data; `dstream` serve
+> `!forceOrder@arr` yang sama incl. simbol USD-M), HTTP read API di `/stream/*`
+> di balik Caddy yang sama dengan relay. Worker baca via `PROXY_URL`. Tools
+> `binance_get_realtime_liquidations` + `binance_get_contract_events`. Feed
+> di-sampel Binance (1/symbol/detik). Spec DO di bawah dibiarkan sebagai
+> catatan pendekatan yang tidak dipakai.
+>
 > **UPDATE 2026-08-22**: dikonfirmasi ULANG kali ketiga (sesi terpisah lagi,
 > juga belum baca spec ini dulu) — kesimpulan sama persis, WAF block WS
 > masih ada. Keputusan diambil: `binance_get_liquidation_history` (tool

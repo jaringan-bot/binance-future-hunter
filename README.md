@@ -63,19 +63,20 @@ dalam percakapan dengan Claude, tanpa perlu buka dashboard exchange terpisah.
 
 ## Kekurangan
 
-- **Bukan stream real-time.** Semua tool bersifat request/response (snapshot
-  atau histori periodik) — tidak ada push event detik-demi-detik (misalnya
-  liquidation baru terjadi). Menambah itu butuh komponen infrastruktur
-  tambahan yang di luar cakupan project ini saat ini.
-- **Tidak ada histori liquidation.** Tool `binance_get_liquidation_history`
-  (sebelumnya lewat Coinalyze) dihapus 2026-08-22 — Binance tidak punya REST
-  publik market-wide untuk data ini, dan jalur WebSocket real-time
-  (`!forceOrder@arr`) kena WAF block yang sama dengan `fapi.binance.com`
-  (dites langsung lewat Durable Object, lihat
-  [`docs/superpowers/specs/2026-08-11-realtime-liquidation-stream-design.md`](docs/superpowers/specs/2026-08-11-realtime-liquidation-stream-design.md)).
-  Solusi butuh relay always-on berbayar (Vercel Pro ~$20/bulan atau VPS kecil
-  ~$5/bulan) — belum ada, dicatat sebagai keterbatasan sampai ada budget/
-  kebutuhan buat itu.
+- **Sebagian besar tool request/response.** Funding/OI/klines/order book/ratio
+  semua snapshot atau histori periodik. Data streaming yang ada terbatas:
+  `binance_get_realtime_liquidations` + `binance_get_contract_events` (via
+  stream gateway VPS, lihat di bawah) — tidak ada push tick-by-tick untuk
+  harga / order book.
+- **Liquidation: SAMPLED, bukan lengkap.** Sejak 2026-08-28 ada
+  `binance_get_realtime_liquidations` — WebSocket `!forceOrder@arr`
+  (`dstream.binance.com`) di-buffer always-on di VPS Oracle Singapore
+  (`stream-gateway/`, di luar Cloudflare — worker Cloudflare sendiri masih
+  di-WAF-block dari Binance). Binance men-throttle stream ini maks 1
+  event/symbol/detik, jadi ini SAMPEL likuidasi, bukan tiap satu. Tetap cukup
+  buat konfirmasi cluster stop-hunt di `binance_detect_mm_activity` (proxy
+  ke-3, price-anchored & sisi-hunt). Tidak ada histori liquidation jauh ke
+  belakang (buffer 24 jam).
 - **Setup awal butuh proxy Vercel** (wajib) — bukan pasang-langsung-jalan,
   ada langkah konfigurasi manual sekali di awal.
 - Tidak ada data wallet on-chain atau data dari exchange selain Binance
@@ -292,11 +293,12 @@ Detail penuh (termasuk raw data test per klaim): Section 10,
   endpoint resmi Binance (`/futures/data/openInterestHist`), cek langsung
   kalau butuh rentang panjang.
 - Tidak ada data wallet on-chain.
-- **Tidak ada histori liquidation sama sekali, DIHAPUS PERMANEN** — Binance
-  gak punya REST publik market-wide buat data ini, dan jalur WebSocket
-  real-time kena WAF block yang sama kayak `fapi.binance.com` (dikonfirmasi
-  independen 3x). Solusinya butuh relay berbayar (~$5-20/bulan) yang sudah
-  ditolak eksplisit — status ini final, bukan "belum dibangun".
+- **Liquidation cuma near-real-time + SAMPLED, tidak ada histori panjang.**
+  `binance_get_realtime_liquidations` baca buffer 24 jam dari stream gateway
+  VPS (`!forceOrder@arr` via `dstream.binance.com` — `fstream.binance.com`
+  di-black-hole dari IP VPS). Binance throttle 1 event/symbol/detik → sampel,
+  bukan lengkap. Tidak ada REST publik market-wide buat backfill historis.
+  Worker Cloudflare sendiri masih tidak bisa WS langsung ke Binance (WAF).
 - **`binance_detect_mm_activity`: spoofing sekarang 2-snapshot RIIL**
   (~1-2 detik lebih lambat dari tool lain karenanya, jeda eksplisit 1500ms
   antar 2 fetch — lihat `binance_get_orderbook_delta`), bukan heuristik
