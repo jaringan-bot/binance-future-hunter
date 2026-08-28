@@ -13,11 +13,14 @@
 // decision-nya SAMA kayak cycle lalu tapi cooldown 4 jam sejak alert
 // terakhir sudah lewat (reminder, bukan spam tiap tick).
 import {
-  runPipelineForSymbol,
+  runDualPipelineForSymbol,
   type PipelineOpts,
   type SymbolPipelineResult,
   type PrefetchedTickerFunding,
+  type DualPipelineResult,
+  type DcaOpts,
 } from "../tools/fullPipeline.js";
+import { DCA_MODAL_DEFAULT_USD, type DcaHeadResult } from "../dcaPipelineEngine.js";
 import * as binanceProxy from "../binanceProxyClient.js";
 import * as d1Client from "../d1Client.js";
 import { sendTelegramAlert, escapeMarkdown, type TelegramEnv } from "../telegram.js";
@@ -32,6 +35,10 @@ import { fmtPrice } from "../format.js";
 // KV key buat tuning N pre-filter Wave 1 TANPA redeploy code (tulis via
 // dashboard KV / `wrangler kv key put`). Unset -> DEFAULT_ENTRY_TOP_N.
 const ENTRY_TOP_N_KV_KEY = "entry_alert:top_n";
+// KV key buat modal referensi head DCA (capital-solve base-order margin).
+// Alert tidak punya konteks saldo akun -- ini cuma angka acuan yang
+// user-scale. Unset -> DCA_MODAL_DEFAULT_USD ($200).
+const ENTRY_DCA_MODAL_KV_KEY = "entry_alert:dca_modal_usd";
 
 async function resolveEntryTopN(): Promise<number> {
   try {
@@ -39,6 +46,15 @@ async function resolveEntryTopN(): Promise<number> {
     return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : DEFAULT_ENTRY_TOP_N;
   } catch {
     return DEFAULT_ENTRY_TOP_N;
+  }
+}
+
+async function resolveDcaModalUsd(): Promise<number> {
+  try {
+    const raw = await kvConfig.getJson<number>(ENTRY_DCA_MODAL_KV_KEY);
+    return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : DCA_MODAL_DEFAULT_USD;
+  } catch {
+    return DCA_MODAL_DEFAULT_USD;
   }
 }
 
@@ -114,49 +130,91 @@ const ALERTABLE_DECISIONS = new Set(["TRADE", "WATCH"]);
 // di bawah 40 kebanjiran notif ke HP).
 export const WATCH_MIN_ALERT_SCORE = 40;
 
-function isAlertWorthy(result: SymbolPipelineResult): boolean {
+function isGridAlertWorthy(result: SymbolPipelineResult): boolean {
   if (!ALERTABLE_DECISIONS.has(result.decision)) return false;
   if (result.decision === "TRADE") return true;
   if (result.risk?.gridRisk?.status === "HIGH_RISK") return true;
   return result.rankingScore >= WATCH_MIN_ALERT_SCORE && result.rankingScore < TRADE_RANKING_SCORE_THRESHOLD;
 }
 
-const DECISION_LABEL: Record<string, string> = {
-  TRADE: "masuk TRADE (grid entry, whale-aligned)",
-  WATCH: "masuk WATCH (mendekati entry, belum layak)",
+// DCA_WATCH dari dcaPipelineEngine SUDAH berarti confidence >= 50
+// (DCA_WATCH_MIN_ALERT_SCORE); DCA_NO_TRADE = di bawah itu / reject.
+function isDcaAlertWorthy(dca: DcaHeadResult): boolean {
+  return dca.decision !== "DCA_NO_TRADE";
+}
+
+// Penanda Telegram: 🟢/🟡 grid (tak berubah), 🔵/🟠 DCA.
+const GRID_ICON: Record<string, string> = { TRADE: "🟢", WATCH: "🟡" };
+const DCA_ICON: Record<string, string> = { DCA_TRADE: "🔵", DCA_WATCH: "🟠" };
+const GRID_LABEL: Record<string, string> = {
+  TRADE: "GRID TRADE (grid entry, whale-aligned)",
+  WATCH: "GRID WATCH (mendekati entry, belum layak)",
+};
+const DCA_LABEL: Record<string, string> = {
+  DCA_TRADE: "DCA LAYAK ENTRY",
+  DCA_WATCH: "DCA TUNGGU",
 };
 
-const DECISION_ICON: Record<string, string> = {
-  TRADE: "🟢",
-  WATCH: "🟡",
-};
+function formatEntryAlert(r: DualPipelineResult): string {
+  const { grid, dca } = r;
+  const gridOn = isGridAlertWorthy(grid);
+  const dcaOn = isDcaAlertWorthy(dca);
+  const sm = grid.tier1?.smartMoney;
+  const dcaDir = dca.direction ? ` (${dca.direction})` : "";
 
-function formatEntryAlert(result: SymbolPipelineResult): string {
-  const icon = DECISION_ICON[result.decision] ?? "ℹ️";
+  const headMarkers = `${gridOn ? GRID_ICON[grid.decision] ?? "" : ""}${dcaOn ? DCA_ICON[dca.decision] ?? "" : ""}` || "ℹ️";
+  const headParts: string[] = [];
+  if (gridOn) headParts.push(escapeMarkdown(GRID_LABEL[grid.decision] ?? grid.decision));
+  if (dcaOn) headParts.push(`${escapeMarkdown(DCA_LABEL[dca.decision] ?? dca.decision)}${dcaDir}`);
+
   const lines = [
-    `${icon} *${escapeMarkdown(result.symbol)}* ${escapeMarkdown(DECISION_LABEL[result.decision] ?? result.decision)}`,
-    `📊 Ranking score: ${result.rankingScore.toFixed(1)}`,
+    `${headMarkers} *${escapeMarkdown(grid.symbol)}* — ${headParts.join(" · ")}`,
+    `📊 Grid ${grid.rankingScore.toFixed(1)}/100 · DCA ${dca.confidence}/100 · VolTier ${dca.volTier}`,
   ];
-  const g = result.gridBotConfig;
-  if (g) {
-    lines.push(
-      "",
-      `📈 Range: ${fmtPrice(g.lower)} - ${fmtPrice(g.upper)} (${escapeMarkdown(g.gridType)}, ${g.gridCount} grid)`,
-      `⚙️ Leverage: ${g.leverage ?? "-"} (${escapeMarkdown(g.marginMode)})`,
-      `🛑 SL: ${fmtPrice(g.stopLoss)}  🎯 TP: ${fmtPrice(g.takeProfit)}`,
-    );
-  }
-  const sm = result.tier1?.smartMoney;
   if (sm) {
     lines.push(
       `🐋 ${escapeMarkdown(sm.condition)} · SM Bias ${escapeMarkdown(sm.smartMoneyBias)} vs Retail ${escapeMarkdown(sm.retailSentiment)}`,
     );
   }
+
+  // ── GRID block ──
+  const g = grid.gridBotConfig;
+  if (gridOn && g) {
+    lines.push(
+      "",
+      "📈 GRID",
+      `   Range ${fmtPrice(g.lower)} – ${fmtPrice(g.upper)} (${escapeMarkdown(g.gridType)}, ${g.gridCount} grid)`,
+      `   Lev ${g.leverage ?? "-"}x ${escapeMarkdown(g.marginMode)} · SL ${fmtPrice(g.stopLoss)} · TP ${fmtPrice(g.takeProfit)}`,
+    );
+  } else if (!gridOn) {
+    lines.push("", `GRID: ${escapeMarkdown(grid.decision)}${grid.hardScreen.reasons[0] ? ` (${escapeMarkdown(grid.hardScreen.reasons[0].slice(0, 80))})` : ""}`);
+  }
+
+  // ── DCA block ──
+  const d = dca.dcaBotConfig;
+  if (dcaOn && d) {
+    lines.push(
+      "",
+      `🔷 DCA (${d.direction}, Moderate)`,
+      `   Price drop step ${d.priceDropStepPct}% · dev ×${d.priceDeviationMultiplier} · maks ${d.maxDcaOrders} order`,
+      `   TP/round ${d.takeProfitPerRoundPct}% · Lev ${d.leverage}x`,
+      `   Base/DCA order ${d.baseOrderMarginUsd} USDT (modal ref $${d.modalRefUsd})`,
+      `   SL ${d.stopLossPct}% (${fmtPrice(d.stopLossPrice)}) · est. liq ~${fmtPrice(d.estLiquidationPrice)} · proj. max loss $${d.projectedMaxLossUsd}`,
+      `   Total accumulation Base→Max DCA: ${d.totalAccumulationDistPct}%`,
+      "   ⚠️ taker-ratio & wall-persistence di-proxy; " + (dca.effCapAdx1d ? `1D cap ${dca.effCapAdx1d}` : "1D cap n/a"),
+    );
+  } else if (dcaOn && dca.decision === "DCA_WATCH") {
+    lines.push("", `🟠 DCA TUNGGU${dcaDir} — confidence ${dca.confidence}/100${dca.rejectReason ? ` (${escapeMarkdown(dca.rejectReason)})` : ""}`);
+  } else if (!dcaOn) {
+    lines.push(`DCA: Tolak${dca.rejectReason ? ` (${escapeMarkdown(dca.rejectReason)})` : ""}`);
+  }
+
   return lines.join("\n");
 }
 
 export interface AlertCheckOutcome {
-  decision: SymbolPipelineResult["decision"];
+  gridDecision: SymbolPipelineResult["decision"];
+  dcaDecision: DcaHeadResult["decision"];
   hadError: boolean;
 }
 
@@ -165,35 +223,43 @@ export async function checkEntryAlertForSymbol(
   env: TelegramEnv,
   now: number = Date.now(),
   prefetched?: PrefetchedTickerFunding,
+  dcaOpts: DcaOpts = { modalAvailableUsd: DCA_MODAL_DEFAULT_USD },
 ): Promise<AlertCheckOutcome> {
-  const result = await runPipelineForSymbol(symbol, DEFAULT_PIPELINE_OPTS, prefetched);
-  // runPipelineForSymbol NEVER throws (catch internal -- lihat JSDoc-nya),
-  // jadi kegagalan (termasuk RateLimitError self-throttle rateLimiter.ts)
-  // masuk lewat result.error, bukan exception -- log eksplisit di sini
-  // supaya kelihatan di `wrangler tail`, karena upsertEntryAlertState di
-  // bawah cuma nyimpen lastDecision (mis. "NO_TRADE"), bukan alasannya.
-  if (result.error) {
-    console.error(`[entry-alert] ${symbol}:`, result.error);
+  const r = await runDualPipelineForSymbol(symbol, DEFAULT_PIPELINE_OPTS, dcaOpts, prefetched);
+  // runDualPipelineForSymbol NEVER throws (catch internal) -- kegagalan masuk
+  // lewat grid.error, bukan exception. Log eksplisit supaya kelihatan di tail.
+  if (r.grid.error) {
+    console.error(`[entry-alert] ${symbol}:`, r.grid.error);
   }
   const previous = await d1Client.getEntryAlertState(symbol);
 
-  const isAlertable = isAlertWorthy(result);
-  const isTransition = isAlertable && previous?.lastDecision !== result.decision;
+  // Dedup: composite "grid/dca" string. Transisi = string berubah (head mana
+  // pun flip -> alert gabungan yang nunjukin state kedua head). Cooldown 4 jam
+  // pakai satu timestamp.
+  const composite = `${r.grid.decision}/${r.dca.decision}`;
+  const alertable = isGridAlertWorthy(r.grid) || isDcaAlertWorthy(r.dca);
+  const isTransition = alertable && previous?.lastDecision !== composite;
   const cooldownExpired =
-    isAlertable && previous?.lastAlertAt != null && now - previous.lastAlertAt > COOLDOWN_MS;
+    alertable && previous?.lastAlertAt != null && now - previous.lastAlertAt > COOLDOWN_MS;
 
-  if (isAlertable && (isTransition || cooldownExpired)) {
-    await sendTelegramAlert(env, formatEntryAlert(result));
-    await d1Client.upsertEntryAlertState({ symbol, lastDecision: result.decision, lastAlertAt: now });
-    return { decision: result.decision, hadError: result.error != null };
+  const outcome: AlertCheckOutcome = {
+    gridDecision: r.grid.decision,
+    dcaDecision: r.dca.decision,
+    hadError: r.grid.error != null,
+  };
+
+  if (alertable && (isTransition || cooldownExpired)) {
+    await sendTelegramAlert(env, formatEntryAlert(r));
+    await d1Client.upsertEntryAlertState({ symbol, lastDecision: composite, lastAlertAt: now });
+    return outcome;
   }
 
   await d1Client.upsertEntryAlertState({
     symbol,
-    lastDecision: result.decision,
+    lastDecision: composite,
     lastAlertAt: previous?.lastAlertAt ?? null,
   });
-  return { decision: result.decision, hadError: result.error != null };
+  return outcome;
 }
 
 interface WatchlistBundle {
@@ -290,12 +356,13 @@ export async function runEntryAlertCheck(env: TelegramEnv): Promise<void> {
   const now = Date.now();
   const { watchlist, prefetched } = await resolveWatchlistAndPrefetch();
   const analysed = await applyEntryPrefilter(watchlist, prefetched, now);
+  const dcaOpts: DcaOpts = { modalAvailableUsd: await resolveDcaModalUsd() };
   const outcomes = await mapWithConcurrency(analysed, CONCURRENCY, async (symbol): Promise<AlertCheckOutcome> => {
     try {
-      return await checkEntryAlertForSymbol(symbol, env, now, prefetched);
+      return await checkEntryAlertForSymbol(symbol, env, now, prefetched, dcaOpts);
     } catch (err) {
       console.error(`[cron] gagal entry-alert check ${symbol}:`, (err as Error)?.message ?? String(err));
-      return { decision: "NO_TRADE", hadError: true };
+      return { gridDecision: "NO_TRADE", dcaDecision: "DCA_NO_TRADE", hadError: true };
     } finally {
       await pacing.sleep(ENTRY_ALERT_PACING_DELAY_MS);
     }
@@ -303,13 +370,15 @@ export async function runEntryAlertCheck(env: TelegramEnv): Promise<void> {
 
   // Rekam tally tick ini -- heartbeatCron.ts (3x/hari) pakai ini buat
   // bedain "market emang sepi" (error rate rendah) vs "backend bermasalah"
-  // (error rate tinggi) pas gak ada alert TRADE/WATCH sama sekali dalam
-  // window lookback-nya.
+  // (error rate tinggi). watch_count/trade_count = GRID (nama kolom lama);
+  // dca_* = head DCA (observability).
   await d1Client.insertEntryAlertRunLog({
     runAt: now,
     total: outcomes.length,
     errors: outcomes.filter((o) => o.hadError).length,
-    watchCount: outcomes.filter((o) => o.decision === "WATCH").length,
-    tradeCount: outcomes.filter((o) => o.decision === "TRADE").length,
+    watchCount: outcomes.filter((o) => o.gridDecision === "WATCH").length,
+    tradeCount: outcomes.filter((o) => o.gridDecision === "TRADE").length,
+    dcaWatchCount: outcomes.filter((o) => o.dcaDecision === "DCA_WATCH").length,
+    dcaTradeCount: outcomes.filter((o) => o.dcaDecision === "DCA_TRADE").length,
   });
 }

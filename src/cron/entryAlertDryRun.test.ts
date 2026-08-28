@@ -18,6 +18,9 @@ const counts: Record<string, number> = {};
 function bump(name: string) {
   counts[name] = (counts[name] ?? 0) + 1;
 }
+// klines 1d call count -- dilacak TERPISAH dari `counts` supaya tidak
+// double-count di `total` (getKlinesNative sudah termasuk yang 1d).
+let klines1dCount = 0;
 
 // Simulasi withCache untuk /fapi/v1/exchangeInfo (STATIC_CACHE_PATHS, TTL
 // 3600s di binanceProxyClient.ts). calculateGridRisk -> fetchSymbolTradingRules
@@ -29,9 +32,9 @@ const exchangeInfoCache = new Set<string>();
 
 const PAIR_COUNT = 250;
 // Dikunci sebagai regression guard (lihat tabel di bawah).
-const DEDUP_TOTAL = 2507; // post-dedup, tanpa pre-filter (top_n >= 250)
+const DEDUP_TOTAL = 2716; // post-dedup, tanpa pre-filter (top_n>=250); +209 klines 1d (DCA head, 1/survivor)
 const SURVIVORS_NO_FILTER = 209; // pair lolos hard-screen di harness (hash ~0.84 * 250)
-const TOPN40_TOTAL = 443; // post-dedup + top_n=40, F3 (40 survivor -- F3 only selects hard-screen-passable pairs in this harness)
+const TOPN40_TOTAL = 483; // post-dedup + top_n=40 F3 (40 survivor); +40 klines 1d (DCA head)
 // Target fraksi LOLOS hard-screen dari sample live (tick 11:07 UTC 2026-08-28:
 // 156 PASS / 185 evaluated = 0.843). Diterapkan lewat pseudo-hash per symbol
 // (bukan by-index) supaya TIDAK berkorelasi dengan urutan ranking pre-filter
@@ -125,8 +128,9 @@ vi.mock("../binanceProxyClient.js", () => ({
       time: 0,
     }));
   }),
-  getKlinesNative: vi.fn(async (_s: string, _i: string, limit: number) => {
+  getKlinesNative: vi.fn(async (_s: string, interval: string, limit: number) => {
     bump("getKlinesNative");
+    if (interval === "1d") klines1dCount += 1; // head DCA, survivor only (dilacak terpisah)
     return klines(limit ?? 50);
   }),
   getOpenInterestNative: vi.fn(async (s: string) => {
@@ -170,6 +174,7 @@ vi.mock("../binanceProxyClient.js", () => ({
 
 describe("DRY-RUN: subrequest count per entry-alert tick (post-dedup)", () => {
   beforeEach(() => {
+    klines1dCount = 0;
     for (const k of Object.keys(counts)) delete counts[k];
     exchangeInfoCache.clear();
     vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
@@ -212,9 +217,10 @@ describe("DRY-RUN: subrequest count per entry-alert tick (post-dedup)", () => {
     // Inti STEP 1(b): ticker24hr + premiumIndex + exchangeInfo(no-arg) 1x each.
     expect(counts.getAllTicker24hrNative).toBe(1);
     expect(counts.getBulkFundingRatesNative).toBe(1);
-    // Wave 1 klines = 2/pair (1h + 4h), BUKAN 3 -- fetchMarketContext tidak
-    // lagi fetch klines1h sendiri.
-    expect(counts.getKlinesNative).toBe(500);
+    // Wave 1 klines = 2/pair (1h + 4h). Head DCA menambah EXACTLY 1 klines 1d
+    // per survivor (Wave 2), nol call Wave-1 lain.
+    expect(counts.getKlinesNative).toBe(500 + survivors);
+    expect(klines1dCount).toBe(survivors);
     expect(counts.getOpenInterestNative).toBe(250);
     expect(counts.getAggTrades).toBe(250);
     // Wave 2 fan-out = 1/survivor untuk kelima call + 1 exchangeInfo/survivor.
@@ -238,8 +244,9 @@ describe("DRY-RUN: subrequest count per entry-alert tick (post-dedup)", () => {
     const total = Object.values(counts).reduce((a, b) => a + b, 0);
     const survivors = counts.getTopTraderPositionRatio ?? 0;
 
-    // Cuma 40 pair masuk Wave 1: klines 2/pair, OI 1/pair, aggTrades 1/pair.
-    expect(counts.getKlinesNative).toBe(80);
+    // Cuma 40 pair masuk Wave 1: klines 1h+4h = 80, + klines 1d/survivor (DCA head).
+    expect(counts.getKlinesNative).toBe(80 + survivors);
+    expect(klines1dCount).toBe(survivors);
     expect(counts.getOpenInterestNative).toBe(40);
     expect(counts.getAggTrades).toBe(40);
     // F3 hanya memilih pair yang lolos hard-screen di harness ini -> survivor == 40.

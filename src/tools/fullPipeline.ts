@@ -34,7 +34,8 @@ import {
   type MmTier,
 } from "./detectMmActivity.js";
 import { getPairThreshold } from "./config.js";
-import { computeGridBounds, type GridBoundResult, type GridBoundOptions } from "../gridBoundEngine.js";
+import { computeGridBounds, computeATR, type GridBoundResult, type GridBoundOptions } from "../gridBoundEngine.js";
+import { evaluateDcaEntry, DCA_MODAL_DEFAULT_USD, type DcaHeadResult } from "../dcaPipelineEngine.js";
 import {
   evaluateHardScreen,
   scoreTier1Signals,
@@ -131,6 +132,17 @@ export interface GridBotConfigSection {
   stopLoss: number;
   takeProfit: number;
   marginModeCaveat: string;
+}
+
+/** Opsi head DCA -- kalau dioper ke runPipelineInternal, DCA dievaluasi dari
+ * data fetch yang SAMA (nol subrequest tambahan kecuali 1 klines 1d/survivor). */
+export interface DcaOpts {
+  modalAvailableUsd: number;
+}
+
+export interface DualPipelineResult {
+  grid: SymbolPipelineResult;
+  dca: DcaHeadResult;
 }
 
 export interface SymbolPipelineResult {
@@ -307,11 +319,54 @@ function obiAtDepth(orderBook: binanceProxy.OrderBookDepth, depth: number): numb
  * Seluruh badan fungsi dibungkus try/catch -- satu symbol gagal TIDAK PERNAH
  * throw ke pemanggil, cuma balik { decision: "NO_TRADE", error }.
  */
+// Stub DCA result buat jalur yang tidak mengevaluasi DCA (grid-only tool,
+// atau symbol yang gagal hard-screen) -- caller (entryAlertCron) memperlakukan
+// DCA_NO_TRADE sama seperti grid NO_TRADE.
+function stubDca(symbol: string, reason: string): DcaHeadResult {
+  return {
+    symbol,
+    decision: "DCA_NO_TRADE",
+    direction: null,
+    confidence: 0,
+    volTier: 1,
+    effGateAdx4h: 30,
+    effCapAdx1d: 35,
+    rejectReason: reason,
+    reasoning: [reason],
+  };
+}
+
+/**
+ * Public: grid-only decision chain, tanda tangan & output TIDAK berubah.
+ * whalescope_full_pipeline MCP tool tetap pakai ini.
+ */
 export async function runPipelineForSymbol(
   symbol: string,
   opts: PipelineOpts,
   prefetched?: PrefetchedTickerFunding,
 ): Promise<SymbolPipelineResult> {
+  return (await runPipelineInternal(symbol, opts, prefetched)).grid;
+}
+
+/**
+ * Public: grid + DCA dari SATU fetch bundle. entryAlertCron.ts pakai ini.
+ * DCA menambah paling banyak 1 subrequest/survivor (klines 1d).
+ */
+export async function runDualPipelineForSymbol(
+  symbol: string,
+  opts: PipelineOpts,
+  dcaOpts: DcaOpts,
+  prefetched?: PrefetchedTickerFunding,
+): Promise<DualPipelineResult> {
+  return runPipelineInternal(symbol, opts, prefetched, dcaOpts);
+}
+
+async function runPipelineInternal(
+  symbol: string,
+  opts: PipelineOpts,
+  prefetched?: PrefetchedTickerFunding,
+  dcaOpts?: DcaOpts,
+): Promise<DualPipelineResult> {
   const preHardScreenNotes: string[] = [];
 
   try {
@@ -428,22 +483,29 @@ export async function runPipelineForSymbol(
         gridRiskStatus: "REJECT",
       });
       return {
-        symbol,
-        decision: outcome.decision,
-        rankingScore: 0,
-        hardScreen: hardScreenSection,
-        reasoning: outcome.reasoning,
+        grid: {
+          symbol,
+          decision: outcome.decision,
+          rankingScore: 0,
+          hardScreen: hardScreenSection,
+          reasoning: outcome.reasoning,
+        },
+        // DCA: hard-screen SELALU lebih permisif dari gate DCA -- kalau grid
+        // reject di sini, DCA pasti reject juga. Nol Wave-2 call.
+        dca: stubDca(symbol, `hard_screen_reject (${hardScreen.tags.join(",") || "regime/vol/funding"})`),
       };
     }
 
     // ─── WAVE 2 (survivor only) ───
-    const [topTrader, globalRatio, oiHist24, orderBook, threshold, spotPriceResult] = await Promise.all([
+    // klines 1d cuma di-fetch kalau head DCA aktif (butuh ADX_1D + regime 1D).
+    const [topTrader, globalRatio, oiHist24, orderBook, threshold, spotPriceResult, klines1d] = await Promise.all([
       binanceProxy.getTopTraderPositionRatio(symbol, "1h", 1),
       binanceProxy.getGlobalAccountRatio(symbol, "1h", 1),
       binanceProxy.getOpenInterestHistNative(symbol, "1h", 24),
       binanceProxy.getOrderBookDepth(symbol, 50),
       getPairThreshold(symbol),
       binanceProxy.getSpotPrice(symbol).catch(() => null),
+      dcaOpts ? binanceProxy.getKlinesNative(symbol, "1d", 30).catch(() => null) : Promise.resolve(null),
     ]);
 
     // fetchMarketContext SEBELUMNYA di Wave 1 Promise.all dengan fetch
@@ -484,9 +546,11 @@ export async function runPipelineForSymbol(
     const OI_SMART_MONEY_WINDOW_POINTS = 5; // 5 titik x 1h = 4 jam, window yang SAMA dengan kode lama
     let oiDelta4hPct = 0;
     let oiEarlyExhaustionWarning = false;
+    let oiVelocityPerHour = 0; // dipakai head DCA (Capital Flow Trio)
     if (oiHist24.length >= OI_SMART_MONEY_WINDOW_POINTS) {
       const oiVelocityResult = computeOiVelocity(oiHist24, OI_SMART_MONEY_WINDOW_POINTS);
       if (!oiVelocityResult.errorCode) {
+        oiVelocityPerHour = oiVelocityResult.oiVelocityPerHour;
         const windowHours = (oiVelocityResult.windowEndMs - oiVelocityResult.windowStartMs) / 3_600_000;
         const netChangeAbs = oiVelocityResult.oiVelocityPerHour * windowHours;
         const firstValueInWindow = parseFloat(oiHist24[oiHist24.length - OI_SMART_MONEY_WINDOW_POINTS].sumOpenInterest);
@@ -773,7 +837,7 @@ export async function runPipelineForSymbol(
       );
     }
 
-    return {
+    const grid: SymbolPipelineResult = {
       symbol,
       decision: outcome.decision,
       rankingScore: tier1Score.rankingScore,
@@ -785,22 +849,63 @@ export async function runPipelineForSymbol(
       breakevenInfo,
       reasoning: [...preHardScreenNotes, ...tier1Score.notes, ...outcome.reasoning],
     };
+
+    // ─── HEAD DCA (dari data fetch yang SAMA -- 0 subrequest tambahan) ───
+    let dca: DcaHeadResult;
+    if (dcaOpts) {
+      const { candles: candles4h } = summarizeKlines(klines4h);
+      const swing4hWindow = candles4h.slice(-40);
+      const swingHigh4h = swing4hWindow.length ? Math.max(...swing4hWindow.map((c) => c.high)) : currentPrice;
+      const swingLow4h = swing4hWindow.length ? Math.min(...swing4hWindow.map((c) => c.low)) : currentPrice;
+      const regime1dFull = klines1d ? safeComputeRegime(klines1d, oiChangePct, cvd.buyPct) : null;
+      dca = evaluateDcaEntry({
+        symbol,
+        currentPrice,
+        quoteVolumeUsd,
+        fundingRate,
+        adx4h: regime4h.adx,
+        adx1d: regime1dFull ? regime1dFull.adx : null,
+        regime1d: regime1dFull ? regime1dFull.regime : null,
+        rvAnnualizedPct: realizedVolPct(candles1h),
+        atr1h: computeATR(candles1h, opts.atrPeriod),
+        atr4h: computeATR(candles4h, opts.atrPeriod),
+        smartMoneyCondition: smartMoney.condition,
+        smartMoneyBias: smartMoney.smartMoneyBias,
+        effectiveSmartMoneyConfidence,
+        oiVelocityPerHour,
+        oiDelta4hPct,
+        oiEarlyExhaustionWarning,
+        cvdBuyPct: cvd.buyPct,
+        obiDepth10: obi.depth10,
+        spoofingScore: mmSignals.spoofing.score,
+        swingHigh4h,
+        swingLow4h,
+        modalAvailableUsd: dcaOpts.modalAvailableUsd,
+      });
+    } else {
+      dca = stubDca(symbol, "dca_head_disabled");
+    }
+
+    return { grid, dca };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return {
-      symbol,
-      decision: "NO_TRADE",
-      rankingScore: 0,
-      hardScreen: {
-        passed: false,
-        reasons: [`Error internal saat memproses ${symbol}: ${message}`],
-        quoteVolumeUsd: 0,
-        fundingRate: 0,
-        regime1h: "RANGING",
-        regime4h: "RANGING",
+      grid: {
+        symbol,
+        decision: "NO_TRADE",
+        rankingScore: 0,
+        hardScreen: {
+          passed: false,
+          reasons: [`Error internal saat memproses ${symbol}: ${message}`],
+          quoteVolumeUsd: 0,
+          fundingRate: 0,
+          regime1h: "RANGING",
+          regime4h: "RANGING",
+        },
+        reasoning: [`Pipeline gagal untuk ${symbol}: ${message}. Symbol lain dalam batch yang sama TETAP diproses normal.`],
+        error: message,
       },
-      reasoning: [`Pipeline gagal untuk ${symbol}: ${message}. Symbol lain dalam batch yang sama TETAP diproses normal.`],
-      error: message,
+      dca: stubDca(symbol, `pipeline_error: ${message}`),
     };
   }
 }
