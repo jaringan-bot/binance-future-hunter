@@ -52,7 +52,14 @@ const CONCURRENCY = 4;
 //   sama seperti langkah verifikasi tiap kenaikan watchlist sebelumnya).
 // - Total durasi estimasi: 400 pair / 4 worker = 100 putaran x ~4.8 detik
 //   = ~8 menit -- jauh di bawah siklus 15 menit ke tick berikutnya.
-export const ENTRY_ALERT_PACING_DELAY_MS = 4000;
+//
+// 4000 -> 5500ms (2026-08-28): dipasangkan dengan ENTRY_WATCHLIST_SIZE
+// 350->250 (entryWatchlist.ts) + MAX_REQUESTS_PER_WINDOW 1800->1400
+// (rateLimiter.ts) setelah IP VPS relay tunggal kena Binance 418 -1003
+// weight-ban (lihat [[project_whalescope_vps_ip_ratelimit]]). 250 pair / 4
+// worker x ~6.3 detik = ~6.6 menit wall-clock (masih < 15 menit), throughput
+// entry-alert turun ke ~570 call/menit.
+export const ENTRY_ALERT_PACING_DELAY_MS = 5500;
 
 // Mirror default zod schema whalescope_full_pipeline (src/tools/fullPipeline.ts)
 // -- alert pakai parameter risiko/leverage yang SAMA dengan yang biasa dipakai

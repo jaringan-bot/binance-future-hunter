@@ -45,7 +45,15 @@ const WINDOW_MS = 60_000;
 // Exported so rateLimiter.test.ts asserts against this value instead of a
 // hardcoded copy -- a hardcoded copy is what let the test silently desync
 // from this constant when it was raised 200 -> 780 (see below).
-export const MAX_REQUESTS_PER_WINDOW = 1800;
+// 1800 -> 1400 (2026-08-28): count-based limit 1800 x avg weight ~1.5 =
+// ~2700 weight/menit, DI ATAS limit asli Binance 2400 weight/menit -- plus
+// counter ini per-isolate best-effort (bukan global), jadi real cross-isolate
+// bisa lebih tinggi lagi. IP VPS relay tunggal kena 418 -1003 weight-ban
+// (2026-08-28, lihat [[project_whalescope_vps_ip_ratelimit]]). 1400 x ~1.5 =
+// ~2100 weight -- buffer nyata ke 2400. Dipasangkan dengan ENTRY_WATCHLIST_SIZE
+// 350->250 + pacing 5500ms supaya real load turun di bawah 1400 dan wall-clock
+// tetap aman. Naikkan lagi HANYA setelah relay IP kedua (PROXY_URL_2) online.
+export const MAX_REQUESTS_PER_WINDOW = 1400;
 
 let timestamps: number[] = [];
 

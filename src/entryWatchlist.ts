@@ -25,7 +25,16 @@ import * as binanceProxy from "./binanceProxyClient.js";
 // user supaya balik ke buffer sehat (~57% cap wall-clock, estimasi
 // proporsional ~8.5 menit), coverage turun dari 500 tapi masih di atas 400
 // yang sebelumnya sukses penuh tanpa Canceled.
-export const ENTRY_WATCHLIST_SIZE = 350;
+//
+// 350 -> 250 (2026-08-28): setelah migrasi Vercel -> VPS relay, SEMUA call
+// Binance egress dari 1 IP (dulu tersebar di IP pool Vercel). IP VPS kena
+// Binance HTTP 418 -1003 weight-ban -- lihat
+// [[project_whalescope_vps_ip_ratelimit]]. entry-alert (pair terbanyak) lever
+// terbesar; 250 masih cover ~semua pair yang cukup likuid, sambil kasih
+// buffer wall-clock + weight. Dipasangkan dengan MAX_REQUESTS_PER_WINDOW
+// 1800->1400 (rateLimiter.ts) + pacing 4000->5500ms (entryAlertCron.ts).
+// Mitigasi sementara -- solusi proper = relay IP kedua (PROXY_URL_2).
+export const ENTRY_WATCHLIST_SIZE = 250;
 
 export async function getTopUsdtPerpetualWatchlist(): Promise<string[]> {
   const [exchangeInfo, tickers] = await Promise.all([
