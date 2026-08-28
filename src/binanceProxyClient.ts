@@ -129,6 +129,11 @@ interface ProxyEndpoint {
 let primaryEndpoint: ProxyEndpoint | undefined;
 let secondaryEndpoint: ProxyEndpoint | undefined;
 let directFallbackEnabled = true;
+// Round-robin cursor: when BOTH relay endpoints are configured, alternate
+// which one is tried first per call so Binance REST load splits ~50/50
+// across the two egress IPs (each relay host has its own IP + its own
+// Binance weight budget). The not-first one becomes the failover tier.
+let roundRobinCursor = 0;
 
 export function setProxyConfig(
   url: string | undefined,
@@ -140,6 +145,7 @@ export function setProxyConfig(
   primaryEndpoint = url && secret ? { url, secret } : undefined;
   secondaryEndpoint = secondaryUrl && secondarySecret ? { url: secondaryUrl, secret: secondarySecret } : undefined;
   directFallbackEnabled = enableDirectFallback;
+  roundRobinCursor = 0;
 }
 
 export class BinanceProxyError extends Error {
@@ -165,7 +171,10 @@ export class BinanceProxyError extends Error {
 // dinonaktifkan karena spend-cap/billing. Ini kondisi endpoint-level, bukan
 // symbol/param -- persis kasus yang harus failover ke secondary / direct,
 // bukan langsung dilempar ke caller.
-const FAILOVER_STATUS = new Set([401, 402, 403, 429, 500, 502, 503, 504]);
+// 418: Binance IP weight-ban (`{"code":-1003,"msg":"...IP(x) banned until..."}`).
+// Endpoint-level on the relay's egress IP, not a symbol/param error -- the
+// other relay IP (or direct) is very likely NOT banned, so fail over.
+const FAILOVER_STATUS = new Set([401, 402, 403, 418, 429, 500, 502, 503, 504]);
 
 const DIRECT_BASE_BY_MARKET: Record<"futures" | "spot", string> = {
   futures: "https://fapi.binance.com",
@@ -319,12 +328,19 @@ async function callProxy<T>(
     );
   }
   checkAndRecordRequest();
-  const tiers: ProxyTier[] = [
-    { label: "primary", run: () => callProxyEndpoint<T>(primaryEndpoint!, path, params, market) },
-  ];
+  const tiers: ProxyTier[] = [];
   if (secondaryEndpoint) {
-    const endpoint = secondaryEndpoint;
-    tiers.push({ label: "secondary", run: () => callProxyEndpoint<T>(endpoint, path, params, market) });
+    // Both configured -> round-robin the first-tried endpoint, the other is
+    // the failover tier.
+    const primaryFirst = roundRobinCursor++ % 2 === 0;
+    const a = primaryFirst ? primaryEndpoint! : secondaryEndpoint;
+    const b = primaryFirst ? secondaryEndpoint : primaryEndpoint!;
+    const aLabel = primaryFirst ? "primary" : "secondary";
+    const bLabel = primaryFirst ? "secondary" : "primary";
+    tiers.push({ label: aLabel, run: () => callProxyEndpoint<T>(a, path, params, market) });
+    tiers.push({ label: bLabel, run: () => callProxyEndpoint<T>(b, path, params, market) });
+  } else {
+    tiers.push({ label: "primary", run: () => callProxyEndpoint<T>(primaryEndpoint!, path, params, market) });
   }
   if (directFallbackEnabled) {
     tiers.push({ label: "direct", run: () => callProxyDirect<T>(path, params, market) });

@@ -115,6 +115,56 @@ describe("binanceProxyClient proxy failover", () => {
     expect(String(fetchMock.mock.calls[1][0])).toContain("secondary.example");
   });
 
+  it("fails over to the other endpoint on a 418 (Binance IP rate-ban) from primary", async () => {
+    setProxyConfig("https://primary.example", "secret1", "https://secondary.example", "secret2");
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ code: -1003, msg: "IP banned" }, 418))
+      .mockResolvedValueOnce(jsonResponse(fundingBody, 200));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await getCurrentFundingRateNative("BTCUSDT");
+    expect(result.lastFundingRate).toBe("0.0001");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[1][0])).toContain("secondary.example");
+  });
+
+  it("round-robins the first-tried endpoint across calls when both are configured", async () => {
+    setProxyConfig("https://primary.example", "secret1", "https://secondary.example", "secret2");
+    const fetchMock = vi.fn().mockImplementation(() => jsonResponse(fundingBody, 200));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getCurrentFundingRateNative("BTCUSDT");
+    await getCurrentFundingRateNative("BTCUSDT");
+    await getCurrentFundingRateNative("BTCUSDT");
+    await getCurrentFundingRateNative("BTCUSDT");
+
+    const firstHosts = fetchMock.mock.calls.map((c) => new URL(String(c[0])).host);
+    // alternating: primary, secondary, primary, secondary
+    expect(firstHosts).toEqual([
+      "primary.example",
+      "secondary.example",
+      "primary.example",
+      "secondary.example",
+    ]);
+  });
+
+  it("still falls back to the other endpoint when the round-robin-selected one fails", async () => {
+    setProxyConfig("https://primary.example", "secret1", "https://secondary.example", "secret2");
+    // call #1 tries primary first (ok). call #2 tries secondary first (fails 500) -> primary.
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(fundingBody, 200))
+      .mockResolvedValueOnce(jsonResponse({ msg: "err" }, 500))
+      .mockResolvedValueOnce(jsonResponse(fundingBody, 200));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getCurrentFundingRateNative("BTCUSDT");
+    await getCurrentFundingRateNative("BTCUSDT");
+    expect(new URL(String(fetchMock.mock.calls[1][0])).host).toBe("secondary.example");
+    expect(new URL(String(fetchMock.mock.calls[2][0])).host).toBe("primary.example");
+  });
+
   it("does NOT fail over on a non-retriable 400 (would fail identically on any tier)", async () => {
     setProxyConfig("https://primary.example", "secret1", "https://secondary.example", "secret2");
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ msg: "bad symbol" }, 400));
