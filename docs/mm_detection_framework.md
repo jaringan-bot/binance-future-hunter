@@ -111,8 +111,9 @@ Kekhawatiran trade-concentration (top-3 trade dominasi CVD) yang sempat muncul d
 - `binance_get_orderbook_delta` (2-snapshot, otomatis — lihat di bawah)
 
 > ⚠️ **Batasan teknis (tervalidasi):**
-> - Latensi per call bervariasi besar: **298–898ms** (rata-rata ~485ms) lewat proxy chain worker→Vercel→Binance.
-> - Karena itu, deteksi "refresh rate" via POLLING SECEPAT MUNGKIN (back-to-back tanpa jeda) memang tidak reliable — variasi latency antar-call terlalu besar untuk membedakan perubahan pasar vs noise jaringan murni dari timing.
+> - **Chain lama (worker→Vercel→Binance)**: latensi per call **298–898ms** (rata-rata ~485ms), spread ~600ms — polling back-to-back tidak reliable.
+> - **Chain baru (worker→VPS relay Singapura→Binance, sejak 2026-08-28)**: diukur 2026-08-28 — leg VPS→Binance **~77ms** (spread 7ms, `curl localhost:8080` 10×); full chain dari luar (my-machine ID → relay publik → Binance) **~150ms rata-rata, spread 18ms** (12×). Deployed worker (edge CF dekat SG → VPS) diperkirakan **~90–150ms, spread <30ms**. Latensi turun ~3×, variance turun ~20–30×.
+> - Konsekuensi: polling sub-detik back-to-back buat refresh-rate spoofing sekarang **feasible** buat kasus terbatas (variance jaringan sudah kecil dibanding jendela deteksi). Deteksi wall lifecycle sub-detik sungguhan tetap butuh WS `@depth@100ms` (mekanisme on-demand watch di stream gateway — spec terpisah, belum dibangun).
 
 **Kriteria deteksi (2-snapshot, via `binance_get_orderbook_delta`):**
 
@@ -122,9 +123,9 @@ Kekhawatiran trade-concentration (top-3 trade dominasi CVD) yang sempat muncul d
 | **Wall hilang DAN sisi lawan crossing harga level itu** | Eksekusi wajar (harga beneran bergerak lewat level itu), BUKAN spoofing |
 | **Anomali di snapshot tunggal** (`binance_get_order_book_depth`): wall di level tidak wajar, volume tidak proporsional | Kemungkinan spoofing — masih butuh konfirmasi sinyal lain kalau cuma 1 snapshot |
 
-> 💡 **Kenapa jeda EKSPLISIT (default 1500ms) menyelesaikan masalah latency-variance:** rekomendasi versi sebelumnya ("jangan pakai perbandingan snapshot berurutan") berasumsi 2 call dilakukan back-to-back TANPA jeda, di mana variasi latency 298-898ms bikin jarak waktu antar snapshot tidak terprediksi (bisa 300ms, bisa 900ms — beda jauh secara relatif). Dengan jeda eksplisit 1500ms yang sengaja ditunggu DI ANTARA 2 fetch, variasi latency per-call (~600ms max) jadi kecil dibanding jeda itu sendiri (~1500ms) — jarak waktu antar snapshot tetap konsisten ~1.5-2 detik, cukup buat wall spoofing (biasanya ditarik dalam hitungan detik) tapi bukan noise jaringan murni. **Trade-off**: tool ini otomatis lebih lambat ~1-2 detik dari tool 1-snapshot lain.
+> 💡 **Jeda eksplisit `binance_get_orderbook_delta` (default 1500ms) tetap default yang aman.** Dengan chain baru (spread ~20ms) jarak antar-snapshot jadi jauh lebih konsisten, tapi 1500ms tetap dipertahankan sebagai default — cukup buat wall spoofing (ditarik dalam hitungan detik) dan tidak ada alasan mengetatkannya tanpa kebutuhan. Untuk kasus yang butuh sub-detik, mekanisme on-demand depth-diff watch di stream gateway (spec terpisah) lebih tepat daripada polling REST.
 
-> ❌ **WebSocket: TIDAK TERSEDIA** di WhaleScope MCP. Semua tool berbasis REST request/response diskrit. Deteksi real-time sub-detik butuh stack terpisah di luar project ini.
+> ⚠️ **WebSocket: TERBATAS.** Stream gateway VPS pegang `!forceOrder@arr` + `!contractInfo` always-on (→ `binance_get_realtime_liquidations`, `binance_get_contract_events`). TIDAK ada stream depth/aggTrade per-symbol (high-volume, sengaja di luar scope batch ini). Deteksi refresh-rate wall sub-detik butuh tambahan on-demand depth watch — belum dibangun.
 
 ---
 
