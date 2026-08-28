@@ -1,0 +1,24 @@
+[Unit]
+Description=whale-stream-gateway (Binance forceOrder + contractInfo consumer)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=whaleproxy
+WorkingDirectory=/opt/whale-stream-gateway
+EnvironmentFile=/opt/whale-stream-gateway/.env
+Environment=STREAM_GATEWAY_PORT=8081
+Environment=STREAM_DB_PATH=/opt/whale-stream-gateway/data.db
+ExecStart=/usr/bin/node --experimental-sqlite --disable-warning=ExperimentalWarning index.mjs
+Restart=always
+RestartSec=2
+MemoryMax=256M
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/whale-stream-gateway
+
+[Install]
+WantedBy=multi-user.target
