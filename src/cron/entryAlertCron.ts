@@ -22,10 +22,25 @@ import * as binanceProxy from "../binanceProxyClient.js";
 import * as d1Client from "../d1Client.js";
 import { sendTelegramAlert, escapeMarkdown, type TelegramEnv } from "../telegram.js";
 import { selectUsdtPerpetualWatchlist } from "../entryWatchlist.js";
+import { rankEntryCandidates, DEFAULT_ENTRY_TOP_N, type EntryRankingInput } from "../entryRanking.js";
+import * as kvConfig from "../kvConfig.js";
 import { mapWithConcurrency } from "../concurrency.js";
 import { TRADE_RANKING_SCORE_THRESHOLD } from "../pipelineEngine.js";
 import * as pacing from "../pacing.js";
 import { fmtPrice } from "../format.js";
+
+// KV key buat tuning N pre-filter Wave 1 TANPA redeploy code (tulis via
+// dashboard KV / `wrangler kv key put`). Unset -> DEFAULT_ENTRY_TOP_N.
+const ENTRY_TOP_N_KV_KEY = "entry_alert:top_n";
+
+async function resolveEntryTopN(): Promise<number> {
+  try {
+    const raw = await kvConfig.getJson<number>(ENTRY_TOP_N_KV_KEY);
+    return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : DEFAULT_ENTRY_TOP_N;
+  } catch {
+    return DEFAULT_ENTRY_TOP_N;
+  }
+}
 
 const COOLDOWN_MS = 4 * 60 * 60 * 1000;
 
@@ -223,10 +238,57 @@ async function resolveWatchlistAndPrefetch(): Promise<WatchlistBundle> {
   return { watchlist, prefetched };
 }
 
+// Pre-filter Wave 1 (STEP 2a): dari watchlist penuh ambil TOP-N pair
+// (entryRanking.ts), SISANYA di-skip total. Butuh `prefetched` (funding +
+// ticker) buat sinyal ranking -- kalau premiumIndex gagal tadi (prefetched
+// undefined), pre-filter DIMATIKAN tick ini: proses watchlist penuh, JANGAN
+// diam-diam skip pair berdasarkan data yang tidak lengkap.
+async function applyEntryPrefilter(
+  watchlist: string[],
+  prefetched: PrefetchedTickerFunding | undefined,
+  now: number,
+): Promise<string[]> {
+  if (!prefetched) {
+    console.error("[entry-alert] premiumIndex tidak tersedia -- pre-filter Wave 1 dimatikan tick ini, proses watchlist penuh");
+    return watchlist;
+  }
+
+  const topN = await resolveEntryTopN();
+  if (topN >= watchlist.length) return watchlist;
+
+  const candidates: EntryRankingInput[] = watchlist.map((symbol) => {
+    const funding = prefetched.funding.get(symbol);
+    const ticker = prefetched.ticker.get(symbol);
+    const fundingAbs = funding ? Math.abs(parseFloat(funding.lastFundingRate)) : 0;
+    const priceChangePct24h = ticker ? parseFloat(ticker.priceChangePercent) : 0;
+    return {
+      symbol,
+      fundingAbs: Number.isFinite(fundingAbs) ? fundingAbs : 0,
+      priceChangePct24h: Number.isFinite(priceChangePct24h) ? priceChangePct24h : 0,
+    };
+  });
+
+  const selected = rankEntryCandidates(candidates, topN);
+  const selectedSet = new Set(selected);
+  const skipped = watchlist.filter((s) => !selectedSet.has(s));
+
+  // Audit trail (entry_alert_skip_log, D1) -- daftar SYMBOL yang di-skip,
+  // dicek belakangan apakah ada setup bagus yang kelewat. Best-effort:
+  // kegagalan D1 di sini TIDAK boleh menggagalkan tick (skip-list juga
+  // ada di log baris di bawah buat `wrangler tail`).
+  await d1Client
+    .insertEntryAlertSkipLog({ runAt: now, skippedSymbols: skipped, topN })
+    .catch((err) => console.error("[entry-prefilter] gagal insert entry_alert_skip_log:", (err as Error)?.message ?? String(err)));
+  console.log(`[entry-prefilter] top_n=${topN} analysed=${selected.length} skipped=${skipped.length} skipped_symbols=${skipped.join(",")}`);
+
+  return selected;
+}
+
 export async function runEntryAlertCheck(env: TelegramEnv): Promise<void> {
   const now = Date.now();
   const { watchlist, prefetched } = await resolveWatchlistAndPrefetch();
-  const outcomes = await mapWithConcurrency(watchlist, CONCURRENCY, async (symbol): Promise<AlertCheckOutcome> => {
+  const analysed = await applyEntryPrefilter(watchlist, prefetched, now);
+  const outcomes = await mapWithConcurrency(analysed, CONCURRENCY, async (symbol): Promise<AlertCheckOutcome> => {
     try {
       return await checkEntryAlertForSymbol(symbol, env, now, prefetched);
     } catch (err) {

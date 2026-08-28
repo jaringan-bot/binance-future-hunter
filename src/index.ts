@@ -64,6 +64,10 @@ const ENTRY_ALERT_CRON = "7-59/15 * * * *";
 // entry-alert (heartbeatCron.ts), user request 2026-08-25.
 const HEARTBEAT_CRON = "0 0,8,16 * * *";
 const ENTRY_ALERT_RUN_LOG_RETENTION_MS = 24 * 3600 * 1000; // 24 jam -- heartbeat cuma lookback 8 jam, buffer 3x cukup.
+// entry_alert_skip_log: window audit MANUAL multi-hari ("apakah pair yang
+// di-skip pre-filter pernah jadi setup bagus"), jadi retensi jauh lebih
+// panjang dari run_log. 7 hari.
+const ENTRY_ALERT_SKIP_LOG_RETENTION_MS = 7 * 24 * 3600 * 1000;
 
 // Server ini STATELESS (sessionIdGenerator: undefined): setiap request
 // membuat instance server + transport baru. Ini pola resmi yang
@@ -305,6 +309,11 @@ export default {
         d1Client
           .pruneOldEntryAlertRunLog(Date.now() - ENTRY_ALERT_RUN_LOG_RETENTION_MS)
           .catch((err) => console.error("[cron] gagal prune entry_alert_run_log:", (err as Error)?.message ?? String(err))),
+      );
+      ctx.waitUntil(
+        d1Client
+          .pruneOldEntryAlertSkipLog(Date.now() - ENTRY_ALERT_SKIP_LOG_RETENTION_MS)
+          .catch((err) => console.error("[cron] gagal prune entry_alert_skip_log:", (err as Error)?.message ?? String(err))),
       );
       return;
     }

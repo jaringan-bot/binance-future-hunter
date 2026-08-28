@@ -443,6 +443,30 @@ export async function pruneOldEntryAlertRunLog(cutoffMs: number): Promise<void> 
   await requireDb().prepare("DELETE FROM entry_alert_run_log WHERE run_at < ?").bind(cutoffMs).run();
 }
 
+// Satu row per tick: daftar SYMBOL yang di-skip pre-filter Wave 1
+// (entryRanking.ts -- di luar TOP-N, tidak masuk hard-screen/Wave 1/2).
+// Dipakai buat AUDIT lanjutan: cek apakah pair yang di-skip pernah jadi
+// setup bagus di pipeline lama -- kalau iya, N terlalu kecil atau formula
+// ranking salah. Retensi beberapa hari (prune di index.ts scheduled),
+// lebih panjang dari run_log karena butuh window audit manual, bukan
+// lookback 8 jam heartbeat.
+export interface EntryAlertSkipLogRow {
+  runAt: number;
+  skippedSymbols: string[];
+  topN: number;
+}
+
+export async function insertEntryAlertSkipLog(row: EntryAlertSkipLogRow): Promise<void> {
+  await requireDb()
+    .prepare("INSERT INTO entry_alert_skip_log (run_at, skipped_symbols, skipped_count, top_n) VALUES (?, ?, ?, ?)")
+    .bind(row.runAt, JSON.stringify(row.skippedSymbols), row.skippedSymbols.length, row.topN)
+    .run();
+}
+
+export async function pruneOldEntryAlertSkipLog(cutoffMs: number): Promise<void> {
+  await requireDb().prepare("DELETE FROM entry_alert_skip_log WHERE run_at < ?").bind(cutoffMs).run();
+}
+
 // Dipakai heartbeatCron.ts -- kalau ada minimal 1 alert TRADE/WATCH beneran
 // terkirim dalam window lookback, gak perlu heartbeat (user udah dapet
 // sinyal asli).

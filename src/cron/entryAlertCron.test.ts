@@ -3,6 +3,7 @@ import * as fullPipeline from "../tools/fullPipeline.js";
 import * as binanceProxy from "../binanceProxyClient.js";
 import * as d1Client from "../d1Client.js";
 import * as telegram from "../telegram.js";
+import * as kvConfig from "../kvConfig.js";
 import { checkEntryAlertForSymbol, runEntryAlertCheck, ENTRY_ALERT_PACING_DELAY_MS } from "./entryAlertCron.js";
 import type { SymbolPipelineResult } from "../tools/fullPipeline.js";
 import * as pacing from "../pacing.js";
@@ -13,7 +14,13 @@ vi.mock("../binanceProxyClient.js", () => ({
   getBulkFundingRatesNative: vi.fn(),
   getFuturesExchangeInfo: vi.fn(),
 }));
-vi.mock("../d1Client.js", () => ({ getEntryAlertState: vi.fn(), upsertEntryAlertState: vi.fn(), insertEntryAlertRunLog: vi.fn() }));
+vi.mock("../d1Client.js", () => ({
+  getEntryAlertState: vi.fn(),
+  upsertEntryAlertState: vi.fn(),
+  insertEntryAlertRunLog: vi.fn(),
+  insertEntryAlertSkipLog: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("../kvConfig.js", () => ({ getJson: vi.fn().mockResolvedValue(null) }));
 vi.mock("../telegram.js", () => ({
   sendTelegramAlert: vi.fn(),
   // Real implementation, not mocked -- formatEntryAlert()'s escaping behavior
@@ -480,6 +487,68 @@ describe("runEntryAlertCheck", () => {
     const [, , prefetchedArg] = vi.mocked(fullPipeline.runPipelineForSymbol).mock.calls[0];
     expect(prefetchedArg?.ticker.get("BTCUSDT")?.lastPrice).toBe("60000");
     expect(prefetchedArg?.funding.get("BTCUSDT")?.lastFundingRate).toBe("0.0001");
+  });
+
+  it("processes only the top-N ranked pairs and records the skipped symbol list to D1", async () => {
+    mockWatchlist(["AAAUSDT", "BBBUSDT", "CCCUSDT", "DDDUSDT", "EEEUSDT"]);
+    // Funding: CCC & EEE paling ekstrem -> harus lolos top-2.
+    vi.mocked(binanceProxy.getBulkFundingRatesNative).mockResolvedValue(
+      [
+        ["AAAUSDT", "0.00001"],
+        ["BBBUSDT", "0.00002"],
+        ["CCCUSDT", "0.0009"],
+        ["DDDUSDT", "0.00003"],
+        ["EEEUSDT", "0.0008"],
+      ].map(([symbol, r]) => ({
+        symbol, markPrice: "1", indexPrice: "1", estimatedSettlePrice: "1",
+        lastFundingRate: r, nextFundingTime: 0, interestRate: "0", time: 0,
+      })) as never,
+    );
+    vi.mocked(kvConfig.getJson).mockResolvedValue(2); // top_n = 2
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
+    vi.mocked(fullPipeline.runPipelineForSymbol).mockImplementation(async (symbol: string) => noTradeResult(symbol));
+
+    await runEntryAlertCheck(ENV);
+
+    const analysed = vi.mocked(fullPipeline.runPipelineForSymbol).mock.calls.map((c) => c[0]).sort();
+    expect(analysed).toEqual(["CCCUSDT", "EEEUSDT"]);
+
+    expect(d1Client.insertEntryAlertSkipLog).toHaveBeenCalledWith({
+      runAt: expect.any(Number),
+      skippedSymbols: expect.arrayContaining(["AAAUSDT", "BBBUSDT", "DDDUSDT"]),
+      topN: 2,
+    });
+    const [{ skippedSymbols }] = vi.mocked(d1Client.insertEntryAlertSkipLog).mock.calls[0];
+    expect(skippedSymbols).toHaveLength(3);
+  });
+
+  it("skips the top-N pre-filter entirely (processes the full watchlist) when premiumIndex is unavailable -- no silent partial coverage", async () => {
+    mockWatchlist(["AAAUSDT", "BBBUSDT", "CCCUSDT"]);
+    vi.mocked(binanceProxy.getBulkFundingRatesNative).mockRejectedValue(new Error("proxy 500"));
+    vi.mocked(kvConfig.getJson).mockResolvedValue(1); // would be top_n=1 if pre-filter ran
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
+    vi.mocked(fullPipeline.runPipelineForSymbol).mockImplementation(async (s: string) => noTradeResult(s));
+
+    await runEntryAlertCheck(ENV);
+
+    expect(vi.mocked(fullPipeline.runPipelineForSymbol).mock.calls.map((c) => c[0]).sort()).toEqual([
+      "AAAUSDT",
+      "BBBUSDT",
+      "CCCUSDT",
+    ]);
+    expect(d1Client.insertEntryAlertSkipLog).not.toHaveBeenCalled();
+  });
+
+  it("defaults top-N to 40 when the KV config key is unset", async () => {
+    mockWatchlist(Array.from({ length: 60 }, (_, i) => `S${String(i).padStart(2, "0")}USDT`));
+    vi.mocked(binanceProxy.getBulkFundingRatesNative).mockResolvedValue([]);
+    vi.mocked(kvConfig.getJson).mockResolvedValue(null);
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
+    vi.mocked(fullPipeline.runPipelineForSymbol).mockImplementation(async (s: string) => noTradeResult(s));
+
+    await runEntryAlertCheck(ENV);
+
+    expect(vi.mocked(fullPipeline.runPipelineForSymbol).mock.calls).toHaveLength(40);
   });
 
   it("falls back to prefetched=undefined (per-symbol fetch inside runPipelineForSymbol) when premiumIndex bulk fetch fails, without failing the whole tick", async () => {

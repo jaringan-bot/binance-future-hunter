@@ -28,15 +28,19 @@ function bump(name: string) {
 const exchangeInfoCache = new Set<string>();
 
 const PAIR_COUNT = 250;
-// Fraksi watchlist yang LOLOS hard-screen (quoteVolume di atas ambang +
-// funding kecil + regime bukan BREAKOUT). Sisa -> reject low_volume,
-// short-circuit sebelum Wave 2. Set ke angka dari sample live (tick 11:07
-// UTC: 156/185 = 0.84).
+// Dikunci sebagai regression guard (lihat tabel di bawah).
+const DEDUP_TOTAL = 2507; // post-dedup, tanpa pre-filter (top_n >= 250)
+const SURVIVORS_NO_FILTER = 209; // pair lolos hard-screen di harness (hash ~0.84 * 250)
+const TOPN40_TOTAL = 395; // post-dedup + top_n=40 (32 survivor di harness)
+// Target fraksi LOLOS hard-screen dari sample live (tick 11:07 UTC 2026-08-28:
+// 156 PASS / 185 evaluated = 0.843). Diterapkan lewat pseudo-hash per symbol
+// (bukan by-index) supaya TIDAK berkorelasi dengan urutan ranking pre-filter
+// -- jadi di mode top-N, ~84% dari 40 pair terpilih yang lolos, realistis.
 const HARD_SCREEN_PASS_FRACTION = 0.84;
 
 function isPass(symbol: string): boolean {
   const n = Number(symbol.replace(/\D/g, ""));
-  return n < Math.round(PAIR_COUNT * HARD_SCREEN_PASS_FRACTION);
+  return ((n * 1103515245 + 12345) >>> 8) % 1000 < Math.round(HARD_SCREEN_PASS_FRACTION * 1000);
 }
 
 function klines(limit: number): binanceProxy.KlineTuple[] {
@@ -66,6 +70,7 @@ vi.mock("../d1Client.js", () => ({
   getEntryAlertState: vi.fn().mockResolvedValue(null),
   upsertEntryAlertState: vi.fn().mockResolvedValue(undefined),
   insertEntryAlertRunLog: vi.fn().mockResolvedValue(undefined),
+  insertEntryAlertSkipLog: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("../kvConfig.js", () => ({
   getJson: vi.fn().mockResolvedValue(null),
@@ -106,12 +111,14 @@ vi.mock("../binanceProxyClient.js", () => ({
   }),
   getBulkFundingRatesNative: vi.fn(async () => {
     bump("getBulkFundingRatesNative");
+    // funding menurun dgn i -> SYM0 paling ekstrem -> rankEntryCandidates
+    // memilih SYM0..SYM(N-1) secara deterministik (priceChange konstan).
     return Array.from({ length: PAIR_COUNT }, (_, i) => ({
       symbol: `SYM${i}USDT`,
       markPrice: "100",
       indexPrice: "100",
       estimatedSettlePrice: "100",
-      lastFundingRate: "0.00001",
+      lastFundingRate: String((PAIR_COUNT - i) / 1e7),
       nextFundingTime: 0,
       interestRate: "0",
       time: 0,
@@ -169,38 +176,37 @@ describe("DRY-RUN: subrequest count per entry-alert tick (post-dedup)", () => {
   });
 
   // ── HASIL DRY-RUN (dikunci sebagai regression guard) ──────────────────
-  // 250 pair, hard-screen pass fraction 0.84 (dari sample live tick 11:07
-  // UTC 2026-08-28: 156 PASS / 185 evaluated). Angka = subrequest LOGIS ke
-  // proxy Binance per tick (tanpa retry/3-tier failover; /fapi/v1/exchangeInfo
-  // dimodelkan cache-hit per (symbol,jam) sesuai STATIC_CACHE_PATHS).
+  // 250 pair, hard-screen pass ~0.84 (sample live tick 11:07 UTC 2026-08-28:
+  // 156 PASS / 185 evaluated -- di harness diterapkan via pseudo-hash per
+  // symbol, jadi survivor count tidak persis 0.84*N). Angka = subrequest
+  // LOGIS ke proxy Binance per tick (tanpa retry/3-tier failover;
+  // /fapi/v1/exchangeInfo dimodelkan cache-hit per (symbol,jam) sesuai
+  // STATIC_CACHE_PATHS). SURV = pair yang lolos hard-screen (masuk Wave 2).
   //
-  //                              POST-DEDUP   BASELINE (pre-dedup)
-  //   setup (exchInfo+ticker+funding)     3   4   (ticker di-fetch 2x)
-  //   Wave 1 (250 pair):
-  //     klines 1h+4h                    500   500
-  //     openInterest                    250   250
-  //     openInterestHist(2)             250   250
-  //     aggTrades                       250   250
-  //     fetchMarketContext (5/pair)       0   1250 (dulu unconditional di Wave 1)
-  //   Wave 2 (210 survivor):
-  //     topTraderPositionRatio          210   210
-  //     globalAccountRatio              210   210
-  //     openInterestHist(24)            210   210
-  //     orderBookDepth(50)              210   210
-  //     spotPrice                       210   210
-  //   leverage loop:
-  //     exchangeInfo per-survivor       210   210 (fetchSymbolTradingRules)
-  //   ─────────────────────────────────────────────
-  //   TOTAL / tick                     2513   3764
-  //   Reduksi (b) dedup: (3764-2513)/3764 = 33.2%
-  //
-  // NB oiHist total 460 = 250 (Wave1 limit 2) + 210 (Wave2 limit 24).
-  it("locks the post-dedup subrequest count per tick and its phase split", async () => {
+  //                            BASELINE   +DEDUP (b)   +DEDUP+TOP-N40 (a)
+  //   watchlist diproses            250        250        40
+  //   survivors (hard-screen)       209        209        32
+  //   setup (exchInfo+ticker+fund)    4          3          3
+  //   Wave 1 (klines1h+4h 2/pair +  1250       1250       200
+  //     OI + oiHist2 + aggTrades)
+  //   fetchMarketContext (5/pair)   1250          0          0
+  //   Wave 2 (topTrader/global/    1045       1045       160
+  //     oiHist24/orderBook/spot)
+  //   exchangeInfo per-survivor     209        209         32
+  //   ────────────────────────────────────────────────────
+  //   TOTAL / tick (harness)       3758       2507        395
+  //   Reduksi (b) dedup    : 3758 -> 2507  = -33.3%
+  //   Reduksi (b)+(a) N=40 : 3758 ->  395  = -89.5%
+  //   Reduksi (a) incremental: 2507 -> 395 = -84.2%
+  // BASELINE = (+DEDUP total 2507) + 1251 (1 ticker-refetch + 5*250
+  // fetchMarketContext yang dulu unconditional di Wave 1).
+  it("no pre-filter (top_n >= watchlist): locks post-dedup count + phase split", async () => {
+    vi.mocked(kvConfig.getJson).mockResolvedValue(9999);
     await runEntryAlertCheck({ TELEGRAM_BOT_TOKEN: "x", TELEGRAM_CHAT_ID: "y" } as never);
 
     const total = Object.values(counts).reduce((a, b) => a + b, 0);
-    const setupExchangeInfo = 1; // no-arg call
-    const tradingRulesCalls = (counts.getFuturesExchangeInfo ?? 0) - setupExchangeInfo;
+    const survivors = counts.getTopTraderPositionRatio ?? 0;
+    const tradingRulesCalls = (counts.getFuturesExchangeInfo ?? 0) - 1;
 
     // Inti STEP 1(b): ticker24hr + premiumIndex + exchangeInfo(no-arg) 1x each.
     expect(counts.getAllTicker24hrNative).toBe(1);
@@ -208,18 +214,37 @@ describe("DRY-RUN: subrequest count per entry-alert tick (post-dedup)", () => {
     // Wave 1 klines = 2/pair (1h + 4h), BUKAN 3 -- fetchMarketContext tidak
     // lagi fetch klines1h sendiri.
     expect(counts.getKlinesNative).toBe(500);
-    // OI current & aggTrades = 1/pair -- tidak digandakan fetchMarketContext.
     expect(counts.getOpenInterestNative).toBe(250);
     expect(counts.getAggTrades).toBe(250);
-    // Wave 2 fan-out = 1/survivor.
-    expect(counts.getTopTraderPositionRatio).toBe(210);
-    expect(counts.getGlobalAccountRatio).toBe(210);
-    expect(counts.getOrderBookDepth).toBe(210);
-    expect(counts.getSpotPrice).toBe(210);
-    expect(counts.getOpenInterestHistNative).toBe(460);
-    // leverage loop -> fetchSymbolTradingRules: 1 exchangeInfo per survivor.
-    expect(tradingRulesCalls).toBe(210);
+    // Wave 2 fan-out = 1/survivor untuk kelima call + 1 exchangeInfo/survivor.
+    expect(counts.getGlobalAccountRatio).toBe(survivors);
+    expect(counts.getOrderBookDepth).toBe(survivors);
+    expect(counts.getSpotPrice).toBe(survivors);
+    expect(counts.getOpenInterestHistNative).toBe(250 + survivors);
+    expect(tradingRulesCalls).toBe(survivors);
+    // survivor ~84% dari 250.
+    expect(survivors).toBeGreaterThan(195);
+    expect(survivors).toBeLessThan(225);
 
-    expect(total).toBe(2513);
+    expect(total).toBe(DEDUP_TOTAL);
+    expect(SURVIVORS_NO_FILTER).toBe(survivors);
+  });
+
+  it("top_n=40: locks post-dedup+top-N subrequest count", async () => {
+    vi.mocked(kvConfig.getJson).mockResolvedValue(40);
+    await runEntryAlertCheck({ TELEGRAM_BOT_TOKEN: "x", TELEGRAM_CHAT_ID: "y" } as never);
+
+    const total = Object.values(counts).reduce((a, b) => a + b, 0);
+    const survivors = counts.getTopTraderPositionRatio ?? 0;
+
+    // Cuma 40 pair masuk Wave 1: klines 2/pair, OI 1/pair, aggTrades 1/pair.
+    expect(counts.getKlinesNative).toBe(80);
+    expect(counts.getOpenInterestNative).toBe(40);
+    expect(counts.getAggTrades).toBe(40);
+    // survivor <= 40, kira-kira 84%.
+    expect(survivors).toBeLessThanOrEqual(40);
+    expect(survivors).toBeGreaterThan(28);
+
+    expect(total).toBe(TOPN40_TOTAL);
   });
 });
