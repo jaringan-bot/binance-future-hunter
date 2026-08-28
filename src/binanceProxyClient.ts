@@ -157,7 +157,13 @@ export class BinanceProxyError extends Error {
   }
 }
 
-const FAILOVER_STATUS = new Set([401, 403, 429, 500, 502, 503, 504]);
+// 402: Vercel mengembalikan HTTP 402 di level platform (JSON
+// {"error":{"code":"402","message":"Payment required"}}, TIDAK pernah
+// datang dari api/binance.ts maupun Binance) ketika project relay
+// dinonaktifkan karena spend-cap/billing. Ini kondisi endpoint-level, bukan
+// symbol/param -- persis kasus yang harus failover ke secondary / direct,
+// bukan langsung dilempar ke caller.
+const FAILOVER_STATUS = new Set([401, 402, 403, 429, 500, 502, 503, 504]);
 
 const DIRECT_BASE_BY_MARKET: Record<"futures" | "spot", string> = {
   futures: "https://fapi.binance.com",

@@ -101,6 +101,20 @@ describe("binanceProxyClient proxy failover", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("falls over on 402 (Vercel primary disabled for billing) -- secondary account is unaffected", async () => {
+    setProxyConfig("https://primary.example", "secret1", "https://secondary.example", "secret2");
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ error: { code: "402", message: "Payment required" } }, 402))
+      .mockResolvedValueOnce(jsonResponse(fundingBody, 200));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await getCurrentFundingRateNative("BTCUSDT");
+    expect(result.lastFundingRate).toBe("0.0001");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[1][0])).toContain("secondary.example");
+  });
+
   it("does NOT fail over on a non-retriable 400 (would fail identically on any tier)", async () => {
     setProxyConfig("https://primary.example", "secret1", "https://secondary.example", "secret2");
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ msg: "bad symbol" }, 400));
