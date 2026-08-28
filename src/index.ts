@@ -2,6 +2,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { createServer } from "./server.js";
 import * as binanceProxy from "./binanceProxyClient.js";
 import * as kvConfig from "./kvConfig.js";
+import * as streamGateway from "./streamGatewayClient.js";
 import * as d1Client from "./d1Client.js";
 import { SNAPSHOT_WATCHLIST, WALL_SCAN_WATCHLIST, HYPERLIQUID_WHALE_WATCHLIST } from "./shared.js";
 import { computeMmSignals } from "./tools/detectMmActivity.js";
@@ -127,6 +128,7 @@ export default {
     );
     kvConfig.setKvNamespace(env.CONFIG_KV);
     d1Client.setD1Database(env.DB);
+    streamGateway.setStreamGatewayConfig(env.PROXY_URL, env.PROXY_SECRET);
     const url = new URL(request.url);
 
     if (request.method === "OPTIONS") {
@@ -276,6 +278,7 @@ export default {
     );
     kvConfig.setKvNamespace(env.CONFIG_KV);
     d1Client.setD1Database(env.DB);
+    streamGateway.setStreamGatewayConfig(env.PROXY_URL, env.PROXY_SECRET);
 
     if (event.cron === WALL_SCAN_CRON) {
       ctx.waitUntil(

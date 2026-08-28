@@ -29,6 +29,7 @@ const CATEGORY_ENUM = [
   "history",
   "backtest",
   "cross-exchange",
+  "realtime",
   "meta",
   "uncategorized",
 ] as const;
@@ -83,6 +84,8 @@ const CATALOG_METADATA: Record<string, CatalogMetadata> = {
   binance_get_basis_history: { category: "history", tokenCost: "medium", useCase: "Histori basis+funding+OI dari snapshot cron 5 menit ke D1 -- selalu tersedia untuk 50-pair watchlist tetap, best-effort untuk pair lain yang sering di-query", dependencies: [] },
   binance_backtest_signal: { category: "backtest", tokenCost: "high", useCase: "Validasi empiris sinyal MM detection: win rate/avg return/max drawdown dari histori sinyal D1 + forward return on-demand", dependencies: ["history", "technical"] },
   whalescope_compare_funding_across_exchanges: { category: "cross-exchange", tokenCost: "medium", useCase: "Bandingkan funding rate, price, OI, 24h change 1 pair across Binance/Bybit/OKX/Hyperliquid, deteksi divergensi", dependencies: ["funding"] },
+  binance_get_realtime_liquidations: { category: "realtime", tokenCost: "medium", useCase: "Likuidasi paksa terbaru market-wide dari WS stream (di-buffer di gateway VPS, feed di-sampel Binance)", dependencies: [] },
+  binance_get_contract_events: { category: "realtime", tokenCost: "low", useCase: "Event listing/delisting/settlement kontrak futures dari WS !contractInfo (buffer 30 hari)", dependencies: [] },
   binance_get_tool_catalog: { category: "meta", tokenCost: "low", useCase: "Daftar semua tool + kategori/use-case (tool ini sendiri)", dependencies: [] },
   binance_get_adl_risk: { category: "risk", tokenCost: "low", useCase: "Quantile risk rating ADL per pair (update tiap 30 menit)", dependencies: [] },
   binance_get_insurance_fund_balance: { category: "risk", tokenCost: "low", useCase: "Snapshot historis saldo insurance fund per asset margin", dependencies: [] },
