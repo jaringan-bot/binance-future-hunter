@@ -15,9 +15,17 @@ import { parseEnvelope } from "./parse.mjs";
 
 const PORT = Number(process.env.STREAM_GATEWAY_PORT) || 8081;
 const DB_PATH = process.env.STREAM_DB_PATH || "./data.db";
+// NOTE: fstream.binance.com (the documented USD-M stream host) accepts the
+// WS upgrade from the Oracle Singapore IP but then black-holes all market
+// data — no 403, just silence (verified 2026-08-28; spot stream.binance.com
+// and dstream.binance.com both work fine from the same box, so it is an
+// fstream-specific IP/geo filter, not a network problem). dstream.binance.com
+// serves the same aggregated !forceOrder@arr feed *including USD-M symbols*
+// and is not filtered, so we use it. Overridable via STREAM_WS_URL if that
+// ever changes.
 const WS_URL =
   process.env.STREAM_WS_URL ||
-  "wss://fstream.binance.com/stream?streams=!forceOrder@arr/!contractInfo";
+  "wss://dstream.binance.com/stream?streams=!forceOrder@arr/!contractInfo";
 const SECRET = process.env.PROXY_SECRET;
 
 const PRUNE_INTERVAL_MS = 10 * 60 * 1000;

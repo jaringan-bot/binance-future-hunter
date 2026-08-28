@@ -17,6 +17,8 @@ CADDYFILE=/etc/caddy/Caddyfile
 id -u "$APP_USER" >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin "$APP_USER"
 
 mkdir -p "$APP_DIR"
+chown "$APP_USER:$APP_USER" "$APP_DIR"
+chmod 750 "$APP_DIR"
 install -m 644 -o "$APP_USER" -g "$APP_USER" \
   "$SRC_DIR/index.mjs" "$SRC_DIR/ws-client.mjs" "$SRC_DIR/store.mjs" \
   "$SRC_DIR/server.mjs" "$SRC_DIR/parse.mjs" "$SRC_DIR/package.json" "$APP_DIR/"
