@@ -172,9 +172,14 @@ export class BinanceProxyError extends Error {
 // symbol/param -- persis kasus yang harus failover ke secondary / direct,
 // bukan langsung dilempar ke caller.
 // 418: Binance IP weight-ban (`{"code":-1003,"msg":"...IP(x) banned until..."}`).
-// Endpoint-level on the relay's egress IP, not a symbol/param error -- the
-// other relay IP (or direct) is very likely NOT banned, so fail over.
-const FAILOVER_STATUS = new Set([401, 402, 403, 418, 429, 500, 502, 503, 504]);
+//   Endpoint-level on the relay's egress IP, not a symbol/param error -- the
+//   other relay IP is very likely NOT banned, so fail over.
+// 451: Binance geo-block ("Unavailable For Legal Reasons"). The standalone
+//   relay on Deno Deploy free tier serves from MANY edge regions incl.
+//   Binance-restricted ones (US) -- a given request may randomly land on a
+//   bad edge and 451 while the next lands on Singapore and works. Failing
+//   over to the other relay (a fixed good region) recovers it.
+const FAILOVER_STATUS = new Set([401, 402, 403, 418, 429, 451, 500, 502, 503, 504]);
 
 const DIRECT_BASE_BY_MARKET: Record<"futures" | "spot", string> = {
   futures: "https://fapi.binance.com",
