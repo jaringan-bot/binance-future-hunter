@@ -399,6 +399,19 @@ export async function runPipelineForSymbol(
     };
     const hardScreen = evaluateHardScreen(hardScreenInput);
 
+    // TEMPORARY (instrumentasi survivor-rate, 2026-08-28) -- satu baris per
+    // pair per invocation, dibaca lewat `wrangler tail | grep [hardscreen]`
+    // buat ngukur PASS rate hard-screen (= survivor yang lanjut ke Wave 2)
+    // dan reason dominan reject, input desain pre-filter Wave 1 (Opsi C).
+    // Additive, TIDAK mengubah alur/keputusan. Kena juga saat tool manual
+    // whalescope_full_pipeline dipanggil (jarang) -- abaikan baris itu saat
+    // hitung sample cron. Hapus bareng field `tags` di pipelineEngine.ts
+    // setelah sample cukup.
+    console.log(
+      `[hardscreen] pair=${upperSymbol} result=${hardScreen.passed ? "PASS" : "REJECT"}` +
+        (hardScreen.tags.length ? ` tags=${hardScreen.tags.join("|")}` : ""),
+    );
+
     const hardScreenSection: HardScreenSection = {
       passed: hardScreen.passed,
       reasons: hardScreen.reasons,

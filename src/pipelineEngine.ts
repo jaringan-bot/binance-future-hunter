@@ -87,29 +87,44 @@ export interface HardScreenResult {
   passed: boolean;
   /** SEMUA alasan gagal (bukan cuma yang pertama ketemu) -- transparansi penuh untuk symbol yang di-reject. */
   reasons: string[];
+  /**
+   * TEMPORARY (instrumentasi survivor-rate, 2026-08-28) -- tag pendek
+   * machine-parseable sejajar `reasons`, satu per sub-kondisi yang gagal
+   * (not_tradable / low_volume / funding_extreme / regime1h_breakout /
+   * regime4h_breakout / adx_spike_1h / adx_spike_4h). Dipakai [hardscreen]
+   * log di fullPipeline.ts buat ngukur pre-filter Opsi C. Additive, tidak
+   * mengubah `passed`/`reasons`. Hapus bareng log-nya setelah sample cukup.
+   */
+  tags: string[];
 }
 
 export function evaluateHardScreen(input: HardScreenInput): HardScreenResult {
   const reasons: string[] = [];
+  const tags: string[] = [];
 
   if (!input.tradable) {
     reasons.push("Symbol tidak tradable (ticker24hr gagal diambil, atau harga/volume tidak valid).");
+    tags.push("not_tradable");
   }
   if (input.quoteVolumeUsd < input.minQuoteVolumeUsd) {
     reasons.push(
       `Quote volume 24h ($${input.quoteVolumeUsd.toLocaleString("en-US")}) di bawah ambang minimum ($${input.minQuoteVolumeUsd.toLocaleString("en-US")}).`,
     );
+    tags.push("low_volume");
   }
   if (Math.abs(input.fundingRate) >= input.maxAbsFundingRate) {
     reasons.push(
       `|Funding rate| (${(Math.abs(input.fundingRate) * 100).toFixed(4)}%) >= ambang maksimum (${(input.maxAbsFundingRate * 100).toFixed(4)}%).`,
     );
+    tags.push("funding_extreme");
   }
   if (input.regime1h === "BREAKOUT") {
     reasons.push("Regime 1h terdeteksi BREAKOUT -- grid bot tidak cocok untuk kondisi breakout.");
+    tags.push("regime1h_breakout");
   }
   if (input.regime4h === "BREAKOUT") {
     reasons.push("Regime 4h terdeteksi BREAKOUT -- grid bot tidak cocok untuk kondisi breakout.");
+    tags.push("regime4h_breakout");
   }
   // EMERGENCY PATCH fallback (2026-08-27, TEMPORARY, LOW-MEDIUM confidence --
   // see ADX_FALLBACK_MIN/SPIKE_FALLBACK_MIN comment above): catches the
@@ -123,14 +138,16 @@ export function evaluateHardScreen(input: HardScreenInput): HardScreenResult {
     reasons.push(
       `Regime 1h dilabel ${input.regime1h} (bukan BREAKOUT) TAPI ADX ${input.adx1h.toFixed(1)} & volatilitySpike ${input.volatilitySpike1h.toFixed(2)}x melewati ambang darurat (>${ADX_FALLBACK_MIN}/>${SPIKE_FALLBACK_MIN}x) -- kemungkinan kondisi breakout yang label regime-nya sudah bergeser (lihat RUNEUSDT case, RegimeCap investigation). EMERGENCY PATCH, threshold LOW-MEDIUM confidence.`,
     );
+    tags.push("adx_spike_1h");
   }
   if (input.regime4h !== "BREAKOUT" && input.adx4h > ADX_FALLBACK_MIN && input.volatilitySpike4h > SPIKE_FALLBACK_MIN) {
     reasons.push(
       `Regime 4h dilabel ${input.regime4h} (bukan BREAKOUT) TAPI ADX ${input.adx4h.toFixed(1)} & volatilitySpike ${input.volatilitySpike4h.toFixed(2)}x melewati ambang darurat (>${ADX_FALLBACK_MIN}/>${SPIKE_FALLBACK_MIN}x) -- kemungkinan kondisi breakout yang label regime-nya sudah bergeser (lihat RUNEUSDT case, RegimeCap investigation). EMERGENCY PATCH, threshold LOW-MEDIUM confidence.`,
     );
+    tags.push("adx_spike_4h");
   }
 
-  return { passed: reasons.length === 0, reasons };
+  return { passed: reasons.length === 0, reasons, tags };
 }
 
 // ─────────────────────────────────────────────────────────────
