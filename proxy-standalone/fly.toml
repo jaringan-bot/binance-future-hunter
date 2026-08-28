@@ -1,0 +1,29 @@
+# Fly.io deploy config. Region `sin` (Singapore) — non-US, not Binance
+# WAF-blocked. Set the secret before first deploy:
+#   fly secrets set PROXY_SECRET=$(openssl rand -hex 32)
+#
+#   fly launch --no-deploy --copy-config --name whale-binance-proxy
+#   fly deploy
+app = "whale-binance-proxy"
+primary_region = "sin"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[http_service.checks]]
+  method = "GET"
+  path = "/health"
+  interval = "30s"
+  timeout = "5s"
+  grace_period = "5s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

@@ -1,0 +1,5 @@
+*.md
+fly.toml
+deno.mjs
+.git
+node_modules

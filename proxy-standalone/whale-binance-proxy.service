@@ -1,0 +1,31 @@
+# VPS install (Debian/Ubuntu, Node 18+ already installed):
+#   sudo mkdir -p /opt/whale-binance-proxy
+#   sudo cp handler.mjs server.mjs package.json /opt/whale-binance-proxy/
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin whaleproxy || true
+#   echo "PROXY_SECRET=$(openssl rand -hex 32)" | sudo tee /opt/whale-binance-proxy/.env
+#   sudo cp whale-binance-proxy.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now whale-binance-proxy
+#   curl -s localhost:8080/health
+# Then put it behind Caddy/nginx for TLS, or bind Cloudflare Tunnel to :8080.
+
+[Unit]
+Description=whale-binance-proxy standalone relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=whaleproxy
+WorkingDirectory=/opt/whale-binance-proxy
+EnvironmentFile=/opt/whale-binance-proxy/.env
+Environment=PORT=8080
+ExecStart=/usr/bin/node server.mjs
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
