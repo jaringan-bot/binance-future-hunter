@@ -397,14 +397,21 @@ export interface EntryAlertRunLogRow {
   runAt: number;
   total: number;
   errors: number;
+  /** watch_count / trade_count = GRID tallies (legacy column names kept). */
   watchCount: number;
   tradeCount: number;
+  /** DCA head tallies (migration 0008, observability only). Default 0. */
+  dcaWatchCount?: number;
+  dcaTradeCount?: number;
 }
 
 export async function insertEntryAlertRunLog(row: EntryAlertRunLogRow): Promise<void> {
   await requireDb()
-    .prepare("INSERT INTO entry_alert_run_log (run_at, total, errors, watch_count, trade_count) VALUES (?, ?, ?, ?, ?)")
-    .bind(row.runAt, row.total, row.errors, row.watchCount, row.tradeCount)
+    .prepare(
+      "INSERT INTO entry_alert_run_log (run_at, total, errors, watch_count, trade_count, dca_watch_count, dca_trade_count) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(row.runAt, row.total, row.errors, row.watchCount, row.tradeCount, row.dcaWatchCount ?? 0, row.dcaTradeCount ?? 0)
     .run();
 }
 
