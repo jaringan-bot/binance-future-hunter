@@ -489,16 +489,28 @@ describe("runEntryAlertCheck", () => {
     expect(prefetchedArg?.funding.get("BTCUSDT")?.lastFundingRate).toBe("0.0001");
   });
 
-  it("processes only the top-N ranked pairs and records the skipped symbol list to D1", async () => {
+  it("processes only the top-N F3-ranked pairs (liquid + calm) and records the skipped symbol list to D1", async () => {
     mockWatchlist(["AAAUSDT", "BBBUSDT", "CCCUSDT", "DDDUSDT", "EEEUSDT"]);
-    // Funding: CCC & EEE paling ekstrem -> harus lolos top-2.
+    // F3 favours high volume + low |priceChange| + low |funding|.
+    // AAA/BBB: big volume, tame. CCC: extreme funding. DDD: extreme move. EEE: thin volume.
+    const tk = (symbol: string, quoteVolume: string, priceChangePercent: string) => ({
+      symbol, lastPrice: "1", priceChange: "0", priceChangePercent,
+      highPrice: "0", lowPrice: "0", volume: "0", quoteVolume,
+    });
+    vi.mocked(binanceProxy.getAllTicker24hrNative).mockResolvedValue([
+      tk("AAAUSDT", "900000000", "1.2"),
+      tk("BBBUSDT", "800000000", "2.0"),
+      tk("CCCUSDT", "700000000", "2.5"),
+      tk("DDDUSDT", "600000000", "45"),
+      tk("EEEUSDT", "5000000", "1.0"),
+    ] as never);
     vi.mocked(binanceProxy.getBulkFundingRatesNative).mockResolvedValue(
       [
-        ["AAAUSDT", "0.00001"],
-        ["BBBUSDT", "0.00002"],
-        ["CCCUSDT", "0.0009"],
-        ["DDDUSDT", "0.00003"],
-        ["EEEUSDT", "0.0008"],
+        ["AAAUSDT", "0.00003"],
+        ["BBBUSDT", "0.00004"],
+        ["CCCUSDT", "0.009"],
+        ["DDDUSDT", "0.00005"],
+        ["EEEUSDT", "0.00002"],
       ].map(([symbol, r]) => ({
         symbol, markPrice: "1", indexPrice: "1", estimatedSettlePrice: "1",
         lastFundingRate: r, nextFundingTime: 0, interestRate: "0", time: 0,
@@ -511,11 +523,11 @@ describe("runEntryAlertCheck", () => {
     await runEntryAlertCheck(ENV);
 
     const analysed = vi.mocked(fullPipeline.runPipelineForSymbol).mock.calls.map((c) => c[0]).sort();
-    expect(analysed).toEqual(["CCCUSDT", "EEEUSDT"]);
+    expect(analysed).toEqual(["AAAUSDT", "BBBUSDT"]);
 
     expect(d1Client.insertEntryAlertSkipLog).toHaveBeenCalledWith({
       runAt: expect.any(Number),
-      skippedSymbols: expect.arrayContaining(["AAAUSDT", "BBBUSDT", "DDDUSDT"]),
+      skippedSymbols: expect.arrayContaining(["CCCUSDT", "DDDUSDT", "EEEUSDT"]),
       topN: 2,
     });
     const [{ skippedSymbols }] = vi.mocked(d1Client.insertEntryAlertSkipLog).mock.calls[0];

@@ -261,8 +261,10 @@ async function applyEntryPrefilter(
     const ticker = prefetched.ticker.get(symbol);
     const fundingAbs = funding ? Math.abs(parseFloat(funding.lastFundingRate)) : 0;
     const priceChangePct24h = ticker ? parseFloat(ticker.priceChangePercent) : 0;
+    const quoteVolumeUsd = ticker ? parseFloat(ticker.quoteVolume) : 0;
     return {
       symbol,
+      quoteVolumeUsd: Number.isFinite(quoteVolumeUsd) ? quoteVolumeUsd : 0,
       fundingAbs: Number.isFinite(fundingAbs) ? fundingAbs : 0,
       priceChangePct24h: Number.isFinite(priceChangePct24h) ? priceChangePct24h : 0,
     };

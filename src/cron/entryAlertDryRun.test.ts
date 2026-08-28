@@ -31,7 +31,7 @@ const PAIR_COUNT = 250;
 // Dikunci sebagai regression guard (lihat tabel di bawah).
 const DEDUP_TOTAL = 2507; // post-dedup, tanpa pre-filter (top_n >= 250)
 const SURVIVORS_NO_FILTER = 209; // pair lolos hard-screen di harness (hash ~0.84 * 250)
-const TOPN40_TOTAL = 395; // post-dedup + top_n=40 (32 survivor di harness)
+const TOPN40_TOTAL = 443; // post-dedup + top_n=40, F3 (40 survivor -- F3 only selects hard-screen-passable pairs in this harness)
 // Target fraksi LOLOS hard-screen dari sample live (tick 11:07 UTC 2026-08-28:
 // 156 PASS / 185 evaluated = 0.843). Diterapkan lewat pseudo-hash per symbol
 // (bukan by-index) supaya TIDAK berkorelasi dengan urutan ranking pre-filter
@@ -98,11 +98,14 @@ vi.mock("../binanceProxyClient.js", () => ({
   }),
   getAllTicker24hrNative: vi.fn(async () => {
     bump("getAllTicker24hrNative");
+    // priceChange varied (spread, non-degenerate for F3). quoteVolume: pass
+    // pairs huge, non-pass tiny -> non-pass pairs get F3 volNorm ~0 -> score 0
+    // -> F3 always selects exactly N *pass* pairs -> survivors == N in top-N mode.
     return Array.from({ length: PAIR_COUNT }, (_, i) => ({
       symbol: `SYM${i}USDT`,
       lastPrice: "100",
       priceChange: "1",
-      priceChangePercent: "1",
+      priceChangePercent: String((i % 30) * 0.3),
       highPrice: "105",
       lowPrice: "95",
       volume: "100000",
@@ -111,14 +114,12 @@ vi.mock("../binanceProxyClient.js", () => ({
   }),
   getBulkFundingRatesNative: vi.fn(async () => {
     bump("getBulkFundingRatesNative");
-    // funding menurun dgn i -> SYM0 paling ekstrem -> rankEntryCandidates
-    // memilih SYM0..SYM(N-1) secara deterministik (priceChange konstan).
     return Array.from({ length: PAIR_COUNT }, (_, i) => ({
       symbol: `SYM${i}USDT`,
       markPrice: "100",
       indexPrice: "100",
       estimatedSettlePrice: "100",
-      lastFundingRate: String((PAIR_COUNT - i) / 1e7),
+      lastFundingRate: String((((PAIR_COUNT - i) % 20) + 1) / 2e6),
       nextFundingTime: 0,
       interestRate: "0",
       time: 0,
@@ -241,9 +242,8 @@ describe("DRY-RUN: subrequest count per entry-alert tick (post-dedup)", () => {
     expect(counts.getKlinesNative).toBe(80);
     expect(counts.getOpenInterestNative).toBe(40);
     expect(counts.getAggTrades).toBe(40);
-    // survivor <= 40, kira-kira 84%.
-    expect(survivors).toBeLessThanOrEqual(40);
-    expect(survivors).toBeGreaterThan(28);
+    // F3 hanya memilih pair yang lolos hard-screen di harness ini -> survivor == 40.
+    expect(survivors).toBe(40);
 
     expect(total).toBe(TOPN40_TOTAL);
   });
