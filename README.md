@@ -322,6 +322,10 @@ Detail penuh (termasuk raw data test per klaim): Section 10,
   counter, `src/queryFrequency.ts`), cron 5 menit baru snapshot pair itu
   setelah kondisi terpenuhi. `signal_history` (dibaca
   `binance_backtest_signal`) TETAP watchlist-only, tidak ikut diperluas.
+- **Pair futures-only (HYPEUSDT, 1000PEPEUSDT, PUMPUSDT, dst.) — `spot_price`
+  & `basis` NULL di `market_snapshots`** karena tidak listed di Binance Spot.
+  Funding rate & Open Interest tetap tercatat normal; cuma kolom basis yang
+  kosong buat pair semacam itu.
 - **Belum ada pruning/retention buat row D1** — row nambah terus tanpa batas
   seiring waktu (di 50 pair x ~6.048 row/hari gabungan kedua tabel, D1 free
   tier 5 juta write/hari & 5GB storage masih longgar untuk waktu yang lama,

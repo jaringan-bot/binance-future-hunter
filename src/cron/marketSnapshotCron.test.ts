@@ -47,6 +47,48 @@ describe("snapshotBasisForSymbol", () => {
       openInterest: 5000,
     });
   });
+
+  it("still records funding+OI with null spot/basis when the pair is futures-only (no Binance Spot listing)", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    // HYPEUSDT etc. are perpetual-only -- getSpotPrice hits the Spot API and
+    // gets -1121 Invalid symbol. That must NOT lose the funding/OI row.
+    vi.mocked(binanceProxy.getSpotPrice).mockRejectedValue(
+      new Error('Proxy/Binance error HTTP 400: {"code":-1121,"msg":"Invalid symbol."}'),
+    );
+    vi.mocked(binanceProxy.getCurrentFundingRateNative).mockResolvedValue({
+      symbol: "HYPEUSDT",
+      markPrice: "80.5",
+      lastFundingRate: "0.0002",
+    } as never);
+    vi.mocked(binanceProxy.getOpenInterestNative).mockResolvedValue({
+      symbol: "HYPEUSDT",
+      openInterest: "9000",
+      time: 0,
+    } as never);
+
+    await snapshotBasisForSymbol("HYPEUSDT", 5000);
+
+    expect(d1Client.insertMarketSnapshot).toHaveBeenCalledWith({
+      symbol: "HYPEUSDT",
+      timestamp: 5000,
+      spotPrice: null,
+      markPrice: 80.5,
+      basis: null,
+      fundingRate: 0.0002,
+      openInterest: 9000,
+    });
+  });
+
+  it("still throws when funding or OI itself fails (genuinely delisted pair stays loud)", async () => {
+    vi.mocked(binanceProxy.getSpotPrice).mockResolvedValue({ symbol: "FTMUSDT", price: "1" } as never);
+    vi.mocked(binanceProxy.getCurrentFundingRateNative).mockRejectedValue(
+      new Error('Proxy/Binance error HTTP 400: {"code":-4108,"msg":"Symbol is ... closed"}'),
+    );
+    vi.mocked(binanceProxy.getOpenInterestNative).mockResolvedValue({ symbol: "FTMUSDT", openInterest: "1", time: 0 } as never);
+
+    await expect(snapshotBasisForSymbol("FTMUSDT", 5000)).rejects.toThrow();
+    expect(d1Client.insertMarketSnapshot).not.toHaveBeenCalled();
+  });
 });
 
 describe("snapshotNonWatchlistBasis", () => {
@@ -79,15 +121,13 @@ describe("snapshotNonWatchlistBasis", () => {
       { symbol: "PEPEUSDT", count: 10 },
       { symbol: "WIFUSDT", count: 5 },
     ]);
-    vi.mocked(binanceProxy.getSpotPrice).mockImplementation(async (symbol: string) => {
+    vi.mocked(binanceProxy.getSpotPrice).mockResolvedValue({ symbol: "X", price: "1" } as never);
+    // A mandatory-fetch (funding) failure is what actually fails a symbol now
+    // -- spot failure is tolerated (futures-only pairs).
+    vi.mocked(binanceProxy.getCurrentFundingRateNative).mockImplementation(async (symbol: string) => {
       if (symbol === "PEPEUSDT") throw new Error("proxy down");
-      return { symbol, price: "1" } as never;
+      return { symbol, markPrice: "1", lastFundingRate: "0" } as never;
     });
-    vi.mocked(binanceProxy.getCurrentFundingRateNative).mockResolvedValue({
-      symbol: "X",
-      markPrice: "1",
-      lastFundingRate: "0",
-    } as never);
     vi.mocked(binanceProxy.getOpenInterestNative).mockResolvedValue({ symbol: "X", openInterest: "1", time: 0 } as never);
 
     await snapshotNonWatchlistBasis();
