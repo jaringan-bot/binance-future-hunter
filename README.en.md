@@ -498,6 +498,34 @@ rows older than 30 days (unlike `market_snapshots`/`signal_history`,
 this table isn't bounded by the fixed watchlist, so it can grow if there's
 real outside traffic).
 
+## Monitoring & Alerting
+
+This backend has several silent failure points (Vercel/VPS proxy down, stream
+gateway WS dropped, Cron Trigger Cancel'd platform-side). What exists today
+all goes through **Telegram** (needs `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`
+set — otherwise alerts only reach Workers Logs):
+
+| Check | Cron | Alerts when |
+|---|---|---|
+| `checkHeartbeat` (`heartbeatCron.ts`) | 3×/day | 8h with zero TRADE/WATCH signals — one message distinguishing "quiet market + backend healthy" vs ">30% of pairs failing each tick = backend problem" vs "no data = cron dead" |
+| `checkEntryAlertCronFreshness` (`heartbeatCron.ts`) | piggybacks `*/5` | no entry-alert tick COMPLETED within 40 min (detects platform-Cancel'd ticks) — 1h cooldown |
+| `checkStreamGatewayHealth` (`infraHealthCron.ts`) | piggybacks `*/5` | VPS stream gateway `:8081/health` unreachable, WS to Binance down, or buffer stale >5 min — 1h cooldown |
+| `checkMarketSnapshotFreshness` (`infraHealthCron.ts`) | piggybacks `*/5` | zero new `market_snapshots` rows in 20 min (the `*/5` snapshot cron stopped writing) — 1h cooldown |
+| `checkD1Capacity` (`infraHealthCron.ts`) | 3×/day (piggybacks `HEARTBEAT_CRON`) | `market_snapshots` + `signal_history` (the two unpruned tables) combined past 5M rows — 24h cooldown |
+
+All checks are KV-gated (at most one alert per cooldown while the condition
+persists), safe to run every 5 minutes.
+
+**Still missing** (dashboard work, not code):
+
+- **External uptime monitor** on the worker `/` + relay `https://<vps>/health`
+  — UptimeRobot / Cloudflare Health Checks (free, 5-min). Fastest way to catch
+  a total VPS/relay outage; the internal checks above are only a lagging
+  backstop.
+- **Cloudflare notification** for Workers error-rate spikes / CPU-limit hits —
+  observability (`[observability] enabled = true`) only collects data, no
+  alerting rule.
+
 ## Security: DNS Rebinding Protection (OPTIONAL)
 
 The `/mcp` endpoint validates the `Origin` header before processing a
