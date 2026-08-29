@@ -390,9 +390,8 @@ export async function runEntryAlertCheck(env: TelegramEnv): Promise<void> {
   // Rekam tally tick ini -- heartbeatCron.ts (3x/hari) pakai ini buat
   // bedain "market emang sepi" (error rate rendah) vs "backend bermasalah"
   // (error rate tinggi). watch_count/trade_count = GRID (nama kolom lama);
-  // dca_* = head DCA (observability). Head Traditional Futures TIDAK
-  // dipersist di run_log -- belum ada kolom trad_* (butuh migrasi baru); tally
-  // trad dilog ke `wrangler tail` saja untuk sekarang.
+  // dca_* = head DCA; trad_* = head Traditional/Smart-Money futures
+  // (kolom trad_* ditambah migration 0009). Semua observability.
   const tradTradeCount = outcomes.filter((o) => o.tradDecision === "TRAD_TRADE").length;
   const tradWatchCount = outcomes.filter((o) => o.tradDecision === "TRAD_WATCH").length;
   console.log(`[entry-alert] trad tally: TRAD_TRADE=${tradTradeCount} TRAD_WATCH=${tradWatchCount}`);
@@ -404,5 +403,7 @@ export async function runEntryAlertCheck(env: TelegramEnv): Promise<void> {
     tradeCount: outcomes.filter((o) => o.gridDecision === "TRADE").length,
     dcaWatchCount: outcomes.filter((o) => o.dcaDecision === "DCA_WATCH").length,
     dcaTradeCount: outcomes.filter((o) => o.dcaDecision === "DCA_TRADE").length,
+    tradWatchCount,
+    tradTradeCount,
   });
 }
