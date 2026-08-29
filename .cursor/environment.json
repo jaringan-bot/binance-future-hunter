@@ -1,11 +1,12 @@
 {
   "name": "whalescope-mcp",
   "install": "npm ci && npx wrangler d1 migrations apply whalescope-mcp-db --local",
+  "start": "bash scripts/gen-dev-vars.sh",
   "terminals": [
     {
       "name": "wrangler-dev",
       "command": "npx wrangler dev --port 8787",
-      "description": "Cloudflare Worker (whalescope-mcp) local dev server. Status page at http://localhost:8787/ and MCP endpoint at http://localhost:8787/mcp. Binance-native tools return a clear 'PROXY_URL/PROXY_SECRET belum diset' error until those secrets are configured; KV/D1-backed tools work with local bindings."
+      "description": "Cloudflare Worker (whalescope-mcp) local dev server. Status page at http://localhost:8787/ and MCP endpoint at http://localhost:8787/mcp. Binance-native tools need PROXY_URL/PROXY_SECRET (bridged from Cloud Agent secrets into .dev.vars by the start command); without them they return a clear 'PROXY_URL belum diset' error while KV/D1-backed tools still work with local bindings."
     }
   ],
   "ports": [
