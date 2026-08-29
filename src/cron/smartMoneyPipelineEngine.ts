@@ -86,6 +86,26 @@ export function slopeRatioScore(slopeSpot: number, slopeFutures: number): number
   return Math.min(100, (slopeSpot / slopeFutures) * SLOPE_RATIO_MULT);
 }
 
+export interface ScenarioCInput {
+  slopeSpot: number;
+  slopeFutures: number;
+  takerSpotNorm: number;
+  multiTfAlign: number;
+}
+
+/**
+ * Scenario C (Spot vs Futures CVD divergence) sub-score 0-100. Di-export supaya
+ * Grid Bot Smart Money Adapter (Phase 2, gridSmartMoneyAdapter.ts) bisa reuse
+ * S_C tanpa menjalankan engine penuh. Dipakai juga di dalam evaluateSmartMoneyEntry.
+ */
+export function calculateScenarioC(i: ScenarioCInput): number {
+  return clamp100(
+    DIVERGENCE_W.slopeRatio * slopeRatioScore(i.slopeSpot, i.slopeFutures) +
+      DIVERGENCE_W.takerSpot * clamp100(i.takerSpotNorm) +
+      DIVERGENCE_W.multiTf * clamp100(i.multiTfAlign),
+  );
+}
+
 function isStrongTrending(regime: MarketRegime): boolean {
   return regime === "TRENDING_UP" || regime === "TRENDING_DOWN";
 }
@@ -122,9 +142,12 @@ export function evaluateSmartMoneyEntry(input: SmartMoneyInput): SmartMoneyResul
 
   // ── Scenario C: Divergence ──
   const slopeRatio = slopeRatioScore(input.slopeSpot, input.slopeFutures);
-  const sC = clamp100(
-    DIVERGENCE_W.slopeRatio * slopeRatio + DIVERGENCE_W.takerSpot * clamp100(input.takerSpotNorm) + DIVERGENCE_W.multiTf * clamp100(input.multiTfAlign),
-  );
+  const sC = calculateScenarioC({
+    slopeSpot: input.slopeSpot,
+    slopeFutures: input.slopeFutures,
+    takerSpotNorm: input.takerSpotNorm,
+    multiTfAlign: input.multiTfAlign,
+  });
   reasons.push(
     `C/Divergence ${sC.toFixed(1)} (slopeRatio ${slopeRatio.toFixed(0)}, takerSpot ${clamp100(input.takerSpotNorm).toFixed(0)}, multiTF ${clamp100(input.multiTfAlign).toFixed(0)})`,
   );

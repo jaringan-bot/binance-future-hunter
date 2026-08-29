@@ -3,6 +3,7 @@ import {
   evaluateSmartMoneyEntry,
   consolidationScore,
   slopeRatioScore,
+  calculateScenarioC,
   type SmartMoneyInput,
 } from "./smartMoneyPipelineEngine.js";
 
@@ -39,6 +40,11 @@ describe("smartMoneyPipelineEngine helpers", () => {
     expect(slopeRatioScore(1, 1)).toBeCloseTo(33, 10);
     expect(slopeRatioScore(10, 1)).toBe(100);
     expect(slopeRatioScore(5, 0)).toBe(0);
+  });
+  it("calculateScenarioC matches DIVERGENCE_W composite (exported for Phase 2)", () => {
+    // slopeRatio(3,1)=99 -> 0.5*99 + 0.3*80 + 0.2*100 = 49.5+24+20 = 93.5
+    expect(calculateScenarioC({ slopeSpot: 3, slopeFutures: 1, takerSpotNorm: 80, multiTfAlign: 100 })).toBeCloseTo(93.5, 5);
+    expect(calculateScenarioC({ slopeSpot: 0, slopeFutures: 1, takerSpotNorm: 0, multiTfAlign: 0 })).toBe(0);
   });
 });
 
