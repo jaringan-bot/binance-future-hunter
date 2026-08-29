@@ -21,6 +21,7 @@ import {
   type DcaOpts,
 } from "../tools/fullPipeline.js";
 import { DCA_MODAL_DEFAULT_USD, type DcaHeadResult } from "../dcaPipelineEngine.js";
+import type { DcaSmartMoneyResult } from "./dcaSmartMoneyAdapter.js";
 import type { TraditionalFuturesResult } from "./traditionalPipelineEngine.js";
 import * as binanceProxy from "../binanceProxyClient.js";
 import * as d1Client from "../d1Client.js";
@@ -140,7 +141,17 @@ function isGridAlertWorthy(result: SymbolPipelineResult): boolean {
 
 // DCA_WATCH dari dcaPipelineEngine SUDAH berarti confidence >= 50
 // (DCA_WATCH_MIN_ALERT_SCORE); DCA_NO_TRADE = di bawah itu / reject.
-function isDcaAlertWorthy(dca: DcaHeadResult): boolean {
+// Phase 3 dcaSm menambah PAUSE_* / DCA_STOP — semua alertable kecuali legacy NO_TRADE.
+function isDcaAlertWorthy(dca: DcaHeadResult, dcaSm?: DcaSmartMoneyResult | null): boolean {
+  if (dcaSm) {
+    return (
+      dcaSm.decision === "DCA_TRADE" ||
+      dcaSm.decision === "DCA_WATCH" ||
+      dcaSm.decision === "DCA_PAUSE_SOFT" ||
+      dcaSm.decision === "DCA_PAUSE_HARD" ||
+      dcaSm.decision === "DCA_STOP"
+    );
+  }
   return dca.decision !== "DCA_NO_TRADE";
 }
 
@@ -154,7 +165,7 @@ function isTradAlertWorthy(trad: TraditionalFuturesResult): boolean {
 
 // Penanda Telegram: 🟢/🟡 grid (tak berubah), 🔵/🟠 DCA.
 const GRID_ICON: Record<string, string> = { TRADE: "🟢", WATCH: "🟡" };
-const DCA_ICON: Record<string, string> = { DCA_TRADE: "🔵", DCA_WATCH: "🟠" };
+const DCA_ICON: Record<string, string> = { DCA_TRADE: "🔵", DCA_WATCH: "🟠", DCA_PAUSE_SOFT: "⏸️", DCA_PAUSE_HARD: "🧊", DCA_STOP: "🚨" };
 const GRID_LABEL: Record<string, string> = {
   TRADE: "GRID TRADE (grid entry, whale-aligned)",
   WATCH: "GRID WATCH (mendekati entry, belum layak)",
@@ -162,26 +173,33 @@ const GRID_LABEL: Record<string, string> = {
 const DCA_LABEL: Record<string, string> = {
   DCA_TRADE: "DCA LAYAK ENTRY",
   DCA_WATCH: "DCA TUNGGU",
+  DCA_PAUSE_SOFT: "DCA PAUSE SOFT",
+  DCA_PAUSE_HARD: "DCA PAUSE HARD",
+  DCA_STOP: "DCA PLAN INVALIDATED",
 };
 
 function formatEntryAlert(r: TriplePipelineResult): string {
-  const { grid, dca, trad } = r;
+  const { grid, dca, trad, dcaSm } = r;
   const gridOn = isGridAlertWorthy(grid);
-  const dcaOn = isDcaAlertWorthy(dca);
+  const dcaOn = isDcaAlertWorthy(dca, dcaSm);
   const tradOn = isTradAlertWorthy(trad);
   const sm = grid.tier1?.smartMoney;
   const dcaDir = dca.direction ? ` (${dca.direction})` : "";
+  const dcaHeadDecision = dcaSm?.decision ?? dca.decision;
+  const dcaHeadLabel = DCA_LABEL[dcaHeadDecision] ?? dcaHeadDecision;
 
   const headMarkers =
-    `${gridOn ? GRID_ICON[grid.decision] ?? "" : ""}${dcaOn ? DCA_ICON[dca.decision] ?? "" : ""}${tradOn ? "⚡" : ""}` || "ℹ️";
+    `${gridOn ? GRID_ICON[grid.decision] ?? "" : ""}${dcaOn ? DCA_ICON[dcaHeadDecision] ?? "" : ""}${tradOn ? "⚡" : ""}` || "ℹ️";
   const headParts: string[] = [];
   if (gridOn) headParts.push(escapeMarkdown(GRID_LABEL[grid.decision] ?? grid.decision));
-  if (dcaOn) headParts.push(`${escapeMarkdown(DCA_LABEL[dca.decision] ?? dca.decision)}${dcaDir}`);
+  if (dcaOn) headParts.push(`${escapeMarkdown(dcaHeadLabel)}${dcaDir}`);
   if (tradOn) headParts.push(`TRADITIONAL FUTURES (${escapeMarkdown(`[SCENARIO: ${trad.scenario}]`)})`);
 
   const lines = [
     `${headMarkers} *${escapeMarkdown(grid.symbol)}* — ${headParts.join(" · ")}`,
-    `📊 Grid ${grid.rankingScore.toFixed(1)}/100 · DCA ${dca.confidence}/100 · VolTier ${dca.volTier}`,
+    dcaSm
+      ? `📊 Grid ${grid.rankingScore.toFixed(1)}/100 · DCA SM timing ${dcaSm.timingScore.toFixed(0)}/100 · safety ${dcaSm.safetyScore.toFixed(0)}/100 · VolTier ${dca.volTier}`
+      : `📊 Grid ${grid.rankingScore.toFixed(1)}/100 · DCA ${dca.confidence}/100 · VolTier ${dca.volTier}`,
   ];
   if (sm) {
     lines.push(
@@ -204,6 +222,18 @@ function formatEntryAlert(r: TriplePipelineResult): string {
 
   // ── DCA block ──
   const d = dca.dcaBotConfig;
+  if (dcaSm && dcaOn) {
+    lines.push(
+      "",
+      `🔷 DCA Smart Money V3 (${dcaSm.entryCount + 1}/${dcaSm.maxEntries}${dcaDir})`,
+      `   Timing ${dcaSm.timingScore.toFixed(0)}/100 · Safety ${dcaSm.safetyScore.toFixed(0)}/100 · Pause ${escapeMarkdown(dcaSm.pauseLevel)}`,
+      `   Interval ${dcaSm.intervalPct.toFixed(2)}% · Next trigger ${fmtPrice(dcaSm.nextTriggerPrice)}`,
+      dcaSm.pauseReason ? `   ⏸ ${escapeMarkdown(dcaSm.pauseReason)}` : "",
+    );
+    if (dcaSm.decision === "DCA_STOP") {
+      lines.push("   🚨 \\[DCA PLAN INVALIDATED \\- MANUAL REVIEW REQUIRED\\]");
+    }
+  }
   if (dcaOn && d) {
     lines.push(
       "",
@@ -215,7 +245,7 @@ function formatEntryAlert(r: TriplePipelineResult): string {
       `   Total accumulation Base→Max DCA: ${d.totalAccumulationDistPct}%`,
       "   ⚠️ taker-ratio & wall-persistence di-proxy; " + (dca.effCapAdx1d ? `1D cap ${dca.effCapAdx1d}` : "1D cap n/a"),
     );
-  } else if (dcaOn && dca.decision === "DCA_WATCH") {
+  } else if (dcaOn && dca.decision === "DCA_WATCH" && !dcaSm) {
     lines.push("", `🟠 DCA TUNGGU${dcaDir} — confidence ${dca.confidence}/100${dca.rejectReason ? ` (${escapeMarkdown(dca.rejectReason)})` : ""}`);
   } else if (!dcaOn) {
     lines.push(`DCA: Tolak${dca.rejectReason ? ` (${escapeMarkdown(dca.rejectReason)})` : ""}`);
@@ -255,7 +285,7 @@ export async function checkEntryAlertForSymbol(
   // mana pun flip -> alert gabungan yang nunjukin state ketiga head). Cooldown
   // 4 jam pakai satu timestamp.
   const composite = `${r.grid.decision}/${r.dca.decision}/${r.trad.decision}`;
-  const alertable = isGridAlertWorthy(r.grid) || isDcaAlertWorthy(r.dca) || isTradAlertWorthy(r.trad);
+  const alertable = isGridAlertWorthy(r.grid) || isDcaAlertWorthy(r.dca, r.dcaSm) || isTradAlertWorthy(r.trad);
   const isTransition = alertable && previous?.lastDecision !== composite;
   const cooldownExpired =
     alertable && previous?.lastAlertAt != null && now - previous.lastAlertAt > COOLDOWN_MS;
@@ -270,6 +300,7 @@ export async function checkEntryAlertForSymbol(
   if (alertable && (isTransition || cooldownExpired)) {
     await sendTelegramAlert(env, formatEntryAlert(r));
     await d1Client.upsertEntryAlertState({ symbol, lastDecision: composite, lastAlertAt: now });
+    await persistDcaActivePlan(symbol, r);
     return outcome;
   }
 
@@ -278,7 +309,35 @@ export async function checkEntryAlertForSymbol(
     lastDecision: composite,
     lastAlertAt: previous?.lastAlertAt ?? null,
   });
+  await persistDcaActivePlan(symbol, r);
   return outcome;
+}
+
+async function persistDcaActivePlan(symbol: string, r: TriplePipelineResult): Promise<void> {
+  const { dca, dcaSm } = r;
+  if (!dcaSm || !dca.direction) return;
+  try {
+    if (dcaSm.decision === "DCA_STOP") {
+      await d1Client.deleteDcaActivePlan(symbol, dca.direction);
+      return;
+    }
+    const existing = await d1Client.getDcaActivePlan(symbol, dca.direction);
+    await d1Client.upsertDcaActivePlan({
+      symbol,
+      side: dca.direction,
+      entryCount: existing?.entryCount ?? dcaSm.entryCount,
+      maxEntries: dcaSm.maxEntries,
+      nextTriggerPrice: dcaSm.nextTriggerPrice,
+      intervalPct: dcaSm.intervalPct,
+      pauseStatus: dcaSm.pauseLevel === "NONE" ? "NONE" : dcaSm.pauseLevel,
+      pauseReason: dcaSm.pauseReason,
+      avgEntryPrice: existing?.avgEntryPrice ?? null,
+      totalInvested: existing?.totalInvested ?? null,
+      lastEntryAt: existing?.lastEntryAt ?? null,
+    });
+  } catch (err) {
+    console.error(`[entry-alert] D1 dca_active_plans ${symbol}:`, (err as Error)?.message ?? String(err));
+  }
 }
 
 interface WatchlistBundle {

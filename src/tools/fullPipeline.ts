@@ -37,6 +37,11 @@ import { getPairThreshold } from "./config.js";
 import { computeGridBounds, computeATR, type GridBoundResult, type GridBoundOptions } from "../gridBoundEngine.js";
 import { evaluateDcaEntry, DCA_MODAL_DEFAULT_USD, type DcaHeadResult } from "../dcaPipelineEngine.js";
 import {
+  buildAndEvaluateDcaSmartMoney,
+  type DcaSmartMoneyResult,
+} from "../cron/dcaSmartMoneyAdapter.js";
+import type { GridSmDecision } from "../cron/gridSmartMoneyAdapter.js";
+import {
   evaluateTraditionalFuturesEntry,
   stubTraditionalResult,
   type TraditionalFuturesResult,
@@ -149,6 +154,8 @@ export interface TriplePipelineResult {
   grid: SymbolPipelineResult;
   dca: DcaHeadResult;
   trad: TraditionalFuturesResult;
+  /** Phase 3 DCA Smart Money Adapter (null kalau head DCA disabled / hard-screen reject). */
+  dcaSm: DcaSmartMoneyResult | null;
 }
 
 // Alias back-compat -- beberapa modul/test masih import nama lama. Bentuknya
@@ -513,6 +520,7 @@ async function runPipelineInternal(
         // Traditional Futures: skenario A butuh sweep, skenario B butuh
         // regime BREAKOUT -- keduanya lolos hanya via jalur survivor. Reject.
         trad: stubTraditionalResult(`hard_screen_reject (${hardScreen.tags.join(",") || "regime/vol/funding"})`),
+        dcaSm: null,
       };
     }
 
@@ -942,7 +950,36 @@ async function runPipelineInternal(
       { liquidations: null },
     );
 
-    return { grid, dca, trad };
+    // ─── HEAD DCA SMART MONEY V3 (Phase 3, reuse Wave 1/2 + D1 funding hist) ───
+    let dcaSm: DcaSmartMoneyResult | null = null;
+    if (dcaOpts && dca.direction) {
+      const gridSmDecision: GridSmDecision | null =
+        grid.decision === "NO_TRADE" &&
+        (regime1h.regime === "BREAKOUT" || regime4h.regime === "BREAKOUT" || regime1h.regime === "TRENDING_UP" || regime1h.regime === "TRENDING_DOWN")
+          ? "GRID_NO_TRADE"
+          : null;
+      try {
+        dcaSm = await buildAndEvaluateDcaSmartMoney({
+          symbol,
+          side: dca.direction,
+          currentPrice,
+          klines1h,
+          klines4h,
+          fundingRate,
+          oiHist24,
+          oiVelocityPerHour,
+          regime: regime4h.regime,
+          gridSmDecision: gridSmDecision,
+          cvdBuyPct: cvd.buyPct,
+        });
+      } catch (err) {
+        preHardScreenNotes.push(
+          `DCA Smart Money V3 gagal: ${err instanceof Error ? err.message : String(err)} -- head DCA legacy tetap dipakai.`,
+        );
+      }
+    }
+
+    return { grid, dca, trad, dcaSm };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return {
@@ -963,6 +1000,7 @@ async function runPipelineInternal(
       },
       dca: stubDca(symbol, `pipeline_error: ${message}`),
       trad: stubTraditionalResult(`pipeline_error: ${message}`),
+      dcaSm: null,
     };
   }
 }

@@ -85,3 +85,31 @@ export function multiTfAlignScore(bias1h: PriceBias, bias4h: PriceBias): number 
   if (bias1h === "SIDEWAYS") return 0;
   return bias4h === bias1h ? 100 : 50;
 }
+
+/**
+ * Percentile rank kecepatan OI saat ini terhadap distribusi velocity historis
+ * (mis. dihitung rolling dari openInterestHist). Return 0-100. History kosong
+ * -> 50 (netral).
+ */
+export function getOIVelocityPercentile(currentVelocity: number, historyVelocities: number[]): number {
+  const valid = historyVelocities.filter((v) => Number.isFinite(v));
+  if (valid.length === 0) return 50;
+  const atOrBelow = valid.filter((v) => v <= currentVelocity).length;
+  return Math.min(100, Math.max(0, (atOrBelow / valid.length) * 100));
+}
+
+/**
+ * EMA sederhana (Wilder-style smoothing factor k = 2/(period+1)).
+ * Return nilai EMA terakhir; array kosong -> 0.
+ */
+export function ema(values: number[], period: number): number {
+  const ys = values.filter((v) => Number.isFinite(v));
+  if (ys.length === 0) return 0;
+  if (ys.length === 1 || period <= 1) return ys[ys.length - 1];
+  const k = 2 / (period + 1);
+  let out = ys[0];
+  for (let i = 1; i < ys.length; i++) {
+    out = ys[i] * k + out * (1 - k);
+  }
+  return out;
+}

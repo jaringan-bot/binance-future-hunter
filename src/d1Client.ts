@@ -642,3 +642,143 @@ export async function countEntryAlertsSince(cutoffMs: number): Promise<number> {
     .first<{ count: number }>();
   return row?.count ?? 0;
 }
+
+// ── DCA active plans (Phase 3 Smart Money Adapter) ────────────────────────
+
+export type DcaPauseStatus = "NONE" | "PAUSE_SOFT" | "PAUSE_HARD" | "STOP";
+export type DcaPlanSide = "LONG" | "SHORT";
+
+export interface DcaActivePlanRow {
+  id: number;
+  symbol: string;
+  side: DcaPlanSide;
+  productType: string;
+  entryCount: number;
+  maxEntries: number;
+  avgEntryPrice: number | null;
+  totalInvested: number | null;
+  nextTriggerPrice: number | null;
+  intervalPct: number | null;
+  pauseStatus: DcaPauseStatus;
+  pauseReason: string | null;
+  createdAt: number | null;
+  lastEntryAt: number | null;
+}
+
+interface RawDcaActivePlanRow {
+  id: number;
+  symbol: string;
+  side: string;
+  product_type: string;
+  entry_count: number;
+  max_entries: number;
+  avg_entry_price: number | null;
+  total_invested: number | null;
+  next_trigger_price: number | null;
+  interval_pct: number | null;
+  pause_status: string;
+  pause_reason: string | null;
+  created_at: number | null;
+  last_entry_at: number | null;
+}
+
+function mapDcaActivePlan(r: RawDcaActivePlanRow): DcaActivePlanRow {
+  return {
+    id: r.id,
+    symbol: r.symbol,
+    side: r.side as DcaPlanSide,
+    productType: r.product_type,
+    entryCount: r.entry_count,
+    maxEntries: r.max_entries,
+    avgEntryPrice: r.avg_entry_price,
+    totalInvested: r.total_invested,
+    nextTriggerPrice: r.next_trigger_price,
+    intervalPct: r.interval_pct,
+    pauseStatus: r.pause_status as DcaPauseStatus,
+    pauseReason: r.pause_reason,
+    createdAt: r.created_at,
+    lastEntryAt: r.last_entry_at,
+  };
+}
+
+export async function getDcaActivePlan(symbol: string, side: DcaPlanSide): Promise<DcaActivePlanRow | null> {
+  const row = await requireDb()
+    .prepare("SELECT * FROM dca_active_plans WHERE symbol = ? AND side = ? LIMIT 1")
+    .bind(symbol.toUpperCase(), side)
+    .first<RawDcaActivePlanRow>();
+  return row ? mapDcaActivePlan(row) : null;
+}
+
+export interface UpsertDcaActivePlanInput {
+  symbol: string;
+  side: DcaPlanSide;
+  productType?: string;
+  entryCount?: number;
+  maxEntries?: number;
+  avgEntryPrice?: number | null;
+  totalInvested?: number | null;
+  nextTriggerPrice?: number | null;
+  intervalPct?: number | null;
+  pauseStatus?: DcaPauseStatus;
+  pauseReason?: string | null;
+  createdAt?: number;
+  lastEntryAt?: number | null;
+}
+
+export async function upsertDcaActivePlan(input: UpsertDcaActivePlanInput): Promise<void> {
+  const symbol = input.symbol.toUpperCase();
+  const now = Date.now();
+  const existing = await getDcaActivePlan(symbol, input.side);
+  if (existing) {
+    await requireDb()
+      .prepare(
+        "UPDATE dca_active_plans SET entry_count = ?, max_entries = ?, avg_entry_price = ?, total_invested = ?, " +
+          "next_trigger_price = ?, interval_pct = ?, pause_status = ?, pause_reason = ?, last_entry_at = ? " +
+          "WHERE symbol = ? AND side = ?",
+      )
+      .bind(
+        input.entryCount ?? existing.entryCount,
+        input.maxEntries ?? existing.maxEntries,
+        input.avgEntryPrice ?? existing.avgEntryPrice,
+        input.totalInvested ?? existing.totalInvested,
+        input.nextTriggerPrice ?? existing.nextTriggerPrice,
+        input.intervalPct ?? existing.intervalPct,
+        input.pauseStatus ?? existing.pauseStatus,
+        input.pauseReason ?? existing.pauseReason,
+        input.lastEntryAt ?? existing.lastEntryAt,
+        symbol,
+        input.side,
+      )
+      .run();
+    return;
+  }
+  await requireDb()
+    .prepare(
+      "INSERT INTO dca_active_plans (symbol, side, product_type, entry_count, max_entries, avg_entry_price, " +
+        "total_invested, next_trigger_price, interval_pct, pause_status, pause_reason, created_at, last_entry_at) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(
+      symbol,
+      input.side,
+      input.productType ?? "FUTURES",
+      input.entryCount ?? 0,
+      input.maxEntries ?? 6,
+      input.avgEntryPrice ?? null,
+      input.totalInvested ?? null,
+      input.nextTriggerPrice ?? null,
+      input.intervalPct ?? null,
+      input.pauseStatus ?? "NONE",
+      input.pauseReason ?? null,
+      input.createdAt ?? now,
+      input.lastEntryAt ?? null,
+    )
+    .run();
+}
+
+export async function deleteDcaActivePlan(symbol: string, side: DcaPlanSide): Promise<void> {
+  await requireDb()
+    .prepare("DELETE FROM dca_active_plans WHERE symbol = ? AND side = ?")
+    .bind(symbol.toUpperCase(), side)
+    .run();
+}
