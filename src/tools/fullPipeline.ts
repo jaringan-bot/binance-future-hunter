@@ -382,7 +382,12 @@ async function runPipelineInternal(
   const preHardScreenNotes: string[] = [];
 
   try {
-    const klineLimit = Math.max(opts.lookbackBars, 40);
+    // +2 memenuhi kebutuhan candle head Traditional Futures / Smart Money
+    // (evaluateTraditionalFuturesEntry butuh lookbackBars + excludeLast + 1 =
+    // lookbackBars + 2). Tanpa ini head trad selalu short-circuit "Candle tidak
+    // cukup" untuk lookbackBars >= 39 (mis. default 50 -> butuh 52, dulu cuma
+    // fetch 50). Lihat src/cron/entryAlertFuturesAudit.test.ts.
+    const klineLimit = Math.max(opts.lookbackBars + 2, 40);
     const upperSymbol = symbol.toUpperCase();
 
     // Ticker: bulk-map miss diperlakukan SAMA PERSIS kayak fetch per-symbol
