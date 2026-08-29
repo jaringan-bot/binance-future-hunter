@@ -482,6 +482,34 @@ ini bisa liat IP visitor lain, kontradiksi sama tujuannya.
    count), 20 request terakhir mentah. Default window 24 jam, bisa
    diubah lewat `hours`.
 
+## Monitoring & Alerting
+
+Backend ini punya beberapa titik gagal diam-diam (proxy Vercel/VPS mati, WS
+stream gateway putus, Cron Trigger di-Cancel platform). Yang ada sekarang,
+semua lewat **Telegram** (butuh `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`
+di-set — kalau tidak, alert cuma ke Workers Logs):
+
+| Cek | Cron | Alert kalau |
+|---|---|---|
+| `checkHeartbeat` (`heartbeatCron.ts`) | 3×/hari (07/15/23 WIB) | 8 jam nol sinyal TRADE/WATCH — 1 pesan yang bedain "market sepi + backend normal" vs ">30% pair gagal tiap tick = backend bermasalah" vs "nol data = cron mati" |
+| `checkEntryAlertCronFreshness` (`heartbeatCron.ts`) | nempel di `*/5` | nol tick entry-alert SELESAI dalam 40 menit (deteksi tick di-Cancel platform) — cooldown 1 jam |
+| `checkStreamGatewayHealth` (`infraHealthCron.ts`) | nempel di `*/5` | VPS stream gateway `:8081/health` unreachable, WS ke Binance putus, atau buffer basi >5 menit — cooldown 1 jam |
+| `checkMarketSnapshotFreshness` (`infraHealthCron.ts`) | nempel di `*/5` | nol baris `market_snapshots` baru dalam 20 menit (cron snapshot `*/5` berhenti nulis) — cooldown 1 jam |
+| `checkD1Capacity` (`infraHealthCron.ts`) | 3×/hari (piggyback `HEARTBEAT_CRON`) | `market_snapshots` + `signal_history` (dua tabel tanpa pruning) gabungan lewat 5 juta baris — cooldown 24 jam |
+
+Semua cek KV-gated (maks 1 alert per cooldown selagi kondisi persist), aman
+dijalanin tiap 5 menit.
+
+**Yang MASIH belum ada** (kerjaan dashboard, bukan kode):
+
+- **Uptime monitor eksternal** ke worker `/` + relay `https://<vps>/health` —
+  pakai UptimeRobot / Cloudflare Health Checks (gratis, 5-menit). Ini yang
+  paling cepat nangkep VPS/relay mati total; cek internal di atas cuma
+  backstop dengan lag.
+- **Cloudflare notification** untuk spike error-rate Workers / CPU-limit —
+  observability (`[observability] enabled = true`) cuma ngumpulin data, gak
+  ada rule alert.
+
 ## Keamanan: DNS Rebinding Protection (OPSIONAL)
 
 Endpoint `/mcp` memvalidasi header `Origin` sebelum memproses request --

@@ -124,6 +124,38 @@ export async function querySignalHistory(
   }));
 }
 
+// Infra-health read paths -- dipakai src/cron/infraHealthCron.ts.
+//
+// getLatestMarketSnapshotTimestamp(): gap-detection buat cron snapshot 5-menit
+// (checkMarketSnapshotFreshness). BEDA dari getLatestEntryAlertRunLogTimestamp()
+// -- itu jalur entry-alert, ini jalur snapshot basis+sinyal MM. Kalau cron */5
+// diam-diam berhenti (semua symbol gagal, atau tick di-Cancel platform), tabel
+// ini berhenti nambah baris tapi checkHeartbeat() (yang cuma pantau entry-alert)
+// gak akan tahu.
+//
+// count*Rows(): market_snapshots + signal_history adalah DUA tabel yang gak
+// punya pruning (beda dari request_log/wall_tracking/hyperliquid_whale_snapshots
+// yang di-prune tiap cron) -- row-nya nambah terus. D1 free tier 5GB storage
+// masih longgar untuk waktu lama tapi bukan tak terbatas; checkD1Capacity()
+// alert kalau gabungan dua tabel lewat ambang, jadi ada waktu buat nambah
+// pruning sebelum kena limit.
+export async function getLatestMarketSnapshotTimestamp(): Promise<number | null> {
+  const row = await requireDb()
+    .prepare("SELECT MAX(timestamp) as latest FROM market_snapshots")
+    .first<{ latest: number | null }>();
+  return row?.latest ?? null;
+}
+
+export async function countMarketSnapshotRows(): Promise<number> {
+  const row = await requireDb().prepare("SELECT COUNT(*) as count FROM market_snapshots").first<{ count: number }>();
+  return row?.count ?? 0;
+}
+
+export async function countSignalHistoryRows(): Promise<number> {
+  const row = await requireDb().prepare("SELECT COUNT(*) as count FROM signal_history").first<{ count: number }>();
+  return row?.count ?? 0;
+}
+
 // request_log -- dasar buat endpoint owner-only GET /admin/usage
 // (src/index.ts). BUKAN dibaca oleh MCP tool manapun (privasi: jangan
 // bocorin IP visitor lain ke sembarang caller MCP).

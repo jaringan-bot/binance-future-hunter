@@ -12,6 +12,11 @@ import { snapshotBasisForSymbol, snapshotNonWatchlistBasis } from "./cron/market
 import { snapshotWhaleWallet } from "./cron/hyperliquidWhaleCron.js";
 import { runEntryAlertCheck } from "./cron/entryAlertCron.js";
 import { checkHeartbeat, checkEntryAlertCronFreshness } from "./cron/heartbeatCron.js";
+import {
+  checkStreamGatewayHealth,
+  checkMarketSnapshotFreshness,
+  checkD1Capacity,
+} from "./cron/infraHealthCron.js";
 
 interface Env {
   PROXY_URL?: string;
@@ -236,7 +241,7 @@ export default {
     }
   },
 
-  // Empat Cron Trigger (lihat [triggers] di wrangler.toml), dibedakan lewat
+  // Lima Cron Trigger (lihat [triggers] di wrangler.toml), dibedakan lewat
   // event.cron string:
   // - WALL_SCAN_CRON (*/1, tiap 1 menit): scan wall kandidat order book
   //   untuk WALL_SCAN_WATCHLIST (shared.ts -- subset 15 pair pertama dari
@@ -256,7 +261,9 @@ export default {
   // - HEARTBEAT_CRON (00.00/08.00/16.00 UTC = 07.00/15.00/23.00 WIB, 3x/hari):
   //   kalau gak ada alert TRADE/WATCH sama sekali dalam 8 jam terakhir,
   //   kirim 1 pesan Telegram yang bedain "market sepi" dari "backend
-  //   bermasalah" (heartbeatCron.ts, tally dari entry_alert_run_log).
+  //   bermasalah" (heartbeatCron.ts, tally dari entry_alert_run_log). JUGA
+  //   checkD1Capacity() (infraHealthCron.ts) -- alert kalau market_snapshots
+  //   + signal_history (dua tabel tanpa pruning) lewat ambang baris.
   // - selain itu (*/5, tiap 5 menit, DEFAULT/fallback): dua hal per symbol
   //   di SNAPSHOT_WATCHLIST -- (1) market snapshot (basis futures-vs-spot +
   //   funding + OI, dibaca binance_get_basis_history), (2) 6 skor sinyal MM
@@ -267,7 +274,11 @@ export default {
   //   (SAJA -- bukan computeMmSignals/signal_history) buat top-5 pair
   //   NON-watchlist paling sering di-query (snapshotNonWatchlistBasis, lihat
   //   src/queryFrequency.ts) -- TIDAK menyentuh wall tracking (cron 1-menit)
-  //   sama sekali. Prune request_log & wall_tracking juga di sini.
+  //   sama sekali. Prune request_log & wall_tracking juga di sini. Plus 3
+  //   cek gap/health yang KV-gated (maks 1 alert/jam): checkEntryAlertCronFreshness
+  //   (heartbeatCron.ts) + checkStreamGatewayHealth + checkMarketSnapshotFreshness
+  //   (infraHealthCron.ts) -- masing-masing nutup blind spot yang checkHeartbeat()
+  //   sendiri gak lihat (VPS stream gateway mati, cron snapshot ini berhenti).
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     binanceProxy.setProxyConfig(
       env.PROXY_URL,
@@ -310,8 +321,15 @@ export default {
     }
 
     if (event.cron === HEARTBEAT_CRON) {
+      const telegramEnv = { TELEGRAM_BOT_TOKEN: env.TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID: env.TELEGRAM_CHAT_ID };
+      ctx.waitUntil(checkHeartbeat(telegramEnv));
+      // D1 capacity check di sini (3x/hari, bukan tiap */5) -- COUNT(*) di
+      // tabel jutaan baris gak murah, dan runway dari alert ke "harus prune"
+      // itu puluhan hari, jadi gak butuh presisi menit.
       ctx.waitUntil(
-        checkHeartbeat({ TELEGRAM_BOT_TOKEN: env.TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID: env.TELEGRAM_CHAT_ID }),
+        checkD1Capacity(telegramEnv).catch((err) =>
+          console.error("[cron] gagal checkD1Capacity:", (err as Error)?.message ?? String(err)),
+        ),
       );
       return;
     }
@@ -344,9 +362,29 @@ export default {
     // (*/5, paling sering setelah */1) karena ENTRY_ALERT_CRON sendiri bisa
     // di-Cancel platform SEBELUM sempat lapor apa pun soal dirinya sendiri.
     // Lihat checkEntryAlertCronFreshness() (heartbeatCron.ts) untuk detail.
+    const defaultTickTelegramEnv = {
+      TELEGRAM_BOT_TOKEN: env.TELEGRAM_BOT_TOKEN,
+      TELEGRAM_CHAT_ID: env.TELEGRAM_CHAT_ID,
+    };
     ctx.waitUntil(
-      checkEntryAlertCronFreshness({ TELEGRAM_BOT_TOKEN: env.TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID: env.TELEGRAM_CHAT_ID }).catch(
-        (err) => console.error("[cron] gagal checkEntryAlertCronFreshness:", (err as Error)?.message ?? String(err)),
+      checkEntryAlertCronFreshness(defaultTickTelegramEnv).catch((err) =>
+        console.error("[cron] gagal checkEntryAlertCronFreshness:", (err as Error)?.message ?? String(err)),
+      ),
+    );
+
+    // Infra-health checks (src/cron/infraHealthCron.ts) -- juga piggyback di
+    // tick */5 ini. Keduanya KV-gated (maks 1 alert/jam selagi kondisi
+    // persist), jadi aman dijalanin tiap 5 menit. Nutup blind spot yang
+    // checkHeartbeat() gak lihat: stream gateway VPS mati, dan cron snapshot
+    // ini sendiri berhenti nulis baris.
+    ctx.waitUntil(
+      checkStreamGatewayHealth(defaultTickTelegramEnv).catch((err) =>
+        console.error("[cron] gagal checkStreamGatewayHealth:", (err as Error)?.message ?? String(err)),
+      ),
+    );
+    ctx.waitUntil(
+      checkMarketSnapshotFreshness(defaultTickTelegramEnv).catch((err) =>
+        console.error("[cron] gagal checkMarketSnapshotFreshness:", (err as Error)?.message ?? String(err)),
       ),
     );
 
