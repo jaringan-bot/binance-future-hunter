@@ -1,5 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { computeCvdFromTrades, classifyPriceBias, summarizeKlines, truncateRows, calculateADX } from "./toolHelpers.js";
+import {
+  computeCvdFromTrades,
+  classifyPriceBias,
+  summarizeKlines,
+  truncateRows,
+  calculateADX,
+  computeIsolatedSwingLevels,
+  computeATR,
+} from "./toolHelpers.js";
 import type { AggTrade, KlineTuple } from "./binanceProxyClient.js";
 import type { KlineCandle } from "./toolHelpers.js";
 
@@ -150,5 +158,66 @@ describe("calculateADX", () => {
     const result = calculateADX(candles, 14);
     expect(result.adx).toBeGreaterThan(25);
     expect(result.minusDI).toBeGreaterThan(result.plusDI);
+  });
+});
+
+describe("computeIsolatedSwingLevels", () => {
+  it("excludes the active (last) candle from the swing range", () => {
+    const candles = [
+      candle(105, 98, 102),
+      candle(110, 101, 108),
+      candle(109, 100, 104),
+      candle(130, 60, 103), // active candle: extreme wick both ways, must be ignored
+    ];
+    const { hRange, lRange } = computeIsolatedSwingLevels(candles, 3, 1);
+    expect(hRange).toBe(110);
+    expect(lRange).toBe(98);
+  });
+
+  it("honors excludeLast > 1", () => {
+    const candles = [
+      candle(105, 98, 102),
+      candle(110, 101, 108),
+      candle(200, 5, 104), // excluded (excludeLast=2)
+      candle(130, 60, 103), // excluded (active)
+    ];
+    const { hRange, lRange } = computeIsolatedSwingLevels(candles, 5, 2);
+    expect(hRange).toBe(110);
+    expect(lRange).toBe(98);
+  });
+
+  it("only looks back `lookback` candles before the excluded tail", () => {
+    const candles = [
+      candle(999, 1, 500), // outside the 2-bar lookback window -> ignored
+      candle(105, 98, 102),
+      candle(110, 101, 108),
+      candle(130, 60, 103), // active -> excluded
+    ];
+    const { hRange, lRange } = computeIsolatedSwingLevels(candles, 2, 1);
+    expect(hRange).toBe(110);
+    expect(lRange).toBe(98);
+  });
+
+  it("returns zeros when the isolated window is empty", () => {
+    expect(computeIsolatedSwingLevels([candle(130, 60, 103)], 20, 1)).toEqual({ hRange: 0, lRange: 0 });
+    expect(computeIsolatedSwingLevels([], 20, 1)).toEqual({ hRange: 0, lRange: 0 });
+  });
+
+  it("defaults excludeLast to 1", () => {
+    const candles = [candle(105, 98, 102), candle(110, 101, 108), candle(130, 60, 103)];
+    expect(computeIsolatedSwingLevels(candles, 5)).toEqual({ hRange: 110, lRange: 98 });
+  });
+});
+
+describe("computeATR (re-exported from toolHelpers)", () => {
+  it("computes the Wilder ATR over the given period", () => {
+    // Flat 2-wide true range every bar -> ATR converges to 2.
+    const candles = Array.from({ length: 20 }, () => candle(101, 99, 100));
+    expect(computeATR(candles, 3)).toBeCloseTo(2, 10);
+  });
+
+  it("returns 0 when there are fewer than 2 candles", () => {
+    expect(computeATR([], 14)).toBe(0);
+    expect(computeATR([candle(10, 8, 9)], 14)).toBe(0);
   });
 });

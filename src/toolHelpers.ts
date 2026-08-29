@@ -122,6 +122,33 @@ export function summarizeKlines(raw: KlineTuple[]): KlinesSummary {
   };
 }
 
+// Swing high/low dari window candle historis yang SENGAJA MENGECUALIKAN
+// `excludeLast` candle terakhir (default 1 = candle aktif / C_0 yang belum
+// close). Beda dari summarizeKlines().swingHigh/swingLow yang mengambil max/min
+// SELURUH array termasuk candle aktif -- untuk deteksi liquidity sweep kita
+// butuh level swing yang murni dibentuk sebelum candle aktif menembusnya.
+//
+// window = `lookback` candle yang berakhir TEPAT sebelum tail yang dikecualikan:
+//   end   = candles.length - excludeLast   (eksklusif)
+//   start = max(0, end - lookback)
+// Window kosong (candle tidak cukup) -> { hRange: 0, lRange: 0 }, konsisten
+// dengan konvensi summarizeKlines untuk array kosong. Caller (engine liquidity
+// sweep) WAJIB cek kondisi ini sebelum mempercayai levelnya.
+export function computeIsolatedSwingLevels(
+  candles: KlineCandle[],
+  lookback: number,
+  excludeLast = 1,
+): { hRange: number; lRange: number } {
+  const end = candles.length - Math.max(excludeLast, 0);
+  const start = Math.max(0, end - Math.max(lookback, 0));
+  const window = end > start ? candles.slice(start, end) : [];
+  if (window.length === 0) return { hRange: 0, lRange: 0 };
+  return {
+    hRange: Math.max(...window.map((c) => c.high)),
+    lRange: Math.min(...window.map((c) => c.low)),
+  };
+}
+
 export interface AdxResult {
   adx: number;
   plusDI: number;
@@ -140,6 +167,46 @@ export function computeTrueRange(curr: KlineCandle, prev: KlineCandle): number {
     Math.abs(curr.high - prev.close),
     Math.abs(curr.low - prev.close),
   );
+}
+
+// ─────────────────────────────────────────────────────────────
+// ATR (Average True Range) -- Wilder's, dibangun di atas computeTrueRange()
+// yang sama dipakai calculateADX. Beda dari smoothedTR internal calculateADX
+// (yang SENGAJA dibiarkan sebagai cumulative sum karena cuma dipakai sebagai
+// denominator rasio +DI/-DI di sana) -- di sini hasil akhirnya DINORMALISASI
+// (dibagi `period`) supaya jadi ATR per-candle yang bisa langsung dipakai
+// sebagai satuan harga (buffer grid bound, budget penetrasi liquidity sweep).
+//
+// Dulu tinggal di gridBoundEngine.ts; dipindah ke sini (satu file dengan
+// computeTrueRange + calculateADX, keluarga Wilder) supaya bisa dipanggil
+// langsung oleh helper/engine lain (mis. liquiditySweepEngine.ts) tanpa
+// import dari modul grid. gridBoundEngine.ts me-re-export ini apa adanya --
+// semua import lama (`from "../gridBoundEngine.js"`) tetap valid.
+// ─────────────────────────────────────────────────────────────
+export function computeATR(candles: KlineCandle[], period = 14): number {
+  if (candles.length < 2) return 0;
+
+  const trueRanges: number[] = [];
+  for (let i = 1; i < candles.length; i++) {
+    trueRanges.push(computeTrueRange(candles[i], candles[i - 1]));
+  }
+
+  if (trueRanges.length < period) {
+    // Fallback graceful sama spirit-nya kayak calculateADX's dxValues.length <
+    // period branch: rata-rata sederhana dari true range yang ada, lebih baik
+    // dari 0 (yang keliru dibaca "tidak ada volatilitas").
+    return trueRanges.reduce((a, b) => a + b, 0) / (trueRanges.length || 1);
+  }
+
+  // Wilder smoothing: seed = rata-rata `period` pertama, lalu
+  // prev - prev/period + current/period (bentuk ternormalisasi dari
+  // wilderSmooth() calculateADX, supaya hasil akhirnya ATR per-candle
+  // langsung, bukan cumulative sum).
+  let atr = trueRanges.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  for (let i = period; i < trueRanges.length; i++) {
+    atr = (atr * (period - 1) + trueRanges[i]) / period;
+  }
+  return atr;
 }
 
 // ADX (Average Directional Index) standar Wilder, dipakai binance_market_regime

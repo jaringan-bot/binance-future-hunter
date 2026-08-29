@@ -10,41 +10,14 @@
 // algoritma internal Binance (yang tidak publik). Formula di sini: swing
 // high/low dari lookback window + buffer ATR di kedua sisi. Didokumentasikan
 // eksplisit sebagai heuristik di docs/full_pipeline_framework.md.
-import { computeTrueRange, type KlineCandle } from "./toolHelpers.js";
+import { computeATR, type KlineCandle } from "./toolHelpers.js";
 
-// ─────────────────────────────────────────────────────────────
-// ATR (Average True Range) -- Wilder's, dibangun di atas computeTrueRange()
-// yang sama dipakai calculateADX (toolHelpers.ts). Beda dari smoothedTR
-// internal calculateADX (yang SENGAJA dibiarkan sebagai cumulative sum
-// karena cuma dipakai sebagai denominator rasio +DI/-DI di sana) -- di sini
-// hasil akhirnya DINORMALISASI (dibagi `period`) supaya jadi ATR per-candle
-// yang bisa langsung dipakai sebagai satuan harga (buat buffer upper/lower/SL).
-// ─────────────────────────────────────────────────────────────
-export function computeATR(candles: KlineCandle[], period = 14): number {
-  if (candles.length < 2) return 0;
-
-  const trueRanges: number[] = [];
-  for (let i = 1; i < candles.length; i++) {
-    trueRanges.push(computeTrueRange(candles[i], candles[i - 1]));
-  }
-
-  if (trueRanges.length < period) {
-    // Fallback graceful sama spirit-nya kayak calculateADX's dxValues.length <
-    // period branch: rata-rata sederhana dari true range yang ada, lebih baik
-    // dari 0 (yang keliru dibaca "tidak ada volatilitas").
-    return trueRanges.reduce((a, b) => a + b, 0) / (trueRanges.length || 1);
-  }
-
-  // Wilder smoothing: seed = rata-rata `period` pertama, lalu
-  // prev - prev/period + current/period (bentuk ternormalisasi dari
-  // wilderSmooth() calculateADX, supaya hasil akhirnya ATR per-candle
-  // langsung, bukan cumulative sum).
-  let atr = trueRanges.slice(0, period).reduce((a, b) => a + b, 0) / period;
-  for (let i = period; i < trueRanges.length; i++) {
-    atr = (atr * (period - 1) + trueRanges[i]) / period;
-  }
-  return atr;
-}
+// computeATR dulu didefinisikan di sini; sekarang tinggal di toolHelpers.ts
+// (satu file dengan computeTrueRange + calculateADX). Di-re-export apa adanya
+// supaya import lama `import { computeATR } from "../gridBoundEngine.js"`
+// (price.ts, fullPipeline.ts, gridBoundEngine.test.ts) tetap valid tanpa
+// perubahan.
+export { computeATR } from "./toolHelpers.js";
 
 export type GridBoundType = "ARITHMETIC" | "GEOMETRIC";
 
