@@ -195,6 +195,36 @@ describe("binanceProxyClient proxy failover", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("fails over on a 404 (relay deployment vanished, e.g. Deno DEPLOYMENT_NOT_FOUND) instead of throwing and killing the whole tick", async () => {
+    // Incident 2026-08-28: secondary relay's Deno deployment was deleted, the
+    // Worker got 404 from the platform. 404 was not in the old allowlist ->
+    // callProxy threw immediately without trying the other tier.
+    setProxyConfig("https://primary.example", "secret1", "https://secondary.example", "secret2");
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ msg: "Not Found (DEPLOYMENT_NOT_FOUND)" }, 404))
+      .mockResolvedValueOnce(jsonResponse(fundingBody, 200));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await getCurrentFundingRateNative("BTCUSDT");
+    expect(result.lastFundingRate).toBe("0.0001");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[1][0])).toContain("secondary.example");
+  });
+
+  it("a 404 on the last relay tier does not fall through to direct (would just hit the WAF 403)", async () => {
+    setProxyConfig("https://primary.example", "secret1", "https://secondary.example", "secret2");
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ code: -1003 }, 418)) // primary banned
+      .mockResolvedValueOnce(jsonResponse({ msg: "DEPLOYMENT_NOT_FOUND" }, 404)); // secondary gone
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getCurrentFundingRateNative("BTCUSDT")).rejects.toThrow(/404/);
+    expect(fetchMock).toHaveBeenCalledTimes(2); // primary + secondary, NOT direct
+  });
+
+
   it("retries once (same tier, no failover) when the proxy body is not valid JSON, then succeeds", async () => {
     setProxyConfig("https://primary.example", "secret1", "https://secondary.example", "secret2");
     const klineRow: [number, string, string, string, string, string, number, string, number, string, string, string] = [

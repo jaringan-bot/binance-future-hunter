@@ -429,14 +429,21 @@ export interface EntryAlertRunLogRow {
   runAt: number;
   total: number;
   errors: number;
+  /** watch_count / trade_count = GRID tallies (legacy column names kept). */
   watchCount: number;
   tradeCount: number;
+  /** DCA head tallies (migration 0008, observability only). Default 0. */
+  dcaWatchCount?: number;
+  dcaTradeCount?: number;
 }
 
 export async function insertEntryAlertRunLog(row: EntryAlertRunLogRow): Promise<void> {
   await requireDb()
-    .prepare("INSERT INTO entry_alert_run_log (run_at, total, errors, watch_count, trade_count) VALUES (?, ?, ?, ?, ?)")
-    .bind(row.runAt, row.total, row.errors, row.watchCount, row.tradeCount)
+    .prepare(
+      "INSERT INTO entry_alert_run_log (run_at, total, errors, watch_count, trade_count, dca_watch_count, dca_trade_count) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(row.runAt, row.total, row.errors, row.watchCount, row.tradeCount, row.dcaWatchCount ?? 0, row.dcaTradeCount ?? 0)
     .run();
 }
 
@@ -473,6 +480,30 @@ export async function getLatestEntryAlertRunLogTimestamp(): Promise<number | nul
 
 export async function pruneOldEntryAlertRunLog(cutoffMs: number): Promise<void> {
   await requireDb().prepare("DELETE FROM entry_alert_run_log WHERE run_at < ?").bind(cutoffMs).run();
+}
+
+// Satu row per tick: daftar SYMBOL yang di-skip pre-filter Wave 1
+// (entryRanking.ts -- di luar TOP-N, tidak masuk hard-screen/Wave 1/2).
+// Dipakai buat AUDIT lanjutan: cek apakah pair yang di-skip pernah jadi
+// setup bagus di pipeline lama -- kalau iya, N terlalu kecil atau formula
+// ranking salah. Retensi beberapa hari (prune di index.ts scheduled),
+// lebih panjang dari run_log karena butuh window audit manual, bukan
+// lookback 8 jam heartbeat.
+export interface EntryAlertSkipLogRow {
+  runAt: number;
+  skippedSymbols: string[];
+  topN: number;
+}
+
+export async function insertEntryAlertSkipLog(row: EntryAlertSkipLogRow): Promise<void> {
+  await requireDb()
+    .prepare("INSERT INTO entry_alert_skip_log (run_at, skipped_symbols, skipped_count, top_n) VALUES (?, ?, ?, ?)")
+    .bind(row.runAt, JSON.stringify(row.skippedSymbols), row.skippedSymbols.length, row.topN)
+    .run();
+}
+
+export async function pruneOldEntryAlertSkipLog(cutoffMs: number): Promise<void> {
+  await requireDb().prepare("DELETE FROM entry_alert_skip_log WHERE run_at < ?").bind(cutoffMs).run();
 }
 
 // Dipakai heartbeatCron.ts -- kalau ada minimal 1 alert TRADE/WATCH beneran

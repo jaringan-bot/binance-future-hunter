@@ -362,5 +362,61 @@ hasil query live ke Binance.)_
 
 ---
 
+## 13. Head DCA (entry-alert cron, 2026-08-29)
+
+`runPipelineForSymbol` dipecah jadi `runPipelineInternal` (fetch 1× 2-wave) +
+dua konsumen: `evaluateGrid` (kode grid lama, verbatim) dan `evaluateDca`
+(wrapper `src/dcaPipelineEngine.ts`). `runDualPipelineForSymbol` (dipakai
+`entryAlertCron.ts`) mengembalikan `{grid, dca}`. Tool MCP
+`whalescope_full_pipeline` tetap grid-only lewat `runPipelineForSymbol`.
+
+- **Fetch tambahan head DCA: TEPAT 1** (`klines 1d`, limit 30, `.catch(()=>null)`)
+  di Wave 2, survivor-only. Sisanya (RV annualized, ATR1h/4h, OI velocity,
+  OBI, CVD, 4h swing) diturunkan dari data yang sudah di-fetch grid.
+- **Shared cheap screen = `evaluateHardScreen` yang sekarang** (tidak diubah).
+  Strictly lebih permisif dari tiap gate DCA (grid vol $5M < DCA $8M; grid
+  funding 0.05% > DCA 0.03%; keduanya reject BREAKOUT + ADX-spike), jadi
+  hard-screen reject ⇒ `{grid: NO_TRADE, dca: DCA_NO_TRADE}` tanpa Wave-2
+  call, tanpa kehilangan pair DCA-worthy.
+- **DCA engine**: profil MODERATE (default skill), Volatility-tiered gate ADX
+  (`src/volatilityTier.ts`, cutoff 60/120, ×1.0/1.25/1.6), Entry Matrix
+  35/15/15/20/15, Hard Neutral Cap 67, param math (price-drop-step dari
+  ATR1h, multiplier geometric, TP/round 1.25%, SL dari ATR4h di luar level
+  DCA terakhir, leverage 5-7, capital-solve base-order margin dari KV
+  `entry_alert:dca_modal_usd` default $200).
+- **Divergensi head DCA vs skill DCA** (semua dalam batas "targeted fixes /
+  nol call Binance tambahan", lihat komentar `dcaPipelineEngine.ts`):
+  taker-ratio → proxy CVD; wall-persistence → proxy OBI depth-10 +
+  spoofing.score; ADX_1D/1D-regime → hanya kalau `klines1d` sukses;
+  cross-exchange funding → tidak dijalankan; screening+entry → satu skor
+  Entry-matrix; Non-Watchlist penalty tidak berlaku; Konservatif tidak
+  di-expose; Leverage Bracket cross-check tidak tersedia di worker;
+  `analyze_cvd_divergence` spot-vs-futures tidak dijalankan; RV pakai
+  `realizedVolPct(candles1h)`; `modalAvailableUsd` = default config.
+
+## 14. Pre-filter ranking F1 → F3 (2026-08-29)
+
+`entryRanking.rankEntryCandidates` diganti dari "extremity-high"
+(`0.5·pct(funding) + 0.5·pct(|priceChange|)`) ke **F3 "cheap grid score"**:
+`volNorm(log10 quoteVolume) · clamp(1 − |priceChange24h|/p90) · clamp(1 −
+|funding|/p90)`, threshold p90 per-tick. Backtest
+(`scripts/backtest-ranking.mjs`, di-replay ke ground truth `[hardscreen]`
+tick 11:07 UTC 2026-08-28): F1 top-N PASS rate 0.70–0.79 (lebih buruk dari
+hard-screen 0.84) + membuang BTC/ETH/SOL/BNB; F3 p90 = 1.00 PASS, tier-1 4/4
+rank #1–#10.
+
+## 15. Deferred — grid volatility tiering
+
+Grid engine (`pipelineEngine.ts`) BELUM mengadopsi Volatility Tier: masih
+gate flat BREAKOUT + `ADX_FALLBACK_MIN=25` / `SPIKE_FALLBACK_MIN=4.0`.
+`src/volatilityTier.ts` sudah ada (dipakai head DCA) dan ditulis supaya
+perubahan bertarget nanti bisa menukar gate flat grid ke `effectiveGate`
+tanpa menyentuh head DCA. Re-kalibrasi ADX-25/spike-4.0 sendiri butuh
+N hari data shadow (`[hardscreen]` tail / `entry_alert_hardscreen_log`
+yang direncanakan) — follow-up terpisah, data-gated.
+
+---
+
 *Dibuat: 2026-08-22, bareng rilis `whalescope_full_pipeline`.*
 *Update 2026-08-22: tambah non-gate Matches Needed + Estimated Time to Breakeven.*
+*Update 2026-08-29: head DCA + shared 2-wave fetch + F1→F3 ranking (§13-15).*

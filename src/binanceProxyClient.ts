@@ -179,7 +179,18 @@ export class BinanceProxyError extends Error {
 //   Binance-restricted ones (US) -- a given request may randomly land on a
 //   bad edge and 451 while the next lands on Singapore and works. Failing
 //   over to the other relay (a fixed good region) recovers it.
-const FAILOVER_STATUS = new Set([401, 402, 403, 418, 429, 451, 500, 502, 503, 504]);
+// 404: relay project/deployment HILANG (mis. Deno Deploy `DEPLOYMENT_NOT_FOUND`,
+//   insiden 2026-08-28 -- deployment relay sekunder terhapus). 404 datang dari
+//   PLATFORM relay, bukan dari Binance. Dulu 404 tidak di set ini ->
+//   `isFailoverWorthy` false -> `throw` tanpa coba tier lain -> SELURUH tick
+//   cron mati walau tier lain (primary VPS) sehat. Wajib failover.
+const FAILOVER_STATUS = new Set([401, 402, 403, 404, 418, 429, 451, 500, 502, 503, 504]);
+
+// Status di mana tier `direct` (Worker -> fapi.binance.com dari edge CF) tak
+// bisa bantu: 418 = IP weight-ban, 451 = geo-block, 404 = relay hilang
+// (direct cuma kena WAF 403 -> bikin error rancu). `direct` di-skip supaya
+// status asli yang ke-surface.
+const DIRECT_UNHELPFUL_STATUS = new Set([404, 418, 451]);
 
 const DIRECT_BASE_BY_MARKET: Record<"futures" | "spot", string> = {
   futures: "https://fapi.binance.com",
@@ -359,12 +370,7 @@ async function callProxy<T>(
       const status = err instanceof BinanceProxyError ? err.status : undefined;
       const isFailoverWorthy = status === undefined || FAILOVER_STATUS.has(status);
       let nextTier = tiers[i + 1];
-      // 418 (IP weight-ban) and 451 (geo-block) both mean "this path can't
-      // reach Binance right now". Falling over to `direct` (worker -> Binance
-      // from the CF edge) cannot help: it is WAF-blocked, and for 451 the CF
-      // edge is often in the same restricted region. Skip `direct` for these
-      // and surface the real status instead of a WAF 403.
-      if ((status === 418 || status === 451) && nextTier?.label === "direct") {
+      if (status !== undefined && DIRECT_UNHELPFUL_STATUS.has(status) && nextTier?.label === "direct") {
         nextTier = undefined as unknown as ProxyTier;
       }
       if (!isFailoverWorthy || !nextTier) throw err;

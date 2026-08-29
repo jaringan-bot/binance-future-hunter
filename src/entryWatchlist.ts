@@ -36,14 +36,18 @@ import * as binanceProxy from "./binanceProxyClient.js";
 // Mitigasi sementara -- solusi proper = relay IP kedua (PROXY_URL_2).
 export const ENTRY_WATCHLIST_SIZE = 250;
 
-export async function getTopUsdtPerpetualWatchlist(): Promise<string[]> {
-  const [exchangeInfo, tickers] = await Promise.all([
-    binanceProxy.getFuturesExchangeInfo(),
-    binanceProxy.getAllTicker24hrNative(),
-  ]);
-
+// Bagian MURNI (tanpa fetch) dari pemilihan watchlist -- dipisah supaya
+// runEntryAlertCheck (entryAlertCron.ts) bisa reuse hasil
+// getAllTicker24hrNative() yang SAMA buat prefetch ticker24hr Wave 1, bukan
+// fetch /fapi/v1/ticker/24hr penuh dua kali per tick (dulu: sekali di sini,
+// sekali di fetchBulkTickerFunding).
+export function selectUsdtPerpetualWatchlist(
+  symbols: binanceProxy.FuturesExchangeInfoSymbol[],
+  tickers: binanceProxy.Ticker24hr[],
+  size: number = ENTRY_WATCHLIST_SIZE,
+): string[] {
   const eligible = new Set(
-    exchangeInfo.symbols
+    symbols
       .filter((s) => s.status === "TRADING" && s.contractType === "PERPETUAL" && s.quoteAsset === "USDT")
       .map((s) => s.symbol),
   );
@@ -51,6 +55,14 @@ export async function getTopUsdtPerpetualWatchlist(): Promise<string[]> {
   return tickers
     .filter((t) => eligible.has(t.symbol))
     .sort((a, b) => parseFloat(b.quoteVolume) - parseFloat(a.quoteVolume))
-    .slice(0, ENTRY_WATCHLIST_SIZE)
+    .slice(0, size)
     .map((t) => t.symbol);
+}
+
+export async function getTopUsdtPerpetualWatchlist(): Promise<string[]> {
+  const [exchangeInfo, tickers] = await Promise.all([
+    binanceProxy.getFuturesExchangeInfo(),
+    binanceProxy.getAllTicker24hrNative(),
+  ]);
+  return selectUsdtPerpetualWatchlist(exchangeInfo.symbols, tickers);
 }

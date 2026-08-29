@@ -41,6 +41,20 @@ export const FALLBACK_CONTEXT: GridContextualRisk = {
 
 const CONTEXT_TIMEOUT_MS = 1_500;
 
+// Data mentah yang dibutuhkan fetchMarketContext -- kalau caller sudah
+// punya semuanya (mis. fullPipeline.ts Wave 1 + Wave 2 sudah fetch
+// klines1h/OI/oiHist/aggTrades/topTrader untuk keperluan lain), dioper ke
+// sini supaya TIDAK di-fetch ulang. Menghemat 5 subrequest per symbol.
+// klines1h harus >= 21 bar (idealnya >= 40, sama seperti fetch internal
+// lama limit=40) supaya window ADX/volatility valid.
+export interface MarketContextInputs {
+  klines1h: binanceProxy.KlineTuple[];
+  oiCurrent: Awaited<ReturnType<typeof binanceProxy.getOpenInterestNative>>;
+  oiHist2: Awaited<ReturnType<typeof binanceProxy.getOpenInterestHistNative>>;
+  aggTrades: Awaited<ReturnType<typeof binanceProxy.getAggTrades>>;
+  topTrader: Awaited<ReturnType<typeof binanceProxy.getTopTraderPositionRatio>>;
+}
+
 function realizedVolPct(candles: KlineCandle[]): number {
   const closes = candles.map((candle) => candle.close);
   const periodsPerYear = 24 * 365;
@@ -61,44 +75,68 @@ function realizedVolPct(candles: KlineCandle[]): number {
 
 export async function fetchMarketContext(
   symbol: string,
+  inputs?: MarketContextInputs,
 ): Promise<GridContextualRisk> {
   const formattedSymbol = symbol.trim().toUpperCase().replace("/", "");
 
   try {
-    const contextPromise = Promise.allSettled([
-      binanceProxy.getKlinesNative(formattedSymbol, "1h", 40),
-      binanceProxy.getOpenInterestNative(formattedSymbol),
-      binanceProxy.getOpenInterestHistNative(formattedSymbol, "1h", 2),
-      binanceProxy.getAggTrades(formattedSymbol, 100),
-      binanceProxy.getTopTraderPositionRatio(formattedSymbol, "1h", 1),
-    ]);
+    let rawKlines1h: MarketContextInputs["klines1h"];
+    let rawOiCurrent: MarketContextInputs["oiCurrent"];
+    let rawOiHist2: MarketContextInputs["oiHist2"];
+    let rawAggTrades: MarketContextInputs["aggTrades"];
+    let rawTopTrader: MarketContextInputs["topTrader"];
 
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error("Market context timeout")), CONTEXT_TIMEOUT_MS);
-    });
+    if (inputs) {
+      // Jalur prefetched -- TIDAK ada subrequest ke proxy. Caller
+      // (fullPipeline.ts) sudah punya kelima data ini dari Wave 1 + Wave 2.
+      ({
+        klines1h: rawKlines1h,
+        oiCurrent: rawOiCurrent,
+        oiHist2: rawOiHist2,
+        aggTrades: rawAggTrades,
+        topTrader: rawTopTrader,
+      } = inputs);
+    } else {
+      const contextPromise = Promise.allSettled([
+        binanceProxy.getKlinesNative(formattedSymbol, "1h", 40),
+        binanceProxy.getOpenInterestNative(formattedSymbol),
+        binanceProxy.getOpenInterestHistNative(formattedSymbol, "1h", 2),
+        binanceProxy.getAggTrades(formattedSymbol, 100),
+        binanceProxy.getTopTraderPositionRatio(formattedSymbol, "1h", 1),
+      ]);
 
-    const results = await Promise.race([contextPromise, timeoutPromise]);
-    const [klinesResult, oiCurrentResult, oiHistoryResult, tradesResult, topTraderResult] = results;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("Market context timeout")), CONTEXT_TIMEOUT_MS);
+      });
 
-    if (
-      klinesResult.status !== "fulfilled" ||
-      oiCurrentResult.status !== "fulfilled" ||
-      oiHistoryResult.status !== "fulfilled" ||
-      tradesResult.status !== "fulfilled" ||
-      topTraderResult.status !== "fulfilled"
-    ) {
-      return FALLBACK_CONTEXT;
+      const results = await Promise.race([contextPromise, timeoutPromise]);
+      const [klinesResult, oiCurrentResult, oiHistoryResult, tradesResult, topTraderResult] = results;
+
+      if (
+        klinesResult.status !== "fulfilled" ||
+        oiCurrentResult.status !== "fulfilled" ||
+        oiHistoryResult.status !== "fulfilled" ||
+        tradesResult.status !== "fulfilled" ||
+        topTraderResult.status !== "fulfilled"
+      ) {
+        return FALLBACK_CONTEXT;
+      }
+      rawKlines1h = klinesResult.value;
+      rawOiCurrent = oiCurrentResult.value;
+      rawOiHist2 = oiHistoryResult.value;
+      rawAggTrades = tradesResult.value;
+      rawTopTrader = topTraderResult.value;
     }
 
-    const { candles } = summarizeKlines(klinesResult.value);
-    if (candles.length < 21 || topTraderResult.value.length === 0) {
+    const { candles } = summarizeKlines(rawKlines1h);
+    if (candles.length < 21 || rawTopTrader.length === 0) {
       return FALLBACK_CONTEXT;
     }
 
     const adxResult = calculateADX(candles, 14);
     const recentCandles = candles.slice(-10);
     const priorCandles = candles.slice(-20, -10);
-    const { changePct: priceChangePct } = summarizeKlines(klinesResult.value.slice(-10));
+    const { changePct: priceChangePct } = summarizeKlines(rawKlines1h.slice(-10));
 
     const recentVol = realizedVolPct(recentCandles);
     const priorVol = realizedVolPct(priorCandles);
@@ -112,16 +150,16 @@ export async function fetchMarketContext(
     const volumeSpikeRatio =
       priorVolumeAvg > 0 ? lastCandle.volume / priorVolumeAvg : 1;
 
-    const oiCurrent = Number(oiCurrentResult.value.openInterest);
+    const oiCurrent = Number(rawOiCurrent.openInterest);
     const oiPrevious = Number(
-      oiHistoryResult.value[0]?.sumOpenInterest ?? String(oiCurrent),
+      rawOiHist2[0]?.sumOpenInterest ?? String(oiCurrent),
     );
     const oiChangePct =
       Number.isFinite(oiCurrent) && Number.isFinite(oiPrevious) && oiPrevious !== 0
         ? ((oiCurrent - oiPrevious) / oiPrevious) * 100
         : 0;
 
-    const cvd = computeCvdFromTrades(tradesResult.value);
+    const cvd = computeCvdFromTrades(rawAggTrades);
     const regime = classifyRegime({
       adx: adxResult.adx,
       plusDI: adxResult.plusDI,
@@ -133,7 +171,7 @@ export async function fetchMarketContext(
       volumeSpikeRatio,
     });
 
-    const latestTopTrader = topTraderResult.value[topTraderResult.value.length - 1];
+    const latestTopTrader = rawTopTrader[rawTopTrader.length - 1];
     const topTraderLongPct = Number(latestTopTrader.longAccount) * 100;
     const topTraderShortPct = Number(latestTopTrader.shortAccount) * 100;
     const topTraderRatio = Number(latestTopTrader.longShortRatio);
