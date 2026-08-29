@@ -435,15 +435,28 @@ export interface EntryAlertRunLogRow {
   /** DCA head tallies (migration 0008, observability only). Default 0. */
   dcaWatchCount?: number;
   dcaTradeCount?: number;
+  /** Traditional / Smart-Money futures head tallies (migration 0009). Default 0. */
+  tradWatchCount?: number;
+  tradTradeCount?: number;
 }
 
 export async function insertEntryAlertRunLog(row: EntryAlertRunLogRow): Promise<void> {
   await requireDb()
     .prepare(
-      "INSERT INTO entry_alert_run_log (run_at, total, errors, watch_count, trade_count, dca_watch_count, dca_trade_count) " +
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO entry_alert_run_log (run_at, total, errors, watch_count, trade_count, dca_watch_count, dca_trade_count, trad_watch_count, trad_trade_count) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
-    .bind(row.runAt, row.total, row.errors, row.watchCount, row.tradeCount, row.dcaWatchCount ?? 0, row.dcaTradeCount ?? 0)
+    .bind(
+      row.runAt,
+      row.total,
+      row.errors,
+      row.watchCount,
+      row.tradeCount,
+      row.dcaWatchCount ?? 0,
+      row.dcaTradeCount ?? 0,
+      row.tradWatchCount ?? 0,
+      row.tradTradeCount ?? 0,
+    )
     .run();
 }
 
@@ -480,6 +493,119 @@ export async function getLatestEntryAlertRunLogTimestamp(): Promise<number | nul
 
 export async function pruneOldEntryAlertRunLog(cutoffMs: number): Promise<void> {
   await requireDb().prepare("DELETE FROM entry_alert_run_log WHERE run_at < ?").bind(cutoffMs).run();
+}
+
+// ── sm_watch_states (migration 0009) ─────────────────────────────────────
+// State watch per-symbol Smart Money Core Engine V2 (smartMoneyPipelineEngine.ts):
+// simpan skenario + skor + harga/ATR pemicu saat masuk WATCH, dengan countdown
+// ticks_remaining (default 4 tick) sampai kadaluarsa, atau invalidated_at diisi
+// kalau setup gugur lebih awal (mis. harga menembus trigger_atr). Satu row per
+// symbol (PRIMARY KEY) -- upsert menimpa state lama.
+export interface SmWatchStateRow {
+  symbol: string;
+  scenario: string;
+  score: number;
+  triggerPrice: number;
+  triggerAtr: number;
+  createdAt: number;
+  ticksRemaining?: number; // default 4
+  invalidatedAt?: number | null;
+}
+
+export async function upsertSmWatchState(row: SmWatchStateRow): Promise<void> {
+  await requireDb()
+    .prepare(
+      "INSERT INTO sm_watch_states (symbol, scenario, score, trigger_price, trigger_atr, created_at, ticks_remaining, invalidated_at) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?) " +
+        "ON CONFLICT(symbol) DO UPDATE SET scenario=excluded.scenario, score=excluded.score, trigger_price=excluded.trigger_price, " +
+        "trigger_atr=excluded.trigger_atr, created_at=excluded.created_at, ticks_remaining=excluded.ticks_remaining, invalidated_at=excluded.invalidated_at",
+    )
+    .bind(
+      row.symbol,
+      row.scenario,
+      row.score,
+      row.triggerPrice,
+      row.triggerAtr,
+      row.createdAt,
+      row.ticksRemaining ?? 4,
+      row.invalidatedAt ?? null,
+    )
+    .run();
+}
+
+export async function getSmWatchState(symbol: string): Promise<SmWatchStateRow | null> {
+  const row = await requireDb()
+    .prepare(
+      "SELECT symbol, scenario, score, trigger_price, trigger_atr, created_at, ticks_remaining, invalidated_at FROM sm_watch_states WHERE symbol = ?",
+    )
+    .bind(symbol)
+    .first<{
+      symbol: string;
+      scenario: string;
+      score: number;
+      trigger_price: number;
+      trigger_atr: number;
+      created_at: number;
+      ticks_remaining: number;
+      invalidated_at: number | null;
+    }>();
+  if (!row) return null;
+  return {
+    symbol: row.symbol,
+    scenario: row.scenario,
+    score: row.score,
+    triggerPrice: row.trigger_price,
+    triggerAtr: row.trigger_atr,
+    createdAt: row.created_at,
+    ticksRemaining: row.ticks_remaining,
+    invalidatedAt: row.invalidated_at,
+  };
+}
+
+/** Semua state yang masih hidup (belum invalidated, ticks_remaining > 0). */
+export async function getActiveSmWatchStates(): Promise<SmWatchStateRow[]> {
+  const res = await requireDb()
+    .prepare(
+      "SELECT symbol, scenario, score, trigger_price, trigger_atr, created_at, ticks_remaining, invalidated_at FROM sm_watch_states " +
+        "WHERE invalidated_at IS NULL AND ticks_remaining > 0",
+    )
+    .all<{
+      symbol: string;
+      scenario: string;
+      score: number;
+      trigger_price: number;
+      trigger_atr: number;
+      created_at: number;
+      ticks_remaining: number;
+      invalidated_at: number | null;
+    }>();
+  return (res.results ?? []).map((row) => ({
+    symbol: row.symbol,
+    scenario: row.scenario,
+    score: row.score,
+    triggerPrice: row.trigger_price,
+    triggerAtr: row.trigger_atr,
+    createdAt: row.created_at,
+    ticksRemaining: row.ticks_remaining,
+    invalidatedAt: row.invalidated_at,
+  }));
+}
+
+/** Kurangi ticks_remaining satu untuk semua state hidup; auto-expire saat mencapai 0. */
+export async function decrementActiveSmWatchTicks(): Promise<void> {
+  await requireDb()
+    .prepare("UPDATE sm_watch_states SET ticks_remaining = ticks_remaining - 1 WHERE invalidated_at IS NULL AND ticks_remaining > 0")
+    .run();
+}
+
+/** Tandai satu state gugur (invalidated_at diisi) -- dipanggil saat setup batal lebih awal. */
+export async function invalidateSmWatchState(symbol: string, invalidatedAt: number): Promise<void> {
+  await requireDb().prepare("UPDATE sm_watch_states SET invalidated_at = ? WHERE symbol = ?").bind(invalidatedAt, symbol).run();
+}
+
+/** Prune state lama (created_at < cutoff) -- housekeeping, dipanggil dari scheduled prune. */
+export async function pruneOldSmWatchStates(cutoffMs: number): Promise<void> {
+  await requireDb().prepare("DELETE FROM sm_watch_states WHERE created_at < ?").bind(cutoffMs).run();
 }
 
 // Satu row per tick: daftar SYMBOL yang di-skip pre-filter Wave 1

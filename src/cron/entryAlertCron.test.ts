@@ -608,10 +608,12 @@ describe("runEntryAlertCheck", () => {
       tradeCount: 1, // BTCUSDT grid TRADE
       dcaWatchCount: 1, // ETHUSDT dca WATCH
       dcaTradeCount: 0,
+      tradWatchCount: 0, // all trad heads NO_TRADE in this fixture
+      tradTradeCount: 0,
     });
   });
 
-  it("logs the traditional-futures tally (no D1 column yet) after the batch", async () => {
+  it("logs AND persists the traditional-futures tally (trad_* columns, migration 0009) after the batch", async () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     mockWatchlist(["BTCUSDT", "ETHUSDT"]);
     vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
@@ -622,9 +624,9 @@ describe("runEntryAlertCheck", () => {
     await runEntryAlertCheck(ENV);
 
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("trad tally: TRAD_TRADE=1 TRAD_WATCH=1"));
-    // run_log insert stays the 7-field shape (no trad_* columns)
+    // trad_* columns now persisted (migration 0009): BTCUSDT TRAD_TRADE + ETHUSDT TRAD_WATCH.
     expect(d1Client.insertEntryAlertRunLog).toHaveBeenCalledWith(
-      expect.not.objectContaining({ tradTradeCount: expect.anything() }),
+      expect.objectContaining({ tradTradeCount: 1, tradWatchCount: 1 }),
     );
   });
 

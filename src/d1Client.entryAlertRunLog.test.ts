@@ -19,6 +19,8 @@ interface FakeRunLogRow {
   trade_count: number;
   dca_watch_count: number;
   dca_trade_count: number;
+  trad_watch_count: number;
+  trad_trade_count: number;
 }
 
 interface FakeAlertStateRow {
@@ -42,10 +44,19 @@ class FakeStatement {
 
   async run(): Promise<{ success: true }> {
     if (this.sql.startsWith("INSERT INTO entry_alert_run_log")) {
-      const [run_at, total, errors, watch_count, trade_count, dca_watch_count, dca_trade_count] = this.args as [
-        number, number, number, number, number, number, number,
-      ];
-      this.db.runLogRows.push({ run_at, total, errors, watch_count, trade_count, dca_watch_count, dca_trade_count });
+      const [run_at, total, errors, watch_count, trade_count, dca_watch_count, dca_trade_count, trad_watch_count, trad_trade_count] =
+        this.args as [number, number, number, number, number, number, number, number, number];
+      this.db.runLogRows.push({
+        run_at,
+        total,
+        errors,
+        watch_count,
+        trade_count,
+        dca_watch_count,
+        dca_trade_count,
+        trad_watch_count,
+        trad_trade_count,
+      });
       return { success: true };
     }
     if (this.sql.startsWith("DELETE FROM entry_alert_run_log")) {
@@ -94,20 +105,20 @@ describe("entry_alert_run_log D1 read/write path", () => {
     setD1Database(undefined);
   });
 
-  it("insertEntryAlertRunLog inserts a row (grid + dca tallies)", async () => {
+  it("insertEntryAlertRunLog inserts a row (grid + dca + trad tallies)", async () => {
     await insertEntryAlertRunLog({
-      runAt: 1000, total: 400, errors: 355, watchCount: 20, tradeCount: 0, dcaWatchCount: 7, dcaTradeCount: 2,
+      runAt: 1000, total: 400, errors: 355, watchCount: 20, tradeCount: 0, dcaWatchCount: 7, dcaTradeCount: 2, tradWatchCount: 3, tradTradeCount: 1,
     });
 
     expect(fake.runLogRows).toEqual([
-      { run_at: 1000, total: 400, errors: 355, watch_count: 20, trade_count: 0, dca_watch_count: 7, dca_trade_count: 2 },
+      { run_at: 1000, total: 400, errors: 355, watch_count: 20, trade_count: 0, dca_watch_count: 7, dca_trade_count: 2, trad_watch_count: 3, trad_trade_count: 1 },
     ]);
   });
 
-  it("insertEntryAlertRunLog defaults the dca tallies to 0 when omitted", async () => {
+  it("insertEntryAlertRunLog defaults the dca + trad tallies to 0 when omitted", async () => {
     await insertEntryAlertRunLog({ runAt: 2000, total: 40, errors: 1, watchCount: 5, tradeCount: 1 });
 
-    expect(fake.runLogRows[0]).toMatchObject({ dca_watch_count: 0, dca_trade_count: 0 });
+    expect(fake.runLogRows[0]).toMatchObject({ dca_watch_count: 0, dca_trade_count: 0, trad_watch_count: 0, trad_trade_count: 0 });
   });
 
   it("getEntryAlertRunLogSummarySince sums total/errors across runs at or after the cutoff, excluding older ones", async () => {
