@@ -13,17 +13,18 @@
 // decision-nya SAMA kayak cycle lalu tapi cooldown 4 jam sejak alert
 // terakhir sudah lewat (reminder, bukan spam tiap tick).
 import {
-  runDualPipelineForSymbol,
+  runTriplePipelineForSymbol,
   type PipelineOpts,
   type SymbolPipelineResult,
   type PrefetchedTickerFunding,
-  type DualPipelineResult,
+  type TriplePipelineResult,
   type DcaOpts,
 } from "../tools/fullPipeline.js";
 import { DCA_MODAL_DEFAULT_USD, type DcaHeadResult } from "../dcaPipelineEngine.js";
+import type { TraditionalFuturesResult } from "./traditionalPipelineEngine.js";
 import * as binanceProxy from "../binanceProxyClient.js";
 import * as d1Client from "../d1Client.js";
-import { sendTelegramAlert, escapeMarkdown, type TelegramEnv } from "../telegram.js";
+import { sendTelegramAlert, escapeMarkdown, formatTraditionalFuturesAlert, type TelegramEnv } from "../telegram.js";
 import { selectUsdtPerpetualWatchlist } from "../entryWatchlist.js";
 import { rankEntryCandidates, DEFAULT_ENTRY_TOP_N, type EntryRankingInput } from "../entryRanking.js";
 import * as kvConfig from "../kvConfig.js";
@@ -143,6 +144,14 @@ function isDcaAlertWorthy(dca: DcaHeadResult): boolean {
   return dca.decision !== "DCA_NO_TRADE";
 }
 
+// Traditional Futures: HANYA TRAD_TRADE yang alert (bracket lolos quality
+// filter RR>=1.5 + skenario valid). TRAD_WATCH sengaja TIDAK alert -- head ini
+// baru live, jaga volume notif rendah dulu (bisa dilonggarkan nanti seperti
+// yang dilakukan buat WATCH grid/DCA).
+function isTradAlertWorthy(trad: TraditionalFuturesResult): boolean {
+  return trad.decision === "TRAD_TRADE";
+}
+
 // Penanda Telegram: 🟢/🟡 grid (tak berubah), 🔵/🟠 DCA.
 const GRID_ICON: Record<string, string> = { TRADE: "🟢", WATCH: "🟡" };
 const DCA_ICON: Record<string, string> = { DCA_TRADE: "🔵", DCA_WATCH: "🟠" };
@@ -155,17 +164,20 @@ const DCA_LABEL: Record<string, string> = {
   DCA_WATCH: "DCA TUNGGU",
 };
 
-function formatEntryAlert(r: DualPipelineResult): string {
-  const { grid, dca } = r;
+function formatEntryAlert(r: TriplePipelineResult): string {
+  const { grid, dca, trad } = r;
   const gridOn = isGridAlertWorthy(grid);
   const dcaOn = isDcaAlertWorthy(dca);
+  const tradOn = isTradAlertWorthy(trad);
   const sm = grid.tier1?.smartMoney;
   const dcaDir = dca.direction ? ` (${dca.direction})` : "";
 
-  const headMarkers = `${gridOn ? GRID_ICON[grid.decision] ?? "" : ""}${dcaOn ? DCA_ICON[dca.decision] ?? "" : ""}` || "ℹ️";
+  const headMarkers =
+    `${gridOn ? GRID_ICON[grid.decision] ?? "" : ""}${dcaOn ? DCA_ICON[dca.decision] ?? "" : ""}${tradOn ? "⚡" : ""}` || "ℹ️";
   const headParts: string[] = [];
   if (gridOn) headParts.push(escapeMarkdown(GRID_LABEL[grid.decision] ?? grid.decision));
   if (dcaOn) headParts.push(`${escapeMarkdown(DCA_LABEL[dca.decision] ?? dca.decision)}${dcaDir}`);
+  if (tradOn) headParts.push(`TRADITIONAL FUTURES (${escapeMarkdown(trad.scenario)})`);
 
   const lines = [
     `${headMarkers} *${escapeMarkdown(grid.symbol)}* — ${headParts.join(" · ")}`,
@@ -209,12 +221,18 @@ function formatEntryAlert(r: DualPipelineResult): string {
     lines.push(`DCA: Tolak${dca.rejectReason ? ` (${escapeMarkdown(dca.rejectReason)})` : ""}`);
   }
 
+  // ── TRADITIONAL FUTURES block ──
+  if (tradOn) {
+    lines.push("", formatTraditionalFuturesAlert(grid.symbol, trad, grid, dca));
+  }
+
   return lines.join("\n");
 }
 
 export interface AlertCheckOutcome {
   gridDecision: SymbolPipelineResult["decision"];
   dcaDecision: DcaHeadResult["decision"];
+  tradDecision: TraditionalFuturesResult["decision"];
   hadError: boolean;
 }
 
@@ -225,19 +243,19 @@ export async function checkEntryAlertForSymbol(
   prefetched?: PrefetchedTickerFunding,
   dcaOpts: DcaOpts = { modalAvailableUsd: DCA_MODAL_DEFAULT_USD },
 ): Promise<AlertCheckOutcome> {
-  const r = await runDualPipelineForSymbol(symbol, DEFAULT_PIPELINE_OPTS, dcaOpts, prefetched);
-  // runDualPipelineForSymbol NEVER throws (catch internal) -- kegagalan masuk
+  const r = await runTriplePipelineForSymbol(symbol, DEFAULT_PIPELINE_OPTS, dcaOpts, prefetched);
+  // runTriplePipelineForSymbol NEVER throws (catch internal) -- kegagalan masuk
   // lewat grid.error, bukan exception. Log eksplisit supaya kelihatan di tail.
   if (r.grid.error) {
     console.error(`[entry-alert] ${symbol}:`, r.grid.error);
   }
   const previous = await d1Client.getEntryAlertState(symbol);
 
-  // Dedup: composite "grid/dca" string. Transisi = string berubah (head mana
-  // pun flip -> alert gabungan yang nunjukin state kedua head). Cooldown 4 jam
-  // pakai satu timestamp.
-  const composite = `${r.grid.decision}/${r.dca.decision}`;
-  const alertable = isGridAlertWorthy(r.grid) || isDcaAlertWorthy(r.dca);
+  // Dedup: composite "grid/dca/trad" string. Transisi = string berubah (head
+  // mana pun flip -> alert gabungan yang nunjukin state ketiga head). Cooldown
+  // 4 jam pakai satu timestamp.
+  const composite = `${r.grid.decision}/${r.dca.decision}/${r.trad.decision}`;
+  const alertable = isGridAlertWorthy(r.grid) || isDcaAlertWorthy(r.dca) || isTradAlertWorthy(r.trad);
   const isTransition = alertable && previous?.lastDecision !== composite;
   const cooldownExpired =
     alertable && previous?.lastAlertAt != null && now - previous.lastAlertAt > COOLDOWN_MS;
@@ -245,6 +263,7 @@ export async function checkEntryAlertForSymbol(
   const outcome: AlertCheckOutcome = {
     gridDecision: r.grid.decision,
     dcaDecision: r.dca.decision,
+    tradDecision: r.trad.decision,
     hadError: r.grid.error != null,
   };
 
@@ -362,7 +381,7 @@ export async function runEntryAlertCheck(env: TelegramEnv): Promise<void> {
       return await checkEntryAlertForSymbol(symbol, env, now, prefetched, dcaOpts);
     } catch (err) {
       console.error(`[cron] gagal entry-alert check ${symbol}:`, (err as Error)?.message ?? String(err));
-      return { gridDecision: "NO_TRADE", dcaDecision: "DCA_NO_TRADE", hadError: true };
+      return { gridDecision: "NO_TRADE", dcaDecision: "DCA_NO_TRADE", tradDecision: "TRAD_NO_TRADE", hadError: true };
     } finally {
       await pacing.sleep(ENTRY_ALERT_PACING_DELAY_MS);
     }
@@ -371,7 +390,12 @@ export async function runEntryAlertCheck(env: TelegramEnv): Promise<void> {
   // Rekam tally tick ini -- heartbeatCron.ts (3x/hari) pakai ini buat
   // bedain "market emang sepi" (error rate rendah) vs "backend bermasalah"
   // (error rate tinggi). watch_count/trade_count = GRID (nama kolom lama);
-  // dca_* = head DCA (observability).
+  // dca_* = head DCA (observability). Head Traditional Futures TIDAK
+  // dipersist di run_log -- belum ada kolom trad_* (butuh migrasi baru); tally
+  // trad dilog ke `wrangler tail` saja untuk sekarang.
+  const tradTradeCount = outcomes.filter((o) => o.tradDecision === "TRAD_TRADE").length;
+  const tradWatchCount = outcomes.filter((o) => o.tradDecision === "TRAD_WATCH").length;
+  console.log(`[entry-alert] trad tally: TRAD_TRADE=${tradTradeCount} TRAD_WATCH=${tradWatchCount}`);
   await d1Client.insertEntryAlertRunLog({
     runAt: now,
     total: outcomes.length,

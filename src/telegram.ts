@@ -2,6 +2,11 @@
 // SENGAJA gak pernah throw -- kegagalan kirim (token belum di-set, Telegram
 // down, chat_id salah) di-log doang, supaya satu symbol/tick gagal kirim
 // alert TIDAK menggagalkan symbol lain atau cron snapshot utama.
+import { fmtPrice } from "./format.js";
+import type { TraditionalFuturesResult } from "./cron/traditionalPipelineEngine.js";
+import type { SymbolPipelineResult } from "./tools/fullPipeline.js";
+import type { DcaHeadResult } from "./dcaPipelineEngine.js";
+
 export interface TelegramEnv {
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_CHAT_ID?: string;
@@ -21,6 +26,57 @@ export interface TelegramEnv {
 // pairing again, regardless of what future enum values get added.
 export function escapeMarkdown(text: string): string {
   return text.replace(/([_*`[])/g, "\\$1");
+}
+
+// ─────────────────────────────────────────────────────────────
+// formatTraditionalFuturesAlert -- blok pesan Markdown untuk sinyal
+// "Traditional Futures" (Single Entry / Single SL / Single TP + R:R),
+// dipakai formatEntryAlert (entryAlertCron.ts) saat trad.decision === "TRAD_TRADE".
+// gridResult/dcaResult opsional -- cuma dipakai buat 1 baris konteks silang.
+// SEMUA string dinamis/enum WAJIB lewat escapeMarkdown (parse_mode "Markdown"
+// legacy butuh _ * ` [ berpasangan di seluruh pesan).
+// ─────────────────────────────────────────────────────────────
+export function formatTraditionalFuturesAlert(
+  symbol: string,
+  trad: TraditionalFuturesResult,
+  gridResult?: SymbolPipelineResult,
+  dcaResult?: DcaHeadResult,
+): string {
+  const dir = trad.side ?? "-";
+  const confPct = Math.round(trad.confidence * 100);
+  const entry = trad.entry ?? 0;
+  const sl = trad.stopLoss ?? 0;
+  const tp1 = trad.takeProfit ?? 0;
+  const tp2 = trad.takeProfit2 ?? 0;
+  const riskMargin = trad.recommendedLeverage > 0 ? 100 / trad.recommendedLeverage : 0;
+
+  const lines: string[] = [
+    `⚡ *${escapeMarkdown(symbol)}* — TRADITIONAL FUTURES (${escapeMarkdown(trad.scenario)})`,
+    `📊 Direction: ${escapeMarkdown(dir)} (Isolated) · Confidence: ${confPct}%`,
+    "",
+    "🎯 BRACKET",
+    `   Entry Zone: ${fmtPrice(entry)}`,
+    `   Stop Loss: ${fmtPrice(sl)} (${trad.slPct.toFixed(2)}%)`,
+    `   TP1: ${fmtPrice(tp1)} · TP2: ${fmtPrice(tp2)}`,
+    `   R:R: ${trad.rr.toFixed(2)}`,
+    `   Rec. Leverage (Isolated): ${trad.recommendedLeverage}x · Risk Margin ~${riskMargin.toFixed(1)}% notional`,
+  ];
+
+  if (gridResult || dcaResult) {
+    lines.push(
+      `   Konteks: Grid ${escapeMarkdown(gridResult?.decision ?? "-")} · DCA ${escapeMarkdown(dcaResult?.decision ?? "-")}`,
+    );
+  }
+
+  if (trad.reasons.length > 0) {
+    lines.push("", "📝 Alasan:");
+    for (const reason of trad.reasons) lines.push(`   • ${escapeMarkdown(reason)}`);
+  }
+  if (trad.dataGaps.length > 0) {
+    for (const gap of trad.dataGaps) lines.push(`   ⚠️ ${escapeMarkdown(gap)}`);
+  }
+
+  return lines.join("\n");
 }
 
 export async function sendTelegramAlert(env: TelegramEnv, text: string): Promise<void> {

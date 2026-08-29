@@ -1,7 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { registerFullPipelineTools, runPipelineForSymbol, type PipelineOpts, type PrefetchedTickerFunding } from "./fullPipeline.js";
+import {
+  registerFullPipelineTools,
+  runPipelineForSymbol,
+  runTriplePipelineForSymbol,
+  type PipelineOpts,
+  type PrefetchedTickerFunding,
+} from "./fullPipeline.js";
 import * as binanceProxy from "../binanceProxyClient.js";
 import type { KlineTuple } from "../binanceProxyClient.js";
 
@@ -453,5 +459,18 @@ describe("runPipelineForSymbol -- prefetched ticker/funding (bulk-fetch opsional
     expect(binanceProxy.getTicker24hrNative).toHaveBeenCalledTimes(1);
     expect(binanceProxy.getCurrentFundingRateNative).toHaveBeenCalledTimes(1);
     expect(result.hardScreen.passed).toBe(true);
+  });
+
+  it("runTriplePipelineForSymbol returns a traditional-futures head with a valid decision, using ONLY Wave 1/2 data (no extra force-order fetch)", async () => {
+    const result = await runTriplePipelineForSymbol("BTCUSDT", TEST_OPTS, { modalAvailableUsd: 200 });
+
+    expect(result.grid).toBeDefined();
+    expect(result.dca).toBeDefined();
+    expect(result.trad).toBeDefined();
+    expect(["TRAD_TRADE", "TRAD_WATCH", "TRAD_NO_TRADE"]).toContain(result.trad.decision);
+    expect(["MEAN_REVERSION", "TREND_BREAKOUT", "NONE"]).toContain(result.trad.scenario);
+    // No allForceOrders fetch exists on the proxy mock -> the head must run
+    // liquidation-free (fault-tolerant path).
+    expect(result.trad.sweep.liquidations.available).toBe(false);
   });
 });

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { sendTelegramAlert, escapeMarkdown } from "./telegram.js";
+import { sendTelegramAlert, escapeMarkdown, formatTraditionalFuturesAlert } from "./telegram.js";
+import type { TraditionalFuturesResult } from "./cron/traditionalPipelineEngine.js";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status });
@@ -80,5 +81,82 @@ describe("escapeMarkdown", () => {
     expect(escapeMarkdown("NEUTRAL")).toBe("NEUTRAL");
     expect(escapeMarkdown("BTCUSDT")).toBe("BTCUSDT");
     expect(escapeMarkdown("ISOLATED")).toBe("ISOLATED");
+  });
+});
+
+function tradResult(o: Partial<TraditionalFuturesResult> = {}): TraditionalFuturesResult {
+  return {
+    decision: "TRAD_TRADE",
+    scenario: "MEAN_REVERSION",
+    side: "LONG",
+    entry: 100,
+    stopLoss: 95,
+    takeProfit: 115,
+    takeProfit2: 125,
+    rr: 3,
+    slPct: 5,
+    recommendedLeverage: 10,
+    confidence: 0.72,
+    bracket: {} as never,
+    sweep: {} as never,
+    reasons: ["MEAN_REVERSION LONG: RR 3.00, SL 5.00%, rec. leverage 10x (Isolated)."],
+    dataGaps: [],
+    ...o,
+  };
+}
+
+describe("formatTraditionalFuturesAlert", () => {
+  it("renders the ⚡ TRADITIONAL FUTURES header with the escaped symbol and scenario", () => {
+    const msg = formatTraditionalFuturesAlert("BTC_USDT", tradResult());
+    expect(msg).toContain("⚡");
+    expect(msg).toContain("TRADITIONAL FUTURES");
+    expect(msg).toContain("*BTC\\_USDT*");
+    expect(msg).toContain("MEAN\\_REVERSION");
+  });
+
+  it("shows direction, Isolated, and confidence as a whole percentage", () => {
+    const msg = formatTraditionalFuturesAlert("BTCUSDT", tradResult({ side: "SHORT", confidence: 0.72 }));
+    expect(msg).toMatch(/SHORT/);
+    expect(msg).toMatch(/Isolated/i);
+    expect(msg).toContain("72%");
+  });
+
+  it("renders the full bracket: entry, SL (price & %), TP1, TP2, and R:R", () => {
+    const msg = formatTraditionalFuturesAlert(
+      "BTCUSDT",
+      tradResult({ entry: 100, stopLoss: 95, takeProfit: 115, takeProfit2: 125, rr: 3, slPct: 5 }),
+    );
+    expect(msg).toMatch(/Entry/i);
+    expect(msg).toMatch(/Stop Loss[^\n]*95/);
+    expect(msg).toMatch(/5\.00%/);
+    expect(msg).toMatch(/TP1[^\n]*115/);
+    expect(msg).toMatch(/TP2[^\n]*125/);
+    expect(msg).toMatch(/R:R[^\n]*3\.00/);
+  });
+
+  it("shows the recommended isolated leverage", () => {
+    const msg = formatTraditionalFuturesAlert("BTCUSDT", tradResult({ recommendedLeverage: 12 }));
+    expect(msg).toMatch(/12x/);
+  });
+
+  it("lists reasons and surfaces dataGaps when present", () => {
+    const msg = formatTraditionalFuturesAlert(
+      "BTCUSDT",
+      tradResult({
+        scenario: "TREND_BREAKOUT",
+        reasons: ["TREND_BREAKOUT LONG: RR 2.00"],
+        dataGaps: ["Data liquidation (allForceOrders) kosong/gagal -- verdict berbasis OI velocity + CVD absorption saja."],
+      }),
+    );
+    expect(msg).toContain("TREND\\_BREAKOUT LONG");
+    expect(msg).toMatch(/liquidation/i);
+  });
+
+  it("escapes every Markdown-special character coming from dynamic strings", () => {
+    const msg = formatTraditionalFuturesAlert("BTCUSDT", tradResult({ scenario: "TREND_BREAKOUT", reasons: ["a_b*c`d[e"] }));
+    expect(msg).toContain("TREND\\_BREAKOUT");
+    expect(msg).toContain("a\\_b\\*c\\`d\\[e");
+    // no bare underscore survives from the enum/reason interpolation
+    expect(msg).not.toMatch(/[^\\]_[A-Z]/);
   });
 });

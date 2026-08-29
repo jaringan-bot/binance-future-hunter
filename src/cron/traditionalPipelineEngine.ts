@@ -133,6 +133,13 @@ const EMPTY_BRACKET: TraditionalBracket = {
   reasons: [],
 };
 
+// Stub TRAD_NO_TRADE untuk jalur yang tidak mengevaluasi Traditional Futures
+// (hard-screen gagal, pipeline error) -- caller memperlakukannya sama seperti
+// grid NO_TRADE. Tidak menyentuh engine bracket murni.
+export function stubTraditionalResult(reason: string): TraditionalFuturesResult {
+  return noTradeResult(EMPTY_BRACKET, EMPTY_SWEEP, [reason], []);
+}
+
 export function evaluateTraditionalFuturesEntry(
   wave1: TraditionalWave1,
   wave2: TraditionalWave2,

@@ -37,6 +37,11 @@ import { getPairThreshold } from "./config.js";
 import { computeGridBounds, computeATR, type GridBoundResult, type GridBoundOptions } from "../gridBoundEngine.js";
 import { evaluateDcaEntry, DCA_MODAL_DEFAULT_USD, type DcaHeadResult } from "../dcaPipelineEngine.js";
 import {
+  evaluateTraditionalFuturesEntry,
+  stubTraditionalResult,
+  type TraditionalFuturesResult,
+} from "../cron/traditionalPipelineEngine.js";
+import {
   evaluateHardScreen,
   scoreTier1Signals,
   scaleCapitalForTargetLoss,
@@ -140,10 +145,15 @@ export interface DcaOpts {
   modalAvailableUsd: number;
 }
 
-export interface DualPipelineResult {
+export interface TriplePipelineResult {
   grid: SymbolPipelineResult;
   dca: DcaHeadResult;
+  trad: TraditionalFuturesResult;
 }
+
+// Alias back-compat -- beberapa modul/test masih import nama lama. Bentuknya
+// SAMA (trad ditambahkan ke result), jadi aman.
+export type DualPipelineResult = TriplePipelineResult;
 
 export interface SymbolPipelineResult {
   symbol: string;
@@ -349,15 +359,17 @@ export async function runPipelineForSymbol(
 }
 
 /**
- * Public: grid + DCA dari SATU fetch bundle. entryAlertCron.ts pakai ini.
- * DCA menambah paling banyak 1 subrequest/survivor (klines 1d).
+ * Public: grid + DCA + Traditional Futures dari SATU fetch bundle.
+ * entryAlertCron.ts pakai ini. DCA menambah paling banyak 1 subrequest/survivor
+ * (klines 1d). Head Traditional Futures menambah NOL subrequest -- 100% reuse
+ * data Wave 1/2 (candles 1h, aggTrades, oiHist24, regime/ADX).
  */
-export async function runDualPipelineForSymbol(
+export async function runTriplePipelineForSymbol(
   symbol: string,
   opts: PipelineOpts,
   dcaOpts: DcaOpts,
   prefetched?: PrefetchedTickerFunding,
-): Promise<DualPipelineResult> {
+): Promise<TriplePipelineResult> {
   return runPipelineInternal(symbol, opts, prefetched, dcaOpts);
 }
 
@@ -366,7 +378,7 @@ async function runPipelineInternal(
   opts: PipelineOpts,
   prefetched?: PrefetchedTickerFunding,
   dcaOpts?: DcaOpts,
-): Promise<DualPipelineResult> {
+): Promise<TriplePipelineResult> {
   const preHardScreenNotes: string[] = [];
 
   try {
@@ -493,6 +505,9 @@ async function runPipelineInternal(
         // DCA: hard-screen SELALU lebih permisif dari gate DCA -- kalau grid
         // reject di sini, DCA pasti reject juga. Nol Wave-2 call.
         dca: stubDca(symbol, `hard_screen_reject (${hardScreen.tags.join(",") || "regime/vol/funding"})`),
+        // Traditional Futures: skenario A butuh sweep, skenario B butuh
+        // regime BREAKOUT -- keduanya lolos hanya via jalur survivor. Reject.
+        trad: stubTraditionalResult(`hard_screen_reject (${hardScreen.tags.join(",") || "regime/vol/funding"})`),
       };
     }
 
@@ -886,7 +901,43 @@ async function runPipelineInternal(
       dca = stubDca(symbol, "dca_head_disabled");
     }
 
-    return { grid, dca };
+    // ─── HEAD TRADITIONAL FUTURES (0 subrequest -- 100% reuse Wave 1/2) ───
+    // Data: candles 1h + regime/ADX (Wave 1), aggTrades 100 di-split per candle
+    // untuk CVD active/prior, oiHist24 (Wave 2) untuk OI velocity. Force orders
+    // TIDAK di-fetch di pipeline ini -> liquidations null (engine fault-tolerant).
+    // KETERBATASAN JUJUR: 100 aggTrades pada TF 1h nyaris seluruhnya jatuh di
+    // candle aktif -> priorCvd sering kosong -> CVD-absorption jarang bisa
+    // dinilai -> skenario MEAN_REVERSION konservatif. Skenario TREND_BREAKOUT
+    // (candles + ADX + regime + bias saja) jalan penuh dengan data reuse ini.
+    const { bias: bias1h } = summarizeKlines(klines1h);
+    const activeOpenTime = candles1h[candles1h.length - 1]?.openTime ?? 0;
+    const priorOpenTime = candles1h[candles1h.length - 2]?.openTime ?? 0;
+    const tradActiveCvd = computeCvdFromTrades(aggTrades.filter((t) => t.T >= activeOpenTime));
+    const tradPriorCvd = computeCvdFromTrades(
+      aggTrades.filter((t) => t.T >= priorOpenTime && t.T < activeOpenTime),
+    );
+    let tradOiVelocity = null as ReturnType<typeof computeOiVelocity> | null;
+    if (oiHist24.length >= 2) {
+      const v = computeOiVelocity(oiHist24, Math.min(oiHist24.length, 5));
+      tradOiVelocity = v.errorCode ? null : v;
+    }
+    const trad = evaluateTraditionalFuturesEntry(
+      {
+        activePrice: currentPrice,
+        candles: candles1h,
+        atr14: computeATR(candles1h, opts.atrPeriod),
+        adx14: regime1h.adx,
+        regime: regime1h.regime,
+        bias: bias1h,
+        activeCvd: tradActiveCvd,
+        priorCvd: tradPriorCvd,
+        oiVelocity: tradOiVelocity,
+        lookbackBars: opts.lookbackBars,
+      },
+      { liquidations: null },
+    );
+
+    return { grid, dca, trad };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return {
@@ -906,6 +957,7 @@ async function runPipelineInternal(
         error: message,
       },
       dca: stubDca(symbol, `pipeline_error: ${message}`),
+      trad: stubTraditionalResult(`pipeline_error: ${message}`),
     };
   }
 }
