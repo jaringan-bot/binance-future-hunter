@@ -48,18 +48,22 @@ export function formatTraditionalFuturesAlert(
   const sl = trad.stopLoss ?? 0;
   const tp1 = trad.takeProfit ?? 0;
   const tp2 = trad.takeProfit2 ?? 0;
+  // Isolated: SL hit loses (slPct% of notional) = (slPct * leverage)% of margin.
+  const estLossPctOfMargin = trad.recommendedLeverage > 0 ? trad.slPct * trad.recommendedLeverage : 0;
   const riskMargin = trad.recommendedLeverage > 0 ? 100 / trad.recommendedLeverage : 0;
 
   const lines: string[] = [
-    `⚡ *${escapeMarkdown(symbol)}* — TRADITIONAL FUTURES (${escapeMarkdown(trad.scenario)})`,
+    `⚡ *${escapeMarkdown(symbol)}* — TRADITIONAL FUTURES (${escapeMarkdown(`[SCENARIO: ${trad.scenario}]`)})`,
     `📊 Direction: ${escapeMarkdown(dir)} (Isolated) · Confidence: ${confPct}%`,
     "",
     "🎯 BRACKET",
     `   Entry Zone: ${fmtPrice(entry)}`,
     `   Stop Loss: ${fmtPrice(sl)} (${trad.slPct.toFixed(2)}%)`,
-    `   TP1: ${fmtPrice(tp1)} · TP2: ${fmtPrice(tp2)}`,
+    `   Take Profit 1: ${fmtPrice(tp1)}`,
+    `   Take Profit 2: ${fmtPrice(tp2)}`,
     `   R:R: ${trad.rr.toFixed(2)}`,
-    `   Rec. Leverage (Isolated): ${trad.recommendedLeverage}x · Risk Margin ~${riskMargin.toFixed(1)}% notional`,
+    `   Rec. Leverage (Isolated): ${trad.recommendedLeverage}x`,
+    `   Est. Loss ~${estLossPctOfMargin.toFixed(1)}% isolated margin · Risk Margin ~${riskMargin.toFixed(1)}% notional`,
   ];
 
   if (gridResult || dcaResult) {

@@ -177,7 +177,7 @@ function formatEntryAlert(r: TriplePipelineResult): string {
   const headParts: string[] = [];
   if (gridOn) headParts.push(escapeMarkdown(GRID_LABEL[grid.decision] ?? grid.decision));
   if (dcaOn) headParts.push(`${escapeMarkdown(DCA_LABEL[dca.decision] ?? dca.decision)}${dcaDir}`);
-  if (tradOn) headParts.push(`TRADITIONAL FUTURES (${escapeMarkdown(trad.scenario)})`);
+  if (tradOn) headParts.push(`TRADITIONAL FUTURES (${escapeMarkdown(`[SCENARIO: ${trad.scenario}]`)})`);
 
   const lines = [
     `${headMarkers} *${escapeMarkdown(grid.symbol)}* — ${headParts.join(" · ")}`,

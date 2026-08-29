@@ -509,7 +509,10 @@ describe("checkEntryAlertForSymbol", () => {
     const msg = vi.mocked(telegram.sendTelegramAlert).mock.calls[0][1];
     expect(msg).toContain("⚡");
     expect(msg).toContain("TRADITIONAL FUTURES");
+    expect(msg).toContain("\\[SCENARIO: MEAN\\_REVERSION]");
+    expect(msg).toMatch(/Take Profit 1/);
     expect(msg).toMatch(/R:R/);
+    expect(msg).toMatch(/Est\. Loss/);
     expect(d1Client.upsertEntryAlertState).toHaveBeenCalledWith({
       symbol: "BTCUSDT",
       lastDecision: "NO_TRADE/DCA_NO_TRADE/TRAD_TRADE",
