@@ -330,6 +330,10 @@ Full detail (including raw test data per claim): Section 10,
   (KV counter, `src/queryFrequency.ts`); the 5-minute cron only snapshots
   it once that condition is met. `signal_history` (read by
   `binance_backtest_signal`) remains watchlist-only, not extended.
+- **Futures-only pairs (HYPEUSDT, 1000PEPEUSDT, PUMPUSDT, …) — `spot_price`
+  & `basis` are NULL in `market_snapshots`** because they aren't listed on
+  Binance Spot. Funding rate & Open Interest are still recorded normally;
+  only the basis columns are empty for those pairs.
 - **No pruning/retention for D1 rows yet** — rows grow unbounded over time
   (at 50 pairs, D1's free tier of 5M writes/day and 5GB storage has
   headroom for a long while, but this isn't a permanent solution).

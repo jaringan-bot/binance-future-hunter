@@ -45,7 +45,8 @@ export const SNAPSHOT_WATCHLIST = [
   "AVAXUSDT",
   "LINKUSDT",
   "LTCUSDT",
-  // --- 40 tambahan, urutan market cap (per 2026-08-20, tervalidasi 50/50 ke Binance Futures) ---
+  // --- 40 tambahan, urutan market cap (per 2026-08-20; FTMUSDT diganti
+  //     POLUSDT 2026-08-29 setelah FTM di-delist dari Binance Futures) ---
   "TRXUSDT",
   "SUIUSDT",
   "HYPEUSDT",
@@ -84,7 +85,8 @@ export const SNAPSHOT_WATCHLIST = [
   "GALAUSDT",
   "SANDUSDT",
   "MANAUSDT",
-  "FTMUSDT", // funding 0.0000% saat validasi -- volume kemungkinan tipis, monitor
+  "POLUSDT", // ex-MATICUSDT (Polygon rebrand). Ganti FTMUSDT yang di-delist
+             // Binance Futures 2026 (migrasi FTM->S/Sonic, -4108 tiap tick).
   "ALGOUSDT",
 ] as const;
 
