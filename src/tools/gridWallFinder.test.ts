@@ -1,7 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { z } from "zod";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   computeOrderBookWalls,
   findOrderBookWalls,
+  registerGridWallFinderTools,
   _clearWallFinderCache,
   DEFAULT_ABS_FLOOR_USD,
   DEPTH_CACHE_TTL_MS,
@@ -203,5 +206,49 @@ describe("findOrderBookWalls (async + cache)", () => {
     vi.spyOn(binanceProxy, "getOrderBookDepth").mockResolvedValue(makeThinBook(100));
     vi.spyOn(binanceProxy, "getFuturesExchangeInfo").mockResolvedValue({ symbols: [] });
     expect(await findOrderBookWalls("BTCUSDT", 100, 4)).toBeNull();
+  });
+});
+
+describe("whalescope_find_grid_walls tool", () => {
+  type ToolResult = {
+    content: [{ type: "text"; text: string }];
+    structuredContent?: Record<string, unknown>;
+    isError?: boolean;
+  };
+  type ToolHandler = (args: Record<string, unknown>) => Promise<ToolResult>;
+  let handlers: Map<string, { handler: ToolHandler; inputSchema: Record<string, z.ZodTypeAny> }>;
+
+  beforeEach(() => {
+    _clearWallFinderCache();
+    vi.restoreAllMocks();
+    handlers = new Map();
+    const fakeServer = {
+      registerTool: (name: string, config: { inputSchema?: Record<string, z.ZodTypeAny> }, cb: unknown) => {
+        handlers.set(name, { handler: cb as ToolHandler, inputSchema: config.inputSchema ?? {} });
+        return {};
+      },
+    } as unknown as McpServer;
+    registerGridWallFinderTools(fakeServer);
+  });
+
+  function call(args: Record<string, unknown>) {
+    const entry = handlers.get("whalescope_find_grid_walls");
+    if (!entry) throw new Error("tool not registered");
+    const parsed = z.object(entry.inputSchema).parse(args);
+    return entry.handler(parsed as Record<string, unknown>);
+  }
+
+  it("registers the tool", () => {
+    expect(handlers.has("whalescope_find_grid_walls")).toBe(true);
+  });
+
+  it("returns GRID_NO_TRADE when no significant walls exist", async () => {
+    vi.spyOn(binanceProxy, "getPriceTicker").mockResolvedValue({ symbol: "BTCUSDT", price: "100" });
+    vi.spyOn(binanceProxy, "getOrderBookDepth").mockResolvedValue(makeThinBook(100));
+    vi.spyOn(binanceProxy, "getFuturesExchangeInfo").mockResolvedValue({ symbols: [] });
+    const result = await call({ symbol: "BTCUSDT", atr14Pct: 4 });
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent?.status).toBe("GRID_NO_TRADE");
+    expect(result.content[0].text).toMatch(/No significant liquidity walls found/);
   });
 });

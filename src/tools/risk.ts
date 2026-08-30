@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerSafeTool } from "../toolWrapper.js";
 import * as binanceProxy from "../binanceProxyClient.js";
 import { fmtTime } from "../format.js";
-import { symbolSchema, errorResult } from "../shared.js";
+import { symbolSchema, errorResult, asArray } from "../shared.js";
 
 export function registerRiskTools(server: McpServer): void {
   // ─────────────────────────────────────────────────────────────
@@ -64,23 +64,29 @@ export function registerRiskTools(server: McpServer): void {
     async ({ symbol }) => {
       try {
         const data = await binanceProxy.getInsuranceFundBalanceNative(symbol);
-        const rows = data.assets
+        const assets = asArray<binanceProxy.InsuranceFundAsset>(data?.assets);
+        const symbols = asArray<string>(data?.symbols);
+        const rows = assets
           .map((a) => `| ${a.asset} | ${a.marginBalance} | ${fmtTime(a.updateTime)} |`)
           .join("\n");
+        const emptyNote =
+          assets.length === 0
+            ? `_Tidak ada baris insurance fund${symbol ? ` untuk ${symbol}` : " (payload kosong / tanpa filter symbol)"}. Bukan crash — endpoint bisa balikin object tanpa \`assets\`._`
+            : `_Gunakan bersama \`binance_get_adl_risk\` untuk konteks lengkap risiko ADL di pair kamu._`;
         const text = [
           `# Insurance Fund Balance${symbol ? ` — ${symbol}` : ""}`,
           ``,
-          `Symbols tercakup: ${data.symbols.join(", ")}`,
+          `Symbols tercakup: ${symbols.length ? symbols.join(", ") : "(tidak ada)"}`,
           ``,
           `| Asset | Margin Balance | Update Time |`,
           `|---|---|---|`,
-          rows,
+          rows || `| _kosong_ | - | - |`,
           ``,
-          `_Gunakan bersama \`binance_get_adl_risk\` untuk konteks lengkap risiko ADL di pair kamu._`,
+          emptyNote,
         ].join("\n");
         return {
           content: [{ type: "text", text }],
-          structuredContent: { symbols: data.symbols, assets: data.assets },
+          structuredContent: { symbols, assets },
         };
       } catch (err) {
         return errorResult(err);

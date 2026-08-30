@@ -7,7 +7,15 @@ import * as gw from "../streamGatewayClient.js";
 vi.mock("../streamGatewayClient.js", () => ({
   fetchLiquidations: vi.fn(),
   fetchContractEvents: vi.fn(),
-  StreamGatewayError: class StreamGatewayError extends Error {},
+  StreamGatewayError: class StreamGatewayError extends Error {
+    constructor(
+      message: string,
+      public readonly status?: number,
+    ) {
+      super(message);
+      this.name = "StreamGatewayError";
+    }
+  },
 }));
 
 type ToolResult = {
@@ -111,11 +119,29 @@ describe("realtime stream tools", () => {
     expect(r.structuredContent!.degraded).toBe(true);
   });
 
-  it("liquidations: a gateway error becomes an error result, not a throw", async () => {
-    vi.mocked(gw.fetchLiquidations).mockRejectedValueOnce(new gw.StreamGatewayError("HTTP 502"));
+  it("liquidations: a gateway error degrades to an empty buffer, not isError", async () => {
+    vi.mocked(gw.fetchLiquidations).mockRejectedValueOnce(new gw.StreamGatewayError("HTTP 502", 502));
     const r = await call("binance_get_realtime_liquidations", {});
-    expect(r.isError).toBe(true);
-    expect(r.content[0].text).toContain("502");
+    expect(r.isError).toBeUndefined();
+    expect(r.structuredContent!.degraded).toBe(true);
+    expect(r.structuredContent!.totalCount).toBe(0);
+    expect(String(r.structuredContent!.degradedReason)).toMatch(/502/);
+  });
+
+  it("liquidations: HTTP 401 degrades without isError", async () => {
+    vi.mocked(gw.fetchLiquidations).mockRejectedValueOnce(new gw.StreamGatewayError("stream gateway HTTP 401", 401));
+    const r = await call("binance_get_realtime_liquidations", {});
+    expect(r.isError).toBeUndefined();
+    expect(r.structuredContent!.degraded).toBe(true);
+    expect(String(r.structuredContent!.degradedReason)).toMatch(/401|PROXY_SECRET/);
+  });
+
+  it("contract events: HTTP 401 degrades without isError", async () => {
+    vi.mocked(gw.fetchContractEvents).mockRejectedValueOnce(new gw.StreamGatewayError("stream gateway HTTP 401", 401));
+    const r = await call("binance_get_contract_events", {});
+    expect(r.isError).toBeUndefined();
+    expect(r.structuredContent!.degraded).toBe(true);
+    expect(r.structuredContent!.count).toBe(0);
   });
 
   it("contract events: returns parsed rows", async () => {

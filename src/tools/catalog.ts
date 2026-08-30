@@ -117,7 +117,105 @@ const CATALOG_METADATA: Record<string, CatalogMetadata> = {
     useCase: "Baca/set circuit breaker KV (daily-loss + macro pause) untuk entry-alert cron",
     dependencies: [],
   },
+  binance_get_orderbook_wall_persistence: {
+    category: "orderbook",
+    tokenCost: "medium",
+    useCase: "Persistensi wall bid/ask dari snapshot cron (spoof vs wall riil)",
+    dependencies: ["orderbook"],
+  },
+  binance_analyze_smart_money: {
+    category: "composite",
+    tokenCost: "high",
+    useCase: "Posisi smart money vs retail (top trader by size, bukan by account)",
+    dependencies: ["ratios", "oi", "trades"],
+  },
+  analyze_futures_grid_risk: {
+    category: "risk",
+    tokenCost: "high",
+    useCase: "Risk math long-grid: status SAFE/MODERATE/HIGH_RISK/REJECT",
+    dependencies: ["technical", "oi", "ratios", "risk"],
+  },
+  hyperliquid_get_whale_wallet_positions: {
+    category: "cross-exchange",
+    tokenCost: "medium",
+    useCase: "Agregat posisi wallet whale Hyperliquid (watchlist) per coin",
+    dependencies: [],
+  },
+  whalescope_compare_orderbook_depth: {
+    category: "cross-exchange",
+    tokenCost: "medium",
+    useCase: "Bandingkan depth/spread 1 pair across venue",
+    dependencies: ["orderbook"],
+  },
+  cme_get_institutional_positioning: {
+    category: "history",
+    tokenCost: "medium",
+    useCase: "CFTC COT positioning institusi (CME)",
+    dependencies: [],
+  },
+  whalescope_get_stablecoin_supply: {
+    category: "composite",
+    tokenCost: "low",
+    useCase: "Supply stablecoin (USDT/USDC) sebagai konteks likuiditas makro",
+    dependencies: [],
+  },
+  estimate_slippage: {
+    category: "orderbook",
+    tokenCost: "low",
+    useCase: "Estimasi slippage dari depth yang dikirim caller",
+    dependencies: [],
+  },
+  analyze_cvd_divergence: {
+    category: "trades",
+    tokenCost: "medium",
+    useCase: "Divergensi CVD vs harga dari array aggTrades caller",
+    dependencies: [],
+  },
+  filter_block_trades: {
+    category: "trades",
+    tokenCost: "low",
+    useCase: "Filter block/large trades dari array aggTrades caller",
+    dependencies: [],
+  },
+  compute_funding_velocity: {
+    category: "funding",
+    tokenCost: "low",
+    useCase: "Kecepatan perubahan funding dari histori yang dikirim caller",
+    dependencies: [],
+  },
+  estimate_stop_loss_liquidity_risk: {
+    category: "risk",
+    tokenCost: "medium",
+    useCase: "Likuiditas di sekitar stop-loss vs depth yang dikirim caller",
+    dependencies: ["orderbook"],
+  },
+  taker_imbalance_aggregator: {
+    category: "trades",
+    tokenCost: "medium",
+    useCase: "Agregat taker buy/sell imbalance dari window aggTrades",
+    dependencies: [],
+  },
+  whalescope_get_oi_velocity: {
+    category: "oi",
+    tokenCost: "low",
+    useCase: "Kecepatan perubahan OI dari histori yang dikirim caller",
+    dependencies: [],
+  },
+  whalescope_detect_liquidity_sweep: {
+    category: "composite",
+    tokenCost: "high",
+    useCase: "Deteksi liquidity sweep (wick vs ATR, CVD, OI, force orders)",
+    dependencies: ["technical", "trades", "oi", "risk"],
+  },
+  whalescope_find_grid_walls: {
+    category: "orderbook",
+    tokenCost: "medium",
+    useCase: "Bound grid di wall bid/ask tebal; GRID_NO_TRADE kalau wall tidak ada",
+    dependencies: ["orderbook", "technical"],
+  },
 };
+
+export { CATALOG_METADATA, FALLBACK_CATEGORY };
 
 function truncateUseCase(description: string | undefined): string {
   if (!description) return "(belum ada description terdaftar)";

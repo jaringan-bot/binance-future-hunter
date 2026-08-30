@@ -36,6 +36,7 @@ import { registerOiVelocityTools } from "./tools/oiVelocity.js";
 import { registerRealtimeStreamTools } from "./tools/realtimeStream.js";
 import { registerLiquiditySweepTools } from "./tools/liquiditySweep.js";
 import { registerRiskCircuitTools } from "./tools/riskCircuit.js";
+import { registerGridWallFinderTools } from "./tools/gridWallFinder.js";
 import { resetToolRegistry } from "./toolWrapper.js";
 
 export function createServer(): McpServer {
@@ -78,5 +79,6 @@ export function createServer(): McpServer {
   registerRealtimeStreamTools(server);
   registerLiquiditySweepTools(server);
   registerRiskCircuitTools(server);
+  registerGridWallFinderTools(server);
   return server;
 }
