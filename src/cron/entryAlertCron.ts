@@ -141,20 +141,15 @@ function isGridAlertWorthy(result: SymbolPipelineResult): boolean {
 
 // DCA_WATCH dari dcaPipelineEngine SUDAH berarti confidence >= 50
 // (DCA_WATCH_MIN_ALERT_SCORE); DCA_NO_TRADE = di bawah itu / reject.
-// Phase 3 dcaSm: TRADE / WATCH / PAUSE_HARD / STOP tetap alertable.
-// DCA_PAUSE_SOFT SENGAJA tidak alert -- adapter memetakan timing < 60,
-// safety < 70, S_C < 25, DAN GRID_NO_TRADE ke PAUSE_SOFT, jadi hampir
-// setiap pair di watchlist kebanjiran notif Telegram (sama pola dengan
-// TRAD_WATCH dan WATCH skor < 40). State tetap dipersist; transisi ke
-// TRADE/WATCH/HARD/STOP tetap fire lewat composite dcaSm.
+// Phase 3 dcaSm: HANYA TRADE / WATCH / STOP yang alertable.
+// PAUSE_SOFT dan PAUSE_HARD SENGAJA tidak alert -- adapter memetakan
+// timing rendah, safety < 70 / < 50, S_C < 25, long-squeeze, max-entries,
+// DAN GRID_NO_TRADE ke pause, jadi hampir setiap pair kebanjiran notif
+// Telegram (sama pola dengan TRAD_WATCH dan WATCH skor < 40). State tetap
+// dipersist; transisi ke TRADE/WATCH/STOP tetap fire lewat composite dcaSm.
 function isDcaAlertWorthy(dca: DcaHeadResult, dcaSm?: DcaSmartMoneyResult | null): boolean {
   if (dcaSm) {
-    return (
-      dcaSm.decision === "DCA_TRADE" ||
-      dcaSm.decision === "DCA_WATCH" ||
-      dcaSm.decision === "DCA_PAUSE_HARD" ||
-      dcaSm.decision === "DCA_STOP"
-    );
+    return dcaSm.decision === "DCA_TRADE" || dcaSm.decision === "DCA_WATCH" || dcaSm.decision === "DCA_STOP";
   }
   return dca.decision !== "DCA_NO_TRADE";
 }
@@ -288,7 +283,7 @@ export async function checkEntryAlertForSymbol(
   // Dedup: composite "grid/dca/trad" string. Transisi = string berubah (head
   // mana pun flip -> alert gabungan yang nunjukin state ketiga head). Cooldown
   // 4 jam pakai satu timestamp. Slot tengah pakai dcaSm.decision kalau ada
-  // supaya PAUSE_SOFT (yang tidak alert) -> TRADE/WATCH/HARD/STOP tetap
+  // supaya PAUSE_SOFT/HARD (yang tidak alert) -> TRADE/WATCH/STOP tetap
   // ketahuan sebagai transisi, bukan tertelan cooldown slot legacy.
   const dcaSlot = r.dcaSm?.decision ?? r.dca.decision;
   const composite = `${r.grid.decision}/${dcaSlot}/${r.trad.decision}`;
