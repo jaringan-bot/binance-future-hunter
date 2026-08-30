@@ -440,24 +440,46 @@ export interface EntryAlertRunLogRow {
   tradTradeCount?: number;
 }
 
+const INSERT_RUN_LOG_FULL =
+  "INSERT INTO entry_alert_run_log (run_at, total, errors, watch_count, trade_count, dca_watch_count, dca_trade_count, trad_watch_count, trad_trade_count) " +
+  "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+const INSERT_RUN_LOG_PRE_TRAD =
+  "INSERT INTO entry_alert_run_log (run_at, total, errors, watch_count, trade_count, dca_watch_count, dca_trade_count) " +
+  "VALUES (?, ?, ?, ?, ?, ?, ?)";
+
+function isMissingColumnError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /no such column/i.test(msg);
+}
+
 export async function insertEntryAlertRunLog(row: EntryAlertRunLogRow): Promise<void> {
-  await requireDb()
-    .prepare(
-      "INSERT INTO entry_alert_run_log (run_at, total, errors, watch_count, trade_count, dca_watch_count, dca_trade_count, trad_watch_count, trad_trade_count) " +
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    )
-    .bind(
-      row.runAt,
-      row.total,
-      row.errors,
-      row.watchCount,
-      row.tradeCount,
-      row.dcaWatchCount ?? 0,
-      row.dcaTradeCount ?? 0,
-      row.tradWatchCount ?? 0,
-      row.tradTradeCount ?? 0,
-    )
-    .run();
+  const db = requireDb();
+  const core = [
+    row.runAt,
+    row.total,
+    row.errors,
+    row.watchCount,
+    row.tradeCount,
+    row.dcaWatchCount ?? 0,
+    row.dcaTradeCount ?? 0,
+  ] as const;
+  try {
+    await db
+      .prepare(INSERT_RUN_LOG_FULL)
+      .bind(...core, row.tradWatchCount ?? 0, row.tradTradeCount ?? 0)
+      .run();
+  } catch (err) {
+    // Insiden 2026-08-29/30: Worker sudah nulis trad_* (migration 0009) tapi
+    // D1 produksi belum ALTER -- INSERT meledak di AKHIR tiap tick, waitUntil
+    // exception, entry_alert_run_log diam 9+ jam, freshness Telegram fire.
+    // Fallback supaya tick tetap tercatat (tanpa tally trad) sampai schema nyusul.
+    if (!isMissingColumnError(err)) throw err;
+    console.error(
+      "[d1] entry_alert_run_log missing trad_* columns -- inserting without them:",
+      err instanceof Error ? err.message : String(err),
+    );
+    await db.prepare(INSERT_RUN_LOG_PRE_TRAD).bind(...core).run();
+  }
 }
 
 export interface EntryAlertRunLogSummary {

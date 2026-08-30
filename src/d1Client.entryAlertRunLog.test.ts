@@ -2,7 +2,7 @@
 // fake D1Database approach as d1Client.entryAlertState.test.ts (no
 // miniflare/wrangler D1 harness wired into vitest) -- dispatches by matching
 // the start of the SQL string.
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   setD1Database,
   insertEntryAlertRunLog,
@@ -44,6 +44,10 @@ class FakeStatement {
 
   async run(): Promise<{ success: true }> {
     if (this.sql.startsWith("INSERT INTO entry_alert_run_log")) {
+      const hasTrad = this.sql.includes("trad_watch_count");
+      if (this.db.rejectTradColumns && hasTrad) {
+        throw new Error("D1_ERROR: no such column: trad_watch_count at offset 90: SQLITE_ERROR");
+      }
       const [run_at, total, errors, watch_count, trade_count, dca_watch_count, dca_trade_count, trad_watch_count, trad_trade_count] =
         this.args as [number, number, number, number, number, number, number, number, number];
       this.db.runLogRows.push({
@@ -54,8 +58,8 @@ class FakeStatement {
         trade_count,
         dca_watch_count,
         dca_trade_count,
-        trad_watch_count,
-        trad_trade_count,
+        trad_watch_count: hasTrad ? trad_watch_count : 0,
+        trad_trade_count: hasTrad ? trad_trade_count : 0,
       });
       return { success: true };
     }
@@ -87,6 +91,7 @@ class FakeStatement {
 class FakeD1 {
   runLogRows: FakeRunLogRow[] = [];
   alertStateRows: FakeAlertStateRow[] = [];
+  rejectTradColumns = false;
 
   prepare(sql: string): FakeStatement {
     return new FakeStatement(this, sql);
@@ -119,6 +124,31 @@ describe("entry_alert_run_log D1 read/write path", () => {
     await insertEntryAlertRunLog({ runAt: 2000, total: 40, errors: 1, watchCount: 5, tradeCount: 1 });
 
     expect(fake.runLogRows[0]).toMatchObject({ dca_watch_count: 0, dca_trade_count: 0, trad_watch_count: 0, trad_trade_count: 0 });
+  });
+
+  it("falls back to a pre-trad INSERT when D1 is missing trad_* columns (do not fail the tick)", async () => {
+    fake.rejectTradColumns = true;
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await insertEntryAlertRunLog({
+      runAt: 3000, total: 40, errors: 0, watchCount: 10, tradeCount: 1, dcaWatchCount: 2, dcaTradeCount: 0, tradWatchCount: 4, tradTradeCount: 1,
+    });
+
+    expect(fake.runLogRows).toHaveLength(1);
+    expect(fake.runLogRows[0]).toMatchObject({
+      run_at: 3000, total: 40, errors: 0, watch_count: 10, trade_count: 1, dca_watch_count: 2, dca_trade_count: 0,
+    });
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("missing trad_* columns"), expect.stringContaining("no such column"));
+    errSpy.mockRestore();
+  });
+
+  it("re-throws non-schema D1 errors so a real outage is still visible", async () => {
+    const original = FakeStatement.prototype.run;
+    FakeStatement.prototype.run = async function () {
+      throw new Error("D1 is overloaded");
+    };
+    await expect(insertEntryAlertRunLog({ runAt: 1, total: 1, errors: 0, watchCount: 0, tradeCount: 0 })).rejects.toThrow("D1 is overloaded");
+    FakeStatement.prototype.run = original;
   });
 
   it("getEntryAlertRunLogSummarySince sums total/errors across runs at or after the cutoff, excluding older ones", async () => {
