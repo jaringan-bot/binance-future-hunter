@@ -10,6 +10,7 @@ import {
   DEFAULT_RPI_DEPTH_LIMIT,
   isRestrictedUpstream,
   isRpiDepthUnavailable,
+  restrictedUpstreamReason,
 } from "./shared.js";
 import { BinanceProxyError } from "./binanceProxyClient.js";
 import { StreamGatewayError } from "./streamGatewayClient.js";
@@ -177,5 +178,14 @@ describe("isRestrictedUpstream / isRpiDepthUnavailable", () => {
     const err = new BinanceProxyError("Proxy/Binance error HTTP 400: bad request", 400);
     expect(isRestrictedUpstream(err)).toBe(false);
     expect(isRpiDepthUnavailable(err)).toBe(true);
+  });
+
+  it("restrictedUpstreamReason never echoes HTML bodies", () => {
+    expect(
+      restrictedUpstreamReason(
+        new BinanceProxyError("HTTP 404: <!DOCTYPE html><title>404 Not Found</title>", 404),
+        "fallback",
+      ),
+    ).toBe("upstream HTTP 404");
   });
 });

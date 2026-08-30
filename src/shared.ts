@@ -298,6 +298,21 @@ export function isRpiDepthUnavailable(err: unknown): boolean {
   return /\bHTTP\s+400\b/.test(errorMessage(err));
 }
 
+/** Safe one-line reason for degraded MCP text — never dump HTML bodies. */
+export function restrictedUpstreamReason(err: unknown, fallback: string): string {
+  const status = errorStatus(err);
+  if (status !== undefined) return `upstream HTTP ${status}`;
+  const message = errorMessage(err);
+  if (/<!DOCTYPE html>/i.test(message) || /<html[\s>]/i.test(message)) {
+    if (/\b404\b/.test(message)) return "upstream HTTP 404";
+    return fallback;
+  }
+  if (message.includes("-4021")) return "Binance -4021 (not a valid depth limit)";
+  const http = message.match(/\bHTTP\s+(\d{3})\b/);
+  if (http) return `upstream HTTP ${http[1]}`;
+  return fallback;
+}
+
 export function errorResult(err: unknown) {
   const message =
     err instanceof binanceProxy.BinanceProxyError

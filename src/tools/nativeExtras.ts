@@ -10,6 +10,7 @@ import {
   clampRpiDepthLimit,
   isRestrictedUpstream,
   isRpiDepthUnavailable,
+  restrictedUpstreamReason,
 } from "../shared.js";
 import { truncateRows } from "../toolHelpers.js";
 
@@ -389,8 +390,10 @@ export function registerNativeExtrasTools(server: McpServer): void {
         };
       } catch (err) {
         if (isRpiDepthUnavailable(err)) {
-          const reason =
-            err instanceof Error ? err.message : "RPI depth endpoint menolak limit / tidak tersedia.";
+          const reason = restrictedUpstreamReason(
+            err,
+            "RPI depth endpoint menolak limit / tidak tersedia.",
+          );
           return {
             content: [
               {
@@ -539,10 +542,7 @@ export function registerNativeExtrasTools(server: McpServer): void {
         };
       } catch (err) {
         if (isRestrictedUpstream(err)) {
-          const reason =
-            err instanceof Error
-              ? err.message.slice(0, 200)
-              : "Endpoint allForceOrders dibatasi / 404.";
+          const reason = restrictedUpstreamReason(err, "Endpoint allForceOrders dibatasi / 404.");
           return {
             content: [
               {
