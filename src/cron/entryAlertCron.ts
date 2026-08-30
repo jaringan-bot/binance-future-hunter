@@ -461,15 +461,21 @@ export async function runEntryAlertCheck(env: TelegramEnv): Promise<void> {
   const tradTradeCount = outcomes.filter((o) => o.tradDecision === "TRAD_TRADE").length;
   const tradWatchCount = outcomes.filter((o) => o.tradDecision === "TRAD_WATCH").length;
   console.log(`[entry-alert] trad tally: TRAD_TRADE=${tradTradeCount} TRAD_WATCH=${tradWatchCount}`);
-  await d1Client.insertEntryAlertRunLog({
-    runAt: now,
-    total: outcomes.length,
-    errors: outcomes.filter((o) => o.hadError).length,
-    watchCount: outcomes.filter((o) => o.gridDecision === "WATCH").length,
-    tradeCount: outcomes.filter((o) => o.gridDecision === "TRADE").length,
-    dcaWatchCount: outcomes.filter((o) => o.dcaDecision === "DCA_WATCH").length,
-    dcaTradeCount: outcomes.filter((o) => o.dcaDecision === "DCA_TRADE").length,
-    tradWatchCount,
-    tradTradeCount,
-  });
+  try {
+    await d1Client.insertEntryAlertRunLog({
+      runAt: now,
+      total: outcomes.length,
+      errors: outcomes.filter((o) => o.hadError).length,
+      watchCount: outcomes.filter((o) => o.gridDecision === "WATCH").length,
+      tradeCount: outcomes.filter((o) => o.gridDecision === "TRADE").length,
+      dcaWatchCount: outcomes.filter((o) => o.dcaDecision === "DCA_WATCH").length,
+      dcaTradeCount: outcomes.filter((o) => o.dcaDecision === "DCA_TRADE").length,
+      tradWatchCount,
+      tradTradeCount,
+    });
+  } catch (err) {
+    // Jangan biarkan gagal nulis run-log (schema drift, D1 flake) mengubah
+    // seluruh tick jadi outcome=exception -- pipeline + Telegram sudah selesai.
+    console.error("[entry-alert] gagal insert entry_alert_run_log:", (err as Error)?.message ?? String(err));
+  }
 }

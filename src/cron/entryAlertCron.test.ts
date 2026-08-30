@@ -722,6 +722,19 @@ describe("runEntryAlertCheck", () => {
     expect(pacing.sleep).toHaveBeenCalledWith(ENTRY_ALERT_PACING_DELAY_MS);
   });
 
+  it("does not fail the tick when insertEntryAlertRunLog throws (schema drift must not become outcome=exception)", async () => {
+    mockWatchlist(["BTCUSDT"]);
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
+    vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue(dual(tradeResult("BTCUSDT")));
+    vi.mocked(d1Client.insertEntryAlertRunLog).mockRejectedValue(new Error("D1 is overloaded"));
+
+    await expect(runEntryAlertCheck(ENV)).resolves.toBeUndefined();
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining("gagal insert entry_alert_run_log"),
+      expect.stringContaining("D1 is overloaded"),
+    );
+  });
+
   it("records a run-log summary (total/errors/watch/trade tally) after processing the batch, so heartbeatCron can tell market-quiet from backend-broken", async () => {
     mockWatchlist(["BTCUSDT", "ETHUSDT", "SOLUSDT", "ADAUSDT"]);
     vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
