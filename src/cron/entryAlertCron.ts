@@ -141,13 +141,17 @@ function isGridAlertWorthy(result: SymbolPipelineResult): boolean {
 
 // DCA_WATCH dari dcaPipelineEngine SUDAH berarti confidence >= 50
 // (DCA_WATCH_MIN_ALERT_SCORE); DCA_NO_TRADE = di bawah itu / reject.
-// Phase 3 dcaSm menambah PAUSE_* / DCA_STOP — semua alertable kecuali legacy NO_TRADE.
+// Phase 3 dcaSm: TRADE / WATCH / PAUSE_HARD / STOP tetap alertable.
+// DCA_PAUSE_SOFT SENGAJA tidak alert -- adapter memetakan timing < 60,
+// safety < 70, S_C < 25, DAN GRID_NO_TRADE ke PAUSE_SOFT, jadi hampir
+// setiap pair di watchlist kebanjiran notif Telegram (sama pola dengan
+// TRAD_WATCH dan WATCH skor < 40). State tetap dipersist; transisi ke
+// TRADE/WATCH/HARD/STOP tetap fire lewat composite dcaSm.
 function isDcaAlertWorthy(dca: DcaHeadResult, dcaSm?: DcaSmartMoneyResult | null): boolean {
   if (dcaSm) {
     return (
       dcaSm.decision === "DCA_TRADE" ||
       dcaSm.decision === "DCA_WATCH" ||
-      dcaSm.decision === "DCA_PAUSE_SOFT" ||
       dcaSm.decision === "DCA_PAUSE_HARD" ||
       dcaSm.decision === "DCA_STOP"
     );
@@ -283,8 +287,11 @@ export async function checkEntryAlertForSymbol(
 
   // Dedup: composite "grid/dca/trad" string. Transisi = string berubah (head
   // mana pun flip -> alert gabungan yang nunjukin state ketiga head). Cooldown
-  // 4 jam pakai satu timestamp.
-  const composite = `${r.grid.decision}/${r.dca.decision}/${r.trad.decision}`;
+  // 4 jam pakai satu timestamp. Slot tengah pakai dcaSm.decision kalau ada
+  // supaya PAUSE_SOFT (yang tidak alert) -> TRADE/WATCH/HARD/STOP tetap
+  // ketahuan sebagai transisi, bukan tertelan cooldown slot legacy.
+  const dcaSlot = r.dcaSm?.decision ?? r.dca.decision;
+  const composite = `${r.grid.decision}/${dcaSlot}/${r.trad.decision}`;
   const alertable = isGridAlertWorthy(r.grid) || isDcaAlertWorthy(r.dca, r.dcaSm) || isTradAlertWorthy(r.trad);
   const isTransition = alertable && previous?.lastDecision !== composite;
   const cooldownExpired =
