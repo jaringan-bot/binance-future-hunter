@@ -103,7 +103,7 @@ function dual(
   dcaDecision: DcaHeadResult["decision"] = "DCA_NO_TRADE",
   tradDecision: TraditionalFuturesResult["decision"] = "TRAD_NO_TRADE",
 ): TriplePipelineResult {
-  return { grid, dca: stubDca(grid.symbol, dcaDecision), trad: stubTrad(tradDecision) };
+  return { grid, dca: stubDca(grid.symbol, dcaDecision), trad: stubTrad(tradDecision), dcaSm: null };
 }
 
 function tradeResult(symbol: string): SymbolPipelineResult {
@@ -462,6 +462,7 @@ describe("checkEntryAlertForSymbol", () => {
         },
       },
       trad: stubTrad(),
+      dcaSm: null,
     });
     vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
 
