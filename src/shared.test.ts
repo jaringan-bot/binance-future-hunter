@@ -5,7 +5,15 @@ import {
   assignVolatilityTier,
   parseTimeParam,
   symbolSchema,
+  asArray,
+  clampRpiDepthLimit,
+  DEFAULT_RPI_DEPTH_LIMIT,
+  isRestrictedUpstream,
+  isRpiDepthUnavailable,
+  restrictedUpstreamReason,
 } from "./shared.js";
+import { BinanceProxyError } from "./binanceProxyClient.js";
+import { StreamGatewayError } from "./streamGatewayClient.js";
 
 describe("computeRealizedVolatility", () => {
   it("returns zero for fewer than 2 closes", () => {
@@ -109,5 +117,75 @@ describe("symbolSchema", () => {
     expect(() => symbolSchema.parse("BTC/USDT")).toThrow();
     expect(() => symbolSchema.parse("BTC USDT")).toThrow();
     expect(() => symbolSchema.parse("BTCUSDT\n")).toThrow();
+  });
+});
+
+describe("asArray", () => {
+  it("returns the same array when the value is already an array", () => {
+    const rows = [{ a: 1 }];
+    expect(asArray(rows)).toBe(rows);
+  });
+
+  it("returns [] for undefined, null, and non-arrays", () => {
+    expect(asArray(undefined)).toEqual([]);
+    expect(asArray(null)).toEqual([]);
+    expect(asArray({ assets: [] })).toEqual([]);
+    expect(asArray("x")).toEqual([]);
+  });
+});
+
+describe("clampRpiDepthLimit", () => {
+  it("defaults to 100 when limit is missing or non-finite", () => {
+    expect(clampRpiDepthLimit(undefined)).toBe(DEFAULT_RPI_DEPTH_LIMIT);
+    expect(clampRpiDepthLimit(NaN)).toBe(100);
+    expect(clampRpiDepthLimit("20")).toBe(100);
+  });
+
+  it("returns an exact documented limit unchanged", () => {
+    expect(clampRpiDepthLimit(5)).toBe(5);
+    expect(clampRpiDepthLimit(100)).toBe(100);
+    expect(clampRpiDepthLimit(1000)).toBe(1000);
+  });
+
+  it("snaps an off-grid limit to the nearest documented value", () => {
+    expect(clampRpiDepthLimit(15)).toBe(10);
+    expect(clampRpiDepthLimit(30)).toBe(20);
+    expect(clampRpiDepthLimit(80)).toBe(100);
+  });
+});
+
+describe("isRestrictedUpstream / isRpiDepthUnavailable", () => {
+  it("flags HTTP 401/403/404 via status or message", () => {
+    expect(isRestrictedUpstream(new StreamGatewayError("stream gateway HTTP 401", 401))).toBe(true);
+    expect(isRestrictedUpstream(new BinanceProxyError("Proxy/Binance error HTTP 403: denied", 403))).toBe(true);
+    expect(isRestrictedUpstream(new BinanceProxyError("HTTP 404: <!DOCTYPE html> Not Found", 404))).toBe(true);
+    expect(isRestrictedUpstream(new Error("stream gateway HTTP 401"))).toBe(true);
+  });
+
+  it("flags Binance -4021 and HTML 404 bodies", () => {
+    expect(isRestrictedUpstream(new BinanceProxyError('HTTP 400: {"code":-4021,"msg":"not valid depth limit"}', 400))).toBe(
+      true,
+    );
+    expect(isRestrictedUpstream(new Error("<!DOCTYPE html><title>404 Not Found</title>"))).toBe(true);
+  });
+
+  it("does not flag unrelated 5xx / generic errors", () => {
+    expect(isRestrictedUpstream(new StreamGatewayError("stream gateway HTTP 502", 502))).toBe(false);
+    expect(isRestrictedUpstream(new Error("network down"))).toBe(false);
+  });
+
+  it("treats HTTP 400 as RPI-unavailable even without -4021", () => {
+    const err = new BinanceProxyError("Proxy/Binance error HTTP 400: bad request", 400);
+    expect(isRestrictedUpstream(err)).toBe(false);
+    expect(isRpiDepthUnavailable(err)).toBe(true);
+  });
+
+  it("restrictedUpstreamReason never echoes HTML bodies", () => {
+    expect(
+      restrictedUpstreamReason(
+        new BinanceProxyError("HTTP 404: <!DOCTYPE html><title>404 Not Found</title>", 404),
+        "fallback",
+      ),
+    ).toBe("upstream HTTP 404");
   });
 });

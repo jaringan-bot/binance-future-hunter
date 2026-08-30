@@ -9,8 +9,13 @@
 //
 // computeOrderBookWalls() = inti MURNI (testable tanpa fetch). findOrderBookWalls()
 // = wrapper async: fetch depth (3-menit TTL cache) + validasi exchange_info.
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
 import * as binanceProxy from "../binanceProxyClient.js";
 import type { OrderBookDepth } from "../binanceProxyClient.js";
+import { registerSafeTool } from "../toolWrapper.js";
+import { errorResult, symbolSchema } from "../shared.js";
+import { computeATR, summarizeKlines } from "../toolHelpers.js";
 
 export const DEFAULT_MIN_WALL_MULTIPLE = 3.0; // Notional >= 3.0 * meanDepth ...
 export const DEFAULT_ABS_FLOOR_USD = 100_000; // ... atau minimal $100k (mana yang lebih besar)
@@ -193,4 +198,103 @@ export async function findOrderBookWalls(
   const symbolInfo = exInfo?.symbols?.find((s) => s.symbol === normalized);
   const tickSize = extractTickSize(symbolInfo);
   return computeOrderBookWalls(book, currentPrice, { atr14Pct, tickSize });
+}
+
+export function registerGridWallFinderTools(server: McpServer): void {
+  registerSafeTool(
+    server,
+    "whalescope_find_grid_walls",
+    {
+      title: "Find Grid Liquidity Walls",
+      description:
+        "Cari bound grid di wall bid/ask tebal (institutional limit), bukan High/Low ± ATR. " +
+        "Kalau tidak ada wall yang lolos threshold, return GRID_NO_TRADE (bukan error).",
+      inputSchema: {
+        symbol: symbolSchema,
+        atr14Pct: z
+          .number()
+          .positive()
+          .optional()
+          .describe("ATR14 sebagai persen dari harga. Kosongkan untuk dihitung dari klines 1h."),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ symbol, atr14Pct }) => {
+      try {
+        let price: number;
+        let resolvedAtrPct: number;
+
+        if (atr14Pct != null) {
+          const ticker = await binanceProxy.getPriceTicker(symbol);
+          const row = Array.isArray(ticker) ? ticker[0] : ticker;
+          price = parseFloat(row?.price ?? "");
+          resolvedAtrPct = atr14Pct;
+        } else {
+          const raw = await binanceProxy.getKlinesNative(symbol, "1h", 30);
+          const summary = summarizeKlines(raw ?? []);
+          price = summary.lastClose;
+          const atr = computeATR(summary.candles, 14);
+          resolvedAtrPct = price > 0 ? (atr / price) * 100 : 0;
+        }
+
+        if (!(price > 0) || !(resolvedAtrPct > 0)) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `# Grid Walls — ${symbol}\n\nGRID_NO_TRADE: harga atau ATR14% tidak valid.`,
+              },
+            ],
+            structuredContent: {
+              symbol,
+              status: "GRID_NO_TRADE",
+              reason: "harga atau ATR14% tidak valid",
+            },
+          };
+        }
+
+        const walls = await findOrderBookWalls(symbol, price, resolvedAtrPct);
+        if (!walls) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `# Grid Walls — ${symbol}\n\nGRID_NO_TRADE: No significant liquidity walls found.`,
+              },
+            ],
+            structuredContent: {
+              symbol,
+              status: "GRID_NO_TRADE",
+              reason: "No significant liquidity walls found",
+              currentPrice: price,
+              atr14Pct: resolvedAtrPct,
+            },
+          };
+        }
+
+        const text = [
+          `# Grid Walls — ${symbol}`,
+          ``,
+          `- Mid: ${price}`,
+          `- ATR14%: ${resolvedAtrPct}`,
+          `- Lower: ${walls.lowerBound} (wall ${walls.lowerWall.notionalUsd})`,
+          `- Upper: ${walls.upperBound} (wall ${walls.upperWall.notionalUsd})`,
+          `- Est. grid count: ${walls.estimatedGridCount}`,
+        ].join("\n");
+
+        return {
+          content: [{ type: "text", text }],
+          structuredContent: {
+            symbol,
+            status: "OK",
+            currentPrice: price,
+            atr14Pct: resolvedAtrPct,
+            ...walls,
+          },
+        };
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
 }

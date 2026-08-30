@@ -19,6 +19,7 @@ vi.mock("../binanceProxyClient.js", () => ({
 type ToolResult = {
   content: [{ type: "text"; text: string }];
   structuredContent?: Record<string, unknown>;
+  isError?: boolean;
 };
 type ToolHandler = (args: Record<string, unknown>) => Promise<ToolResult>;
 
@@ -88,5 +89,39 @@ describe("nativeExtras -- server-side symbol filter bugs (Binance ignores ?symbo
     const result = await call("binance_get_funding_info", { symbol: "BTCUSDT" });
     expect(result.content[0].text).toContain("default");
     expect(result.content[0].text).not.toContain("GTCUSDT");
+  });
+
+  it("binance_get_rpi_depth clamps an off-grid limit before calling the client", async () => {
+    vi.mocked(binanceProxy.getRpiDepth).mockResolvedValue({
+      lastUpdateId: 1,
+      E: 0,
+      T: 0,
+      bids: [["100", "1"]],
+      asks: [["101", "1"]],
+    });
+    await call("binance_get_rpi_depth", { symbol: "BTCUSDT", limit: 15 });
+    expect(binanceProxy.getRpiDepth).toHaveBeenCalledWith("BTCUSDT", 10);
+  });
+
+  it("binance_get_rpi_depth returns unavailable (not isError) on Binance -4021", async () => {
+    vi.mocked(binanceProxy.getRpiDepth).mockRejectedValue(
+      new Error('Proxy/Binance error HTTP 400: {"code":-4021,"msg":"not valid depth limit"}'),
+    );
+    const result = await call("binance_get_rpi_depth", { symbol: "BTCUSDT" });
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent?.unavailable).toBe(true);
+    expect(result.structuredContent?.limit).toBe(100);
+    expect(result.content[0].text).toMatch(/tidak tersedia|RPI/i);
+  });
+
+  it("binance_get_all_force_orders degrades on HTML 404 instead of crashing", async () => {
+    vi.mocked(binanceProxy.getAllForceOrders).mockRejectedValue(
+      new Error("Proxy/Binance error HTTP 404: <!DOCTYPE html><title>404 Not Found</title>"),
+    );
+    const result = await call("binance_get_all_force_orders", { symbol: "BTCUSDT" });
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent?.degraded).toBe(true);
+    expect(result.structuredContent?.count).toBe(0);
+    expect(result.content[0].text).not.toMatch(/<!DOCTYPE/i);
   });
 });

@@ -122,11 +122,24 @@ export function registerHyperliquidWhaleTools(server: McpServer): void {
     async ({ coin, detail }) => {
       try {
         if (HYPERLIQUID_WHALE_WATCHLIST.length === 0) {
-          return errorResult(
-            new Error(
-              "HYPERLIQUID_WHALE_WATCHLIST masih kosong (src/shared.ts) -- isi address wallet whale dulu sebelum tool ini bisa dipakai.",
-            ),
-          );
+          return {
+            content: [
+              {
+                type: "text",
+                text: [
+                  `# Hyperliquid Whale Positions -- ${coin.toUpperCase()}`,
+                  ``,
+                  `Watchlist kosong — tidak ada wallet yang dikonfigurasi.`,
+                  `Isi \`HYPERLIQUID_WHALE_WATCHLIST\` di src/shared.ts (atau secret JSON array saat deploy) sebelum tool ini punya data.`,
+                ].join("\n"),
+              },
+            ],
+            structuredContent: {
+              coin: coin.toUpperCase(),
+              watchlistConfigured: false,
+              watchlistSize: 0,
+            },
+          };
         }
 
         const upperCoin = coin.toUpperCase();

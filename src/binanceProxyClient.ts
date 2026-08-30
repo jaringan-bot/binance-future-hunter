@@ -629,7 +629,14 @@ export async function getAdlRiskNative(symbol: string): Promise<AdlRiskEntry> {
 export interface InsuranceFundAsset { asset: string; marginBalance: string; updateTime: number; }
 export interface InsuranceFundBalance { symbols: string[]; assets: InsuranceFundAsset[]; }
 export async function getInsuranceFundBalanceNative(symbol?: string): Promise<InsuranceFundBalance> {
-  return callProxy<InsuranceFundBalance>("/fapi/v1/insuranceBalance", symbol ? { symbol: symbol.toUpperCase() } : {});
+  const data = await callProxy<Partial<InsuranceFundBalance> | null>(
+    "/fapi/v1/insuranceBalance",
+    symbol ? { symbol: symbol.toUpperCase() } : {},
+  );
+  return {
+    symbols: Array.isArray(data?.symbols) ? data.symbols : [],
+    assets: Array.isArray(data?.assets) ? data.assets : [],
+  };
 }
 
 export async function getMarkPriceKlinesNative(symbol: string, interval: string, limit: number, startTime?: number, endTime?: number): Promise<KlineTuple[]> {

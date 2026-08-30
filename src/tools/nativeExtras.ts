@@ -3,7 +3,15 @@ import { z } from "zod";
 import { registerSafeTool } from "../toolWrapper.js";
 import * as binanceProxy from "../binanceProxyClient.js";
 import { fmtNum, fmtPrice, fmtTime } from "../format.js";
-import { symbolSchema, errorResult, detailParam } from "../shared.js";
+import {
+  symbolSchema,
+  errorResult,
+  detailParam,
+  clampRpiDepthLimit,
+  isRestrictedUpstream,
+  isRpiDepthUnavailable,
+  restrictedUpstreamReason,
+} from "../shared.js";
 import { truncateRows } from "../toolHelpers.js";
 
 export function registerNativeExtrasTools(server: McpServer): void {
@@ -327,14 +335,15 @@ export function registerNativeExtrasTools(server: McpServer): void {
         "Beda dari binance_get_order_book_depth yang mengecualikan RPI. Default summary (top 10 + wall).",
       inputSchema: {
         symbol: symbolSchema,
-        limit: z.number().int().default(20).describe("Jumlah level per sisi"),
+        limit: z.number().int().default(100).describe("Jumlah level per sisi (di-clamp ke 5/10/20/50/100/500/1000; default 100)"),
         detail: detailParam,
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ symbol, limit, detail }) => {
+      const clampedLimit = clampRpiDepthLimit(limit);
       try {
-        const data = await binanceProxy.getRpiDepth(symbol, limit);
+        const data = await binanceProxy.getRpiDepth(symbol, clampedLimit);
 
         const bestBid = data.bids?.[0] ? parseFloat(data.bids[0][0]) : null;
         const bestAsk = data.asks?.[0] ? parseFloat(data.asks[0][0]) : null;
@@ -372,6 +381,7 @@ export function registerNativeExtrasTools(server: McpServer): void {
           content: [{ type: "text", text }],
           structuredContent: {
             symbol,
+            limit: clampedLimit,
             bestBid,
             bestAsk,
             spread,
@@ -379,6 +389,33 @@ export function registerNativeExtrasTools(server: McpServer): void {
           },
         };
       } catch (err) {
+        if (isRpiDepthUnavailable(err)) {
+          const reason = restrictedUpstreamReason(
+            err,
+            "RPI depth endpoint menolak limit / tidak tersedia.",
+          );
+          return {
+            content: [
+              {
+                type: "text",
+                text: [
+                  `# RPI Order Book — ${symbol}`,
+                  ``,
+                  `Endpoint \`/fapi/v1/rpiDepth\` tidak tersedia untuk limit ${clampedLimit}.`,
+                  `Alasan: ${reason}`,
+                  ``,
+                  `_Bukan crash — bandingkan dengan \`binance_get_order_book_depth\` (tanpa RPI)._`,
+                ].join("\n"),
+              },
+            ],
+            structuredContent: {
+              symbol,
+              limit: clampedLimit,
+              unavailable: true,
+              reason,
+            },
+          };
+        }
         return errorResult(err);
       }
     },
@@ -499,10 +536,35 @@ export function registerNativeExtrasTools(server: McpServer): void {
           content: [{ type: "text", text }],
           structuredContent: {
             count: list.length,
+            degraded: false,
             ...(detail === "full" ? { orders: list } : { recent: shown }),
           },
         };
       } catch (err) {
+        if (isRestrictedUpstream(err)) {
+          const reason = restrictedUpstreamReason(err, "Endpoint allForceOrders dibatasi / 404.");
+          return {
+            content: [
+              {
+                type: "text",
+                text: [
+                  `# Force Orders / Liquidations${symbol ? ` — ${symbol}` : ""}`,
+                  ``,
+                  `Endpoint \`/fapi/v1/allForceOrders\` sering dibatasi Binance (404 / private).`,
+                  `Tidak ada data yang bisa ditampilkan. ${reason}`,
+                  ``,
+                  `_Pakai \`binance_get_realtime_liquidations\` (stream) sebagai alternatif market-wide._`,
+                ].join("\n"),
+              },
+            ],
+            structuredContent: {
+              count: 0,
+              orders: [],
+              degraded: true,
+              degradedReason: reason,
+            },
+          };
+        }
         return errorResult(err);
       }
     },

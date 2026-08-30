@@ -237,6 +237,82 @@ export function dropNulls<T extends object>(obj: T): Partial<T> {
   return out;
 }
 
+/** Never throw on undefined / non-array upstream payloads. */
+export function asArray<T>(value: unknown): T[] {
+  return Array.isArray(value) ? (value as T[]) : [];
+}
+
+// Binance documented depth limits. /fapi/v1/rpiDepth still rejects some of
+// these at runtime (-4021); handlers clamp first, then degrade on -4021.
+export const RPI_DEPTH_LIMITS = [5, 10, 20, 50, 100, 500, 1000] as const;
+export const DEFAULT_RPI_DEPTH_LIMIT = 100;
+
+export function clampRpiDepthLimit(limit: unknown): number {
+  if (typeof limit !== "number" || !Number.isFinite(limit)) return DEFAULT_RPI_DEPTH_LIMIT;
+  let nearest: (typeof RPI_DEPTH_LIMITS)[number] = DEFAULT_RPI_DEPTH_LIMIT;
+  let best = Number.POSITIVE_INFINITY;
+  for (const candidate of RPI_DEPTH_LIMITS) {
+    const distance = Math.abs(candidate - limit);
+    if (distance < best) {
+      best = distance;
+      nearest = candidate;
+    }
+  }
+  return nearest;
+}
+
+const RESTRICTED_HTTP_STATUS = new Set([401, 403, 404]);
+
+function errorStatus(err: unknown): number | undefined {
+  if (typeof err === "object" && err !== null && "status" in err) {
+    const status = (err as { status?: unknown }).status;
+    if (typeof status === "number" && Number.isFinite(status)) return status;
+  }
+  return undefined;
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * True for HTTP 401/403/404, Binance -4021 (invalid RPI depth), or HTML 404
+ * bodies from BinanceProxyError / StreamGatewayError. Used to degrade
+ * instead of crashing a tool call.
+ */
+export function isRestrictedUpstream(err: unknown): boolean {
+  const status = errorStatus(err);
+  if (status !== undefined && RESTRICTED_HTTP_STATUS.has(status)) return true;
+  const message = errorMessage(err);
+  if (message.includes("-4021")) return true;
+  if (/\bHTTP\s+40[134]\b/.test(message)) return true;
+  if (/<!DOCTYPE html>/i.test(message) && /404|Not Found/i.test(message)) return true;
+  return false;
+}
+
+/** RPI depth also treats generic HTTP 400 as "endpoint unavailable". */
+export function isRpiDepthUnavailable(err: unknown): boolean {
+  if (isRestrictedUpstream(err)) return true;
+  const status = errorStatus(err);
+  if (status === 400) return true;
+  return /\bHTTP\s+400\b/.test(errorMessage(err));
+}
+
+/** Safe one-line reason for degraded MCP text — never dump HTML bodies. */
+export function restrictedUpstreamReason(err: unknown, fallback: string): string {
+  const status = errorStatus(err);
+  if (status !== undefined) return `upstream HTTP ${status}`;
+  const message = errorMessage(err);
+  if (/<!DOCTYPE html>/i.test(message) || /<html[\s>]/i.test(message)) {
+    if (/\b404\b/.test(message)) return "upstream HTTP 404";
+    return fallback;
+  }
+  if (message.includes("-4021")) return "Binance -4021 (not a valid depth limit)";
+  const http = message.match(/\bHTTP\s+(\d{3})\b/);
+  if (http) return `upstream HTTP ${http[1]}`;
+  return fallback;
+}
+
 export function errorResult(err: unknown) {
   const message =
     err instanceof binanceProxy.BinanceProxyError

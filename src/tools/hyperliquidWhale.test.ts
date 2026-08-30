@@ -133,10 +133,11 @@ describe("hyperliquid_get_whale_wallet_positions tool", () => {
 
   // HYPERLIQUID_WHALE_WATCHLIST default kosong (shared.ts) -- ini exercise
   // guard clause tool tanpa perlu mock shared.js.
-  it("returns an error result when the whale watchlist is empty (default state)", async () => {
+  it("returns a non-error empty result when the whale watchlist is empty (default state)", async () => {
     const result = await call({ coin: "BTC" });
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain("HYPERLIQUID_WHALE_WATCHLIST masih kosong");
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0].text).toMatch(/Watchlist kosong|tidak ada wallet/i);
+    expect(result.structuredContent?.watchlistConfigured).toBe(false);
     expect(d1Client.queryHyperliquidWhaleRecentByCoin).not.toHaveBeenCalled();
   });
 });

@@ -13,6 +13,16 @@ const RECENT_LIMIT = 15;
 const SAMPLED_NOTE =
   "Catatan: stream !forceOrder@arr di-throttle Binance (maks 1 event/symbol/detik) — ini SAMPEL likuidasi, bukan semua.";
 
+function gatewayDegradedReason(err: unknown): string {
+  if (err instanceof gw.StreamGatewayError) {
+    if (err.status === 401 || err.status === 403) {
+      return `stream gateway HTTP ${err.status} — cek PROXY_SECRET di worker vs gateway.`;
+    }
+    return err.message || `stream gateway HTTP ${err.status ?? "error"}`;
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
 export function registerRealtimeStreamTools(server: McpServer): void {
   registerSafeTool(
     server,
@@ -111,6 +121,40 @@ export function registerRealtimeStreamTools(server: McpServer): void {
           },
         };
       } catch (err) {
+        if (err instanceof gw.StreamGatewayError) {
+          const reason = gatewayDegradedReason(err);
+          return {
+            content: [
+              {
+                type: "text",
+                text: [
+                  symbol ? `# Likuidasi Real-Time — ${symbol}` : `# Likuidasi Real-Time — market-wide`,
+                  "",
+                  `⚠️ **STREAM DEGRADED**: ${reason}. Data di bawah mungkin tidak lengkap / basi.`,
+                  "",
+                  "Belum ada event likuidasi di window buffer (atau filter terlalu ketat).",
+                  "",
+                  SAMPLED_NOTE,
+                ].join("\n"),
+              },
+            ],
+            structuredContent: {
+              symbol: symbol ?? null,
+              degraded: true,
+              degradedReason: reason,
+              totalCount: 0,
+              totalNotionalUsd: 0,
+              sellCount: 0,
+              buyCount: 0,
+              sellNotionalUsd: 0,
+              buyNotionalUsd: 0,
+              topSymbols: [],
+              biggest: null,
+              recent: [],
+              streamHealth: undefined,
+            },
+          };
+        }
         return errorResult(err);
       }
     },
@@ -173,6 +217,31 @@ export function registerRealtimeStreamTools(server: McpServer): void {
           },
         };
       } catch (err) {
+        if (err instanceof gw.StreamGatewayError) {
+          const reason = gatewayDegradedReason(err);
+          return {
+            content: [
+              {
+                type: "text",
+                text: [
+                  `# Event Kontrak Futures${symbol ? ` — ${symbol}` : ""}`,
+                  "",
+                  `⚠️ **STREAM DEGRADED**: ${reason}.`,
+                  "",
+                  "Belum ada event kontrak di window buffer (30 hari). Ini normal — event ini jarang.",
+                ].join("\n"),
+              },
+            ],
+            structuredContent: {
+              symbol: symbol ?? null,
+              degraded: true,
+              degradedReason: reason,
+              count: 0,
+              events: [],
+              streamHealth: undefined,
+            },
+          };
+        }
         return errorResult(err);
       }
     },
