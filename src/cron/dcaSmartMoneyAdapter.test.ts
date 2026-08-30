@@ -8,7 +8,10 @@ import {
   isCapitulation,
   computeDynamicIntervalPct,
   evaluateDcaSmartMoney,
+  shouldCrossProductPauseSoft,
   DCA_TIMING_TRADE_MIN,
+  SC_DISTRIBUTION_THRESHOLD,
+  PAUSE_SOFT_DEFER_TICKS,
   type DcaSmartMoneyInput,
 } from "./dcaSmartMoneyAdapter.js";
 import type { KlineCandle } from "../toolHelpers.js";
@@ -80,12 +83,35 @@ describe("pause guard hierarchy", () => {
     expect(resolvePauseLevel(40, 50, 0, false)).toBe("PAUSE_HARD");
     expect(resolvePauseLevel(80, 50, 85, false)).toBe("PAUSE_HARD");
   });
-  it("SOFT on safety < 70 or S_C < 25", () => {
+  it("SOFT on safety < 70 or S_C < 15 (not the old 25)", () => {
     expect(resolvePauseLevel(65, 50, 0, false)).toBe("PAUSE_SOFT");
-    expect(resolvePauseLevel(80, 20, 0, false)).toBe("PAUSE_SOFT");
+    expect(resolvePauseLevel(80, 14, 0, false)).toBe("PAUSE_SOFT");
+    expect(resolvePauseLevel(80, 15, 0, false)).toBe("NONE");
+    expect(resolvePauseLevel(80, 20, 0, false)).toBe("NONE");
   });
   it("NONE when all clear", () => {
     expect(resolvePauseLevel(80, 50, 0, false)).toBe("NONE");
+  });
+});
+
+describe("computeDcaSafetyScore distribution threshold", () => {
+  it("applies the 40-pt distribution penalty only when S_C < 15", () => {
+    expect(computeDcaSafetyScore(14, 50).distributionPenalty).toBe(40);
+    expect(computeDcaSafetyScore(14, 50).score).toBe(60);
+    expect(computeDcaSafetyScore(15, 50).distributionPenalty).toBe(0);
+    expect(computeDcaSafetyScore(20, 50).distributionPenalty).toBe(0);
+    expect(computeDcaSafetyScore(20, 50).score).toBe(100);
+  });
+});
+
+describe("shouldCrossProductPauseSoft", () => {
+  it("only pauses on GRID_NO_TRADE in BREAKOUT or ACCUMULATION", () => {
+    expect(shouldCrossProductPauseSoft("GRID_NO_TRADE", "BREAKOUT")).toBe(true);
+    expect(shouldCrossProductPauseSoft("GRID_NO_TRADE", "ACCUMULATION")).toBe(true);
+    expect(shouldCrossProductPauseSoft("GRID_NO_TRADE", "RANGING")).toBe(false);
+    expect(shouldCrossProductPauseSoft("GRID_NO_TRADE", "TRENDING_UP")).toBe(false);
+    expect(shouldCrossProductPauseSoft("GRID_TRADE", "BREAKOUT")).toBe(false);
+    expect(shouldCrossProductPauseSoft(null, "BREAKOUT")).toBe(false);
   });
 });
 
@@ -122,7 +148,7 @@ describe("evaluateDcaSmartMoney", () => {
     expect(r.pauseLevel).toBe("NONE");
   });
 
-  it("2. PAUSE_SOFT during distribution (S_C < 25)", () => {
+  it("2. PAUSE_SOFT during distribution (S_C < 15)", () => {
     const r = evaluateDcaSmartMoney(
       baseInput({
         scenarioC: { slopeSpot: 0, slopeFutures: 1, takerSpotNorm: 0, multiTfAlign: 0 },
@@ -132,10 +158,33 @@ describe("evaluateDcaSmartMoney", () => {
         liqMean24hUsd: 500_000,
       }),
     );
-    expect(r.scenarioCScore).toBeLessThan(25);
+    expect(r.scenarioCScore).toBeLessThan(SC_DISTRIBUTION_THRESHOLD);
     expect(r.safetyScore).toBeGreaterThanOrEqual(20);
     expect(r.decision).toBe("DCA_PAUSE_SOFT");
     expect(r.pauseLevel).toBe("PAUSE_SOFT");
+    expect(r.pauseReason).toMatch(/S_C \d+ < 15/);
+    expect(r.reasons.some((x) => x.includes(`defer ${PAUSE_SOFT_DEFER_TICKS} tick`))).toBe(true);
+    expect(r.reasons.some((x) => x.includes("defer 2 tick"))).toBe(false);
+  });
+
+  it("2b. S_C between 15 and 25 no longer trips distribution PAUSE_SOFT", () => {
+    // S_C = 0.3 * takerSpotNorm = 20 when slope/multiTF are 0.
+    const r = evaluateDcaSmartMoney(
+      baseInput({
+        scenarioC: { slopeSpot: 0, slopeFutures: 1, takerSpotNorm: 20 / 0.3, multiTfAlign: 0 },
+        fundingRate: -0.001,
+        fundingHistory30d: Array.from({ length: 20 }, () => -0.0005),
+        oiVelocityPerHour: 80,
+        oiVelocityHistory: [10, 20, 30, 40, 50, 60, 70, 80],
+        liqSpikeUsd: 50_000,
+        liqMean24hUsd: 500_000,
+      }),
+    );
+    expect(r.scenarioCScore).toBeGreaterThanOrEqual(SC_DISTRIBUTION_THRESHOLD);
+    expect(r.scenarioCScore).toBeLessThan(25);
+    expect(r.safetyScore).toBe(100);
+    expect(r.pauseLevel).toBe("NONE");
+    expect(r.decision).not.toBe("DCA_PAUSE_SOFT");
   });
 
   it("3. PAUSE_HARD during Long Squeeze Risk > 80", () => {
@@ -163,16 +212,46 @@ describe("evaluateDcaSmartMoney", () => {
     expect(r.reasons.some((x) => x.includes("INVALIDATED"))).toBe(true);
   });
 
-  it("5. Cross-product override from Grid Bot GRID_NO_TRADE", () => {
-    const r = evaluateDcaSmartMoney(
+  it("5. Cross-product override from Grid Bot GRID_NO_TRADE only in BREAKOUT/ACCUMULATION", () => {
+    const breakout = evaluateDcaSmartMoney(
       baseInput({
+        regime: "BREAKOUT",
         gridSmDecision: "GRID_NO_TRADE",
         scenarioC: { slopeSpot: 2, slopeFutures: 1, takerSpotNorm: 60, multiTfAlign: 50 },
         fundingRate: -0.0001,
         fundingHistory30d: [-0.0002, -0.0001, 0, 0.0001, 0.0002],
       }),
     );
-    expect(r.decision).toBe("DCA_PAUSE_SOFT");
-    expect(r.pauseReason).toContain("Grid Bot detects range breakdown");
+    expect(breakout.decision).toBe("DCA_PAUSE_SOFT");
+    expect(breakout.pauseReason).toContain("BREAKOUT");
+
+    const accumulation = evaluateDcaSmartMoney(
+      baseInput({
+        regime: "ACCUMULATION",
+        gridSmDecision: "GRID_NO_TRADE",
+        scenarioC: { slopeSpot: 2, slopeFutures: 1, takerSpotNorm: 60, multiTfAlign: 50 },
+        fundingRate: -0.0001,
+        fundingHistory30d: [-0.0002, -0.0001, 0, 0.0001, 0.0002],
+      }),
+    );
+    expect(accumulation.decision).toBe("DCA_PAUSE_SOFT");
+    expect(accumulation.pauseReason).toContain("ACCUMULATION");
+  });
+
+  it("5b. GRID_NO_TRADE in RANGING (thin / missing $100k+ walls) does not pause DCA", () => {
+    const r = evaluateDcaSmartMoney(
+      baseInput({
+        regime: "RANGING",
+        gridSmDecision: "GRID_NO_TRADE",
+        scenarioC: { slopeSpot: 5, slopeFutures: 1, takerSpotNorm: 90, multiTfAlign: 100 },
+        fundingHistory30d: Array.from({ length: 20 }, () => -0.0005),
+        fundingRate: -0.001,
+        oiVelocityPerHour: 80,
+        oiVelocityHistory: [10, 20, 30, 40, 50, 60, 70, 80],
+      }),
+    );
+    expect(r.decision).toBe("DCA_TRADE");
+    expect(r.pauseLevel).toBe("NONE");
+    expect(r.pauseReason).toBeNull();
   });
 });

@@ -30,6 +30,12 @@ export const INTERVAL_CEILING_PCT = 8.0;
 export const ATR_EMA_PERIOD = 6;
 export const CAPITULATION_LIQ_MULT = 5;
 export const CAPITULATION_LIQ_USD = 2_000_000;
+/** S_C below this is treated as distribution (safety penalty + PAUSE_SOFT). Relaxed from 25 to cut false pauses in ranging. */
+export const SC_DISTRIBUTION_THRESHOLD = 15;
+/** PAUSE_SOFT defers the next DCA entry by this many cron ticks. */
+export const PAUSE_SOFT_DEFER_TICKS = 1;
+/** GRID_NO_TRADE only forces PAUSE_SOFT in these regimes — not when Grid merely lacks $100k+ walls. */
+export const GRID_CROSS_PRODUCT_PAUSE_REGIMES = ["BREAKOUT", "ACCUMULATION"] as const;
 
 export const W_TIMING_SC = 0.4;
 export const W_TIMING_SQUEEZE = 0.3;
@@ -130,7 +136,7 @@ export interface DcaSafetyResult {
 export function computeDcaSafetyScore(scenarioCScore: number, fundingPercentile: number): DcaSafetyResult {
   const sC = clamp100(scenarioCScore);
   const longSqueezeRisk = computeLongSqueezeRisk(fundingPercentile);
-  const distributionPenalty = sC < 25 ? 40 : 0;
+  const distributionPenalty = sC < SC_DISTRIBUTION_THRESHOLD ? 40 : 0;
   const longSqueezePenalty = longSqueezeRisk > 80 ? 50 : longSqueezeRisk > 60 ? 25 : 0;
   const score = Math.max(0, 100 - distributionPenalty - longSqueezePenalty);
   return { score, distributionPenalty, longSqueezePenalty, longSqueezeRisk };
@@ -171,7 +177,7 @@ export function resolvePauseLevel(
 ): DcaPauseLevel {
   if (safetyScore < 20 || capitulation) return "STOP";
   if (safetyScore < 50 || longSqueezeRisk > 80) return "PAUSE_HARD";
-  if (safetyScore < 70 || scenarioCScore < 25) return "PAUSE_SOFT";
+  if (safetyScore < 70 || scenarioCScore < SC_DISTRIBUTION_THRESHOLD) return "PAUSE_SOFT";
   return "NONE";
 }
 
@@ -208,6 +214,19 @@ export function computeNextTriggerPrice(currentPrice: number, intervalPct: numbe
   return currentPrice * factor;
 }
 
+/**
+ * Cross-product: Grid GRID_NO_TRADE only forces DCA PAUSE_SOFT when the
+ * regime is BREAKOUT or ACCUMULATION. Thin-book / missing $100k+ walls in
+ * RANGING (or any other regime) must not pause DCA.
+ */
+export function shouldCrossProductPauseSoft(
+  gridSmDecision: GridSmDecision | null | undefined,
+  regime: MarketRegime | string,
+): boolean {
+  if (gridSmDecision !== "GRID_NO_TRADE") return false;
+  return (GRID_CROSS_PRODUCT_PAUSE_REGIMES as readonly string[]).includes(regime);
+}
+
 export interface DcaSmartMoneyInput {
   symbol: string;
   side: DcaSide;
@@ -223,7 +242,7 @@ export interface DcaSmartMoneyInput {
   liqMean24hUsd: number;
   priceDropAbs?: number;
   atr1h?: number;
-  /** Cross-product: gridSmartMoneyAdapter GRID_NO_TRADE (breakout/range breakdown). */
+  /** Cross-product: gridSmartMoneyAdapter GRID_NO_TRADE. Only pauses DCA in BREAKOUT/ACCUMULATION. */
   gridSmDecision?: GridSmDecision | null;
   entryCount?: number;
   maxEntries?: number;
@@ -357,12 +376,13 @@ export function evaluateDcaSmartMoney(input: DcaSmartMoneyInput): DcaSmartMoneyR
   const nextTriggerPrice = computeNextTriggerPrice(input.currentPrice, intervalPct, input.side);
   reasons.push(`Interval ${intervalPct.toFixed(2)}% -> next trigger ${nextTriggerPrice.toFixed(4)}`);
 
-  // Cross-product guard: Grid Bot NO_TRADE -> override to PAUSE_SOFT minimum.
-  if (input.gridSmDecision === "GRID_NO_TRADE") {
+  // Cross-product guard: Grid GRID_NO_TRADE only in BREAKOUT/ACCUMULATION.
+  // Missing $100k+ depth walls (typical RANGING thin-book) must not pause DCA.
+  if (shouldCrossProductPauseSoft(input.gridSmDecision, input.regime)) {
     if (pauseLevel === "NONE") {
       pauseLevel = "PAUSE_SOFT";
-      pauseReason = "Grid Bot detects range breakdown risk on same symbol";
-      reasons.push(`Cross-product: GRID_NO_TRADE -> ${pauseLevel} (${pauseReason})`);
+      pauseReason = `Grid Bot detects ${input.regime} risk on same symbol`;
+      reasons.push(`Cross-product: GRID_NO_TRADE + ${input.regime} -> ${pauseLevel} (${pauseReason})`);
     }
   }
 
@@ -415,8 +435,8 @@ export function evaluateDcaSmartMoney(input: DcaSmartMoneyInput): DcaSmartMoneyR
   if (pauseLevel === "PAUSE_SOFT") {
     pauseReason =
       pauseReason ??
-      (scenarioCScore < 25
-        ? `Distribution signal S_C ${scenarioCScore.toFixed(0)} < 25`
+      (scenarioCScore < SC_DISTRIBUTION_THRESHOLD
+        ? `Distribution signal S_C ${scenarioCScore.toFixed(0)} < ${SC_DISTRIBUTION_THRESHOLD}`
         : `Safety score ${safety.score.toFixed(0)} < 70`);
     return {
       decision: "DCA_PAUSE_SOFT",
@@ -431,7 +451,7 @@ export function evaluateDcaSmartMoney(input: DcaSmartMoneyInput): DcaSmartMoneyR
       fundingPercentile,
       oiVelocityPercentile,
       scenarioCScore,
-      reasons: [...reasons, `Pause SOFT (defer 2 ticks): ${pauseReason}`],
+      reasons: [...reasons, `Pause SOFT (defer ${PAUSE_SOFT_DEFER_TICKS} tick): ${pauseReason}`],
     };
   }
 
