@@ -8,6 +8,7 @@ import { checkEntryAlertForSymbol, runEntryAlertCheck, ENTRY_ALERT_PACING_DELAY_
 import type { SymbolPipelineResult, TriplePipelineResult } from "../tools/fullPipeline.js";
 import type { DcaHeadResult } from "../dcaPipelineEngine.js";
 import type { TraditionalFuturesResult } from "./traditionalPipelineEngine.js";
+import type { DcaSmartMoneyResult, DcaSmDecision } from "./dcaSmartMoneyAdapter.js";
 import * as pacing from "../pacing.js";
 
 vi.mock("../tools/fullPipeline.js", () => ({ runTriplePipelineForSymbol: vi.fn() }));
@@ -21,6 +22,9 @@ vi.mock("../d1Client.js", () => ({
   upsertEntryAlertState: vi.fn(),
   insertEntryAlertRunLog: vi.fn(),
   insertEntryAlertSkipLog: vi.fn().mockResolvedValue(undefined),
+  getDcaActivePlan: vi.fn().mockResolvedValue(null),
+  upsertDcaActivePlan: vi.fn().mockResolvedValue(undefined),
+  deleteDcaActivePlan: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("../kvConfig.js", () => ({ getJson: vi.fn().mockResolvedValue(null) }));
 vi.mock("../telegram.js", async (importOriginal) => {
@@ -73,6 +77,25 @@ function stubDca(symbol: string, decision: DcaHeadResult["decision"] = "DCA_NO_T
     effCapAdx1d: 44,
     rejectReason: decision === "DCA_NO_TRADE" ? "dead_market" : null,
     reasoning: [],
+  };
+}
+
+function stubDcaSm(decision: DcaSmDecision, over: Partial<DcaSmartMoneyResult> = {}): DcaSmartMoneyResult {
+  return {
+    decision,
+    timingScore: decision === "DCA_TRADE" ? 80 : decision === "DCA_WATCH" ? 65 : 40,
+    safetyScore: decision === "DCA_STOP" ? 10 : decision === "DCA_PAUSE_HARD" ? 40 : 60,
+    intervalPct: 2,
+    nextTriggerPrice: 98,
+    pauseLevel: decision === "DCA_STOP" ? "STOP" : decision === "DCA_PAUSE_HARD" ? "PAUSE_HARD" : decision === "DCA_PAUSE_SOFT" ? "PAUSE_SOFT" : "NONE",
+    pauseReason: decision === "DCA_PAUSE_SOFT" ? "Safety score 60 < 70" : decision === "DCA_PAUSE_HARD" ? "Safety score 40 < 50" : decision === "DCA_STOP" ? "Safety score 10 < 20" : null,
+    entryCount: 0,
+    maxEntries: 6,
+    fundingPercentile: 40,
+    oiVelocityPercentile: 50,
+    scenarioCScore: 40,
+    reasons: [],
+    ...over,
   };
 }
 
@@ -533,6 +556,116 @@ describe("checkEntryAlertForSymbol", () => {
       lastDecision: "NO_TRADE/DCA_NO_TRADE/TRAD_WATCH",
       lastAlertAt: null,
     });
+  });
+
+  it("does NOT alert when dcaSm is DCA_PAUSE_SOFT (noise: timing<60 / safety<70 / S_C<25 / GRID_NO_TRADE)", async () => {
+    vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue({
+      grid: noTradeResult("BTCUSDT"),
+      dca: stubDca("BTCUSDT", "DCA_WATCH"),
+      trad: stubTrad(),
+      dcaSm: stubDcaSm("DCA_PAUSE_SOFT"),
+    });
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
+
+    await checkEntryAlertForSymbol("BTCUSDT", ENV, 1_000_000);
+
+    expect(telegram.sendTelegramAlert).not.toHaveBeenCalled();
+    expect(d1Client.upsertEntryAlertState).toHaveBeenCalledWith({
+      symbol: "BTCUSDT",
+      lastDecision: "NO_TRADE/DCA_PAUSE_SOFT/TRAD_NO_TRADE",
+      lastAlertAt: null,
+    });
+  });
+
+  it("does NOT re-alert PAUSE_SOFT after the 4h cooldown (no reminder spam)", async () => {
+    vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue({
+      grid: noTradeResult("BTCUSDT"),
+      dca: stubDca("BTCUSDT", "DCA_WATCH"),
+      trad: stubTrad(),
+      dcaSm: stubDcaSm("DCA_PAUSE_SOFT"),
+    });
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue({
+      symbol: "BTCUSDT",
+      lastDecision: "NO_TRADE/DCA_PAUSE_SOFT/TRAD_NO_TRADE",
+      lastAlertAt: 1_000_000,
+    });
+
+    await checkEntryAlertForSymbol("BTCUSDT", ENV, 1_000_000 + 5 * 60 * 60 * 1000);
+
+    expect(telegram.sendTelegramAlert).not.toHaveBeenCalled();
+  });
+
+  it("does NOT put DCA PAUSE SOFT in a grid-TRADE alert (grid still fires, DCA slot stays silent)", async () => {
+    vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue({
+      grid: tradeResult("BTCUSDT"),
+      dca: stubDca("BTCUSDT", "DCA_WATCH"),
+      trad: stubTrad(),
+      dcaSm: stubDcaSm("DCA_PAUSE_SOFT"),
+    });
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
+
+    await checkEntryAlertForSymbol("BTCUSDT", ENV, 1_000_000);
+
+    expect(telegram.sendTelegramAlert).toHaveBeenCalledTimes(1);
+    const msg = vi.mocked(telegram.sendTelegramAlert).mock.calls[0][1];
+    expect(msg).toContain("GRID TRADE");
+    expect(msg).not.toContain("DCA PAUSE SOFT");
+    expect(msg).not.toContain("⏸️");
+  });
+
+  it("alerts when dcaSm leaves PAUSE_SOFT for DCA_TRADE (quality transition still fires)", async () => {
+    vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue({
+      grid: noTradeResult("ETHUSDT"),
+      dca: stubDca("ETHUSDT", "DCA_TRADE"),
+      trad: stubTrad(),
+      dcaSm: stubDcaSm("DCA_TRADE"),
+    });
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue({
+      symbol: "ETHUSDT",
+      lastDecision: "NO_TRADE/DCA_PAUSE_SOFT/TRAD_NO_TRADE",
+      lastAlertAt: null,
+    });
+
+    await checkEntryAlertForSymbol("ETHUSDT", ENV, 1_000_000);
+
+    expect(telegram.sendTelegramAlert).toHaveBeenCalledTimes(1);
+    const msg = vi.mocked(telegram.sendTelegramAlert).mock.calls[0][1];
+    expect(msg).toContain("DCA LAYAK ENTRY");
+    expect(d1Client.upsertEntryAlertState).toHaveBeenCalledWith({
+      symbol: "ETHUSDT",
+      lastDecision: "NO_TRADE/DCA_TRADE/TRAD_NO_TRADE",
+      lastAlertAt: 1_000_000,
+    });
+  });
+
+  it("still alerts on dcaSm PAUSE_HARD (actionable freeze)", async () => {
+    vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue({
+      grid: noTradeResult("SOLUSDT"),
+      dca: stubDca("SOLUSDT", "DCA_WATCH"),
+      trad: stubTrad(),
+      dcaSm: stubDcaSm("DCA_PAUSE_HARD"),
+    });
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
+
+    await checkEntryAlertForSymbol("SOLUSDT", ENV, 1_000_000);
+
+    expect(telegram.sendTelegramAlert).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(telegram.sendTelegramAlert).mock.calls[0][1]).toContain("DCA PAUSE HARD");
+  });
+
+  it("still alerts on dcaSm DCA_STOP (plan invalidated)", async () => {
+    vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue({
+      grid: noTradeResult("SOLUSDT"),
+      dca: stubDca("SOLUSDT", "DCA_WATCH"),
+      trad: stubTrad(),
+      dcaSm: stubDcaSm("DCA_STOP"),
+    });
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
+
+    await checkEntryAlertForSymbol("SOLUSDT", ENV, 1_000_000);
+
+    expect(telegram.sendTelegramAlert).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(telegram.sendTelegramAlert).mock.calls[0][1]).toContain("DCA PLAN INVALIDATED");
   });
 
   it("re-alerts on a trad-head transition (TRAD_NO_TRADE -> TRAD_TRADE) even inside a prior cooldown", async () => {
