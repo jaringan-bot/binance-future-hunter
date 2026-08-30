@@ -26,7 +26,10 @@ vi.mock("../d1Client.js", () => ({
   upsertDcaActivePlan: vi.fn().mockResolvedValue(undefined),
   deleteDcaActivePlan: vi.fn().mockResolvedValue(undefined),
 }));
-vi.mock("../kvConfig.js", () => ({ getJson: vi.fn().mockResolvedValue(null) }));
+vi.mock("../kvConfig.js", () => ({
+  getJson: vi.fn().mockResolvedValue(null),
+  putJson: vi.fn().mockResolvedValue(undefined),
+}));
 vi.mock("../telegram.js", async (importOriginal) => {
   // Real implementations, not mocked -- formatEntryAlert() / the tests below
   // assert on the actual escaping + traditional-futures block output. Only
@@ -71,7 +74,7 @@ function stubDca(symbol: string, decision: DcaHeadResult["decision"] = "DCA_NO_T
     symbol,
     decision,
     direction: decision === "DCA_NO_TRADE" ? null : "LONG",
-    confidence: decision === "DCA_TRADE" ? 78 : decision === "DCA_WATCH" ? 58 : 0,
+    confidence: decision === "DCA_TRADE" ? 78 : decision === "DCA_WATCH" ? 65 : 0,
     volTier: 2,
     effGateAdx4h: 38,
     effCapAdx1d: 44,
@@ -140,10 +143,8 @@ function tradeResult(symbol: string): SymbolPipelineResult {
 }
 
 function watchResult(symbol: string): SymbolPipelineResult {
-  // rankingScore mid-band (40-54, bukan 80 dari tradeResult) -- WATCH nyata
-  // dari decidePipelineOutcome gak pernah punya skor >=55 kecuali HIGH_RISK
-  // (lihat isAlertWorthy di entryAlertCron.ts), jadi 80 gak realistis di sini.
-  return { ...tradeResult(symbol), decision: "WATCH", rankingScore: 45 } as SymbolPipelineResult;
+  // HQ WATCH band 50-54 (WATCH_MIN_ALERT_SCORE). Skor 45 sekarang di-mute.
+  return { ...tradeResult(symbol), decision: "WATCH", rankingScore: 52 } as SymbolPipelineResult;
 }
 
 function noTradeResult(symbol: string): SymbolPipelineResult {
@@ -172,6 +173,8 @@ const ENV = { TELEGRAM_BOT_TOKEN: "abc", TELEGRAM_CHAT_ID: "999" };
 describe("checkEntryAlertForSymbol", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(kvConfig.getJson).mockReset().mockResolvedValue(null);
+    vi.mocked(kvConfig.putJson).mockReset().mockResolvedValue(undefined);
     vi.spyOn(console, "error").mockImplementation(() => {});
   });
   afterEach(() => vi.restoreAllMocks());
@@ -180,8 +183,8 @@ describe("checkEntryAlertForSymbol", () => {
     const result = {
       ...tradeResult("ONDOUSDT"),
       decision: "WATCH",
-      rankingScore: 35.78099949618541,
-      risk: { chosenLeverage: 5, initialCapitalSolved: 100, evaluatedLeverages: [], gridRisk: { status: "HIGH_RISK" } },
+      rankingScore: 52.78099949618541,
+      risk: { chosenLeverage: 5, initialCapitalSolved: 100, evaluatedLeverages: [], gridRisk: { status: "MODERATE" } },
       gridBotConfig: {
         lower: 0.35790218401913754,
         upper: 0.40649781598086243,
@@ -216,8 +219,8 @@ describe("checkEntryAlertForSymbol", () => {
 
     const message = vi.mocked(telegram.sendTelegramAlert).mock.calls[0][1];
     expect(message).toContain("🟡");
-    expect(message).toContain("Grid 35.8/100");
-    expect(message).not.toContain("35.78099949618541");
+    expect(message).toContain("Grid 52.8/100");
+    expect(message).not.toContain("52.78099949618541");
     expect(message).toContain("0.357902");
     expect(message).not.toContain("0.35790218401913754");
     // Markdown-escaped (see escapeMarkdown test below) -- underscores in
@@ -370,7 +373,7 @@ describe("checkEntryAlertForSymbol", () => {
     expect(d1Client.upsertEntryAlertState).toHaveBeenCalledWith({ symbol: "BTCUSDT", lastDecision: "TRADE/DCA_NO_TRADE/TRAD_NO_TRADE", lastAlertAt: now });
   });
 
-  it("does not alert when WATCH ranking score is below the 40 floor and grid risk is not HIGH_RISK", async () => {
+  it("does not alert when WATCH ranking score is below the 50 floor", async () => {
     vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue(dual(lowScoreWatchResult("BTCUSDT", "MODERATE")));
     vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
 
@@ -380,27 +383,26 @@ describe("checkEntryAlertForSymbol", () => {
     expect(d1Client.upsertEntryAlertState).toHaveBeenCalledWith({ symbol: "BTCUSDT", lastDecision: "WATCH/DCA_NO_TRADE/TRAD_NO_TRADE", lastAlertAt: null });
   });
 
-  it("still alerts on WATCH below the 40 floor when grid risk is HIGH_RISK", async () => {
+  it("does not alert on HIGH_RISK WATCH below the 50 floor (no risk-status bypass)", async () => {
     vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue(dual(lowScoreWatchResult("BTCUSDT", "HIGH_RISK")));
     vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
 
     await checkEntryAlertForSymbol("BTCUSDT", ENV, 1_000_000);
 
-    expect(telegram.sendTelegramAlert).toHaveBeenCalledTimes(1);
-    expect(d1Client.upsertEntryAlertState).toHaveBeenCalledWith({ symbol: "BTCUSDT", lastDecision: "WATCH/DCA_NO_TRADE/TRAD_NO_TRADE", lastAlertAt: 1_000_000 });
+    expect(telegram.sendTelegramAlert).not.toHaveBeenCalled();
   });
 
-  it("alerts on WATCH with a mid-band score (40-54) even without HIGH_RISK", async () => {
+  it("does not alert on WATCH with a mid-band score that used to fire (40-49)", async () => {
     vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue(dual(lowScoreWatchResult("BTCUSDT", "MODERATE", 45)));
     vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
 
     await checkEntryAlertForSymbol("BTCUSDT", ENV, 1_000_000);
 
-    expect(telegram.sendTelegramAlert).toHaveBeenCalledTimes(1);
+    expect(telegram.sendTelegramAlert).not.toHaveBeenCalled();
   });
 
-  it("alerts at the exact 40 floor (inclusive) without HIGH_RISK", async () => {
-    vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue(dual(lowScoreWatchResult("BTCUSDT", "MODERATE", 40)));
+  it("alerts at the exact 50 floor (inclusive) without HIGH_RISK", async () => {
+    vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue(dual(lowScoreWatchResult("BTCUSDT", "MODERATE", 50)));
     vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
 
     await checkEntryAlertForSymbol("BTCUSDT", ENV, 1_000_000);
@@ -408,13 +410,37 @@ describe("checkEntryAlertForSymbol", () => {
     expect(telegram.sendTelegramAlert).toHaveBeenCalledTimes(1);
   });
 
-  it("does not alert just below the 40 floor (39.9) without HIGH_RISK", async () => {
-    vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue(dual(lowScoreWatchResult("BTCUSDT", "MODERATE", 39.9)));
+  it("does not alert just below the 50 floor (49.9)", async () => {
+    vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue(dual(lowScoreWatchResult("BTCUSDT", "MODERATE", 49.9)));
     vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
 
     await checkEntryAlertForSymbol("BTCUSDT", ENV, 1_000_000);
 
     expect(telegram.sendTelegramAlert).not.toHaveBeenCalled();
+  });
+
+  it("does not alert legacy DCA_WATCH below the Telegram floor (confidence 64)", async () => {
+    const dca = { ...stubDca("BTCUSDT", "DCA_WATCH"), confidence: 64 };
+    vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue({
+      grid: noTradeResult("BTCUSDT"),
+      dca,
+      trad: stubTrad(),
+      dcaSm: null,
+    });
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
+
+    await checkEntryAlertForSymbol("BTCUSDT", ENV, 1_000_000);
+
+    expect(telegram.sendTelegramAlert).not.toHaveBeenCalled();
+  });
+
+  it("alerts legacy DCA_WATCH at the Telegram floor (confidence 65)", async () => {
+    vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue(dual(noTradeResult("BTCUSDT"), "DCA_WATCH"));
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
+
+    await checkEntryAlertForSymbol("BTCUSDT", ENV, 1_000_000);
+
+    expect(telegram.sendTelegramAlert).toHaveBeenCalledTimes(1);
   });
 
   it("does not alert on WATCH at/above the TRADE threshold even without HIGH_RISK (shouldn't happen from the real pipeline, defensive)", async () => {
@@ -638,7 +664,7 @@ describe("checkEntryAlertForSymbol", () => {
     });
   });
 
-  it("still alerts on dcaSm PAUSE_HARD (actionable freeze)", async () => {
+  it("does NOT alert on dcaSm PAUSE_HARD (muted as non-entry noise)", async () => {
     vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue({
       grid: noTradeResult("SOLUSDT"),
       dca: stubDca("SOLUSDT", "DCA_WATCH"),
@@ -649,11 +675,10 @@ describe("checkEntryAlertForSymbol", () => {
 
     await checkEntryAlertForSymbol("SOLUSDT", ENV, 1_000_000);
 
-    expect(telegram.sendTelegramAlert).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(telegram.sendTelegramAlert).mock.calls[0][1]).toContain("DCA PAUSE HARD");
+    expect(telegram.sendTelegramAlert).not.toHaveBeenCalled();
   });
 
-  it("still alerts on dcaSm DCA_STOP (plan invalidated)", async () => {
+  it("does NOT alert on dcaSm DCA_STOP (muted as non-entry noise)", async () => {
     vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue({
       grid: noTradeResult("SOLUSDT"),
       dca: stubDca("SOLUSDT", "DCA_WATCH"),
@@ -664,8 +689,45 @@ describe("checkEntryAlertForSymbol", () => {
 
     await checkEntryAlertForSymbol("SOLUSDT", ENV, 1_000_000);
 
+    expect(telegram.sendTelegramAlert).not.toHaveBeenCalled();
+  });
+
+  it("mutes TRADE alerts when the daily-loss circuit is tripped and sends one circuit warning", async () => {
+    vi.mocked(kvConfig.getJson).mockImplementation(async (key: string) => {
+      if (key === "state:daily_loss_circuit") {
+        return { count: 3, total_loss: 60, window_start: 1 };
+      }
+      return null;
+    });
+    vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue(dual(tradeResult("BTCUSDT")));
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
+
+    await checkEntryAlertForSymbol("BTCUSDT", ENV, 1_000_000);
+
     expect(telegram.sendTelegramAlert).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(telegram.sendTelegramAlert).mock.calls[0][1]).toContain("DCA PLAN INVALIDATED");
+    expect(vi.mocked(telegram.sendTelegramAlert).mock.calls[0][1]).toContain("Circuit Breaker");
+    expect(vi.mocked(telegram.sendTelegramAlert).mock.calls[0][1]).not.toContain("GRID TRADE");
+    expect(d1Client.upsertEntryAlertState).toHaveBeenCalledWith({
+      symbol: "BTCUSDT",
+      lastDecision: "TRADE/DCA_NO_TRADE/TRAD_NO_TRADE",
+      lastAlertAt: null,
+    });
+  });
+
+  it("still sends high-quality WATCH when the daily-loss circuit is tripped", async () => {
+    vi.mocked(kvConfig.getJson).mockImplementation(async (key: string) => {
+      if (key === "state:daily_loss_circuit") {
+        return { count: 3, total_loss: 60, window_start: 1, last_notified_at: 1_000_000 };
+      }
+      return null;
+    });
+    vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue(dual(watchResult("BTCUSDT")));
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
+
+    await checkEntryAlertForSymbol("BTCUSDT", ENV, 1_000_000);
+
+    expect(telegram.sendTelegramAlert).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(telegram.sendTelegramAlert).mock.calls[0][1]).toContain("GRID WATCH");
   });
 
   it("re-alerts on a trad-head transition (TRAD_NO_TRADE -> TRAD_TRADE) even inside a prior cooldown", async () => {
@@ -690,6 +752,8 @@ describe("checkEntryAlertForSymbol", () => {
 describe("runEntryAlertCheck", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(kvConfig.getJson).mockReset().mockResolvedValue(null);
+    vi.mocked(kvConfig.putJson).mockReset().mockResolvedValue(undefined);
     vi.spyOn(console, "error").mockImplementation(() => {});
     // Default: premiumIndex sukses tapi kosong. exchangeInfo + ticker24hr
     // di-set per-test lewat mockWatchlist().
@@ -860,21 +924,39 @@ describe("runEntryAlertCheck", () => {
     expect(skippedSymbols).toHaveLength(3);
   });
 
-  it("skips the top-N pre-filter entirely (processes the full watchlist) when premiumIndex is unavailable -- no silent partial coverage", async () => {
+  it("still cuts to top-N with ticker-only F3 when premiumIndex is unavailable (never deep-runs the full watchlist)", async () => {
     mockWatchlist(["AAAUSDT", "BBBUSDT", "CCCUSDT"]);
     vi.mocked(binanceProxy.getBulkFundingRatesNative).mockRejectedValue(new Error("proxy 500"));
-    vi.mocked(kvConfig.getJson).mockResolvedValue(1); // would be top_n=1 if pre-filter ran
+    vi.mocked(kvConfig.getJson).mockImplementation(async (key: string) => (key === "entry_alert:top_n" ? 1 : null));
     vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
     vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockImplementation(async (s: string) => dual(noTradeResult(s)));
 
     await runEntryAlertCheck(ENV);
 
-    expect(vi.mocked(fullPipeline.runTriplePipelineForSymbol).mock.calls.map((c) => c[0]).sort()).toEqual([
-      "AAAUSDT",
-      "BBBUSDT",
-      "CCCUSDT",
-    ]);
-    expect(d1Client.insertEntryAlertSkipLog).not.toHaveBeenCalled();
+    // mockWatchlist ranks AAA highest quoteVolume -- ticker-only F3 picks it.
+    expect(vi.mocked(fullPipeline.runTriplePipelineForSymbol).mock.calls.map((c) => c[0])).toEqual(["AAAUSDT"]);
+    expect(d1Client.insertEntryAlertSkipLog).toHaveBeenCalledWith({
+      runAt: expect.any(Number),
+      skippedSymbols: expect.arrayContaining(["BBBUSDT", "CCCUSDT"]),
+      topN: 1,
+    });
+  });
+
+  it("skips Phase 2 entirely when the macro risk circuit is active and writes a zero-work run log", async () => {
+    mockWatchlist(["BTCUSDT", "ETHUSDT"]);
+    vi.mocked(kvConfig.getJson).mockImplementation(async (key: string) => {
+      if (key === "state:macro_risk_circuit") return { active: true, reason: "risk-off", at: 1 };
+      return null;
+    });
+
+    await runEntryAlertCheck(ENV);
+
+    expect(fullPipeline.runTriplePipelineForSymbol).not.toHaveBeenCalled();
+    expect(telegram.sendTelegramAlert).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(telegram.sendTelegramAlert).mock.calls[0][1]).toContain("Macro Risk Switch");
+    expect(d1Client.insertEntryAlertRunLog).toHaveBeenCalledWith(
+      expect.objectContaining({ total: 0, errors: 0, tradeCount: 0 }),
+    );
   });
 
   it("defaults top-N to 40 when the KV config key is unset", async () => {

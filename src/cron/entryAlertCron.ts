@@ -33,6 +33,7 @@ import { mapWithConcurrency } from "../concurrency.js";
 import { TRADE_RANKING_SCORE_THRESHOLD } from "../pipelineEngine.js";
 import * as pacing from "../pacing.js";
 import { fmtPrice } from "../format.js";
+import * as riskCircuit from "../engine/riskCircuitBreaker.js";
 
 // KV key buat tuning N pre-filter Wave 1 TANPA redeploy code (tulis via
 // dashboard KV / `wrangler kv key put`). Unset -> DEFAULT_ENTRY_TOP_N.
@@ -92,13 +93,10 @@ const CONCURRENCY = 3;
 // - Total durasi estimasi: 400 pair / 4 worker = 100 putaran x ~4.8 detik
 //   = ~8 menit -- jauh di bawah siklus 15 menit ke tick berikutnya.
 //
-// 4000 -> 5500ms (2026-08-28): dipasangkan dengan ENTRY_WATCHLIST_SIZE
-// 350->250 (entryWatchlist.ts) + MAX_REQUESTS_PER_WINDOW 1800->1400
-// (rateLimiter.ts) setelah IP VPS relay tunggal kena Binance 418 -1003
-// weight-ban (lihat [[project_whalescope_vps_ip_ratelimit]]). 250 pair / 4
-// worker x ~6.3 detik = ~6.6 menit wall-clock (masih < 15 menit), throughput
-// entry-alert turun ke ~570 call/menit.
-export const ENTRY_ALERT_PACING_DELAY_MS = 5500;
+// 5500 -> 2000ms (2026-08-30): Phase 2 cuma TOP 40 (bukan 250 deep-run).
+// 40 / CONCURRENCY=3 ≈ 14 putaran x (I/O + 2s) tetap jauh di bawah 3 menit
+// wall. CONCURRENCY tetap 3 supaya peak burst Wave 2 gak trip Binance -1003.
+export const ENTRY_ALERT_PACING_DELAY_MS = 2000;
 
 // Mirror default zod schema whalescope_full_pipeline (src/tools/fullPipeline.ts)
 // -- alert pakai parameter risiko/leverage yang SAMA dengan yang biasa dipakai
@@ -118,45 +116,35 @@ const DEFAULT_PIPELINE_OPTS: PipelineOpts = {
 
 const ALERTABLE_DECISIONS = new Set(["TRADE", "WATCH"]);
 
-// WATCH bisa terjadi karena 2 alasan berbeda (lihat decidePipelineOutcome,
-// pipelineEngine.ts): grid risk HIGH_RISK (skor berapapun -- ini murni soal
-// risiko EKSEKUSI grid, gak ada hubungan sama rankingScore, jadi tetap
-// selalu alert independen dari band skor di bawah), ATAU rankingScore di
-// bawah TRADE_RANKING_SCORE_THRESHOLD (kualitas sinyal arah). Buat alasan
-// kedua, band 40-54 (WATCH_MIN_ALERT_SCORE s/d di bawah ambang TRADE) --
-// di bawah 40 kebanyakan noise, >=55 udah wilayah TRADE (dijamin gak
-// pernah kejadian dari decidePipelineOutcome asli, guard ini cuma jaga-jaga).
-// User request 2026-08-26: revert dari versi sebelumnya yang mensyaratkan
-// skor >=55 buat WATCH (itu sendiri revert dari versi PALING awal yang
-// alert SEMUA WATCH tanpa filter skor sama sekali -- itu yang bikin skor
-// di bawah 40 kebanjiran notif ke HP).
-export const WATCH_MIN_ALERT_SCORE = 40;
+// High-quality WATCH only: rankingScore 50-54. TRADE sudah dijamin
+// score >= 55 AND SAFE/MODERATE di decidePipelineOutcome. HIGH_RISK
+// tidak lagi bypass -- WATCH lemah (termasuk HIGH_RISK skor < 50) di-mute.
+export const WATCH_MIN_ALERT_SCORE = 50;
+// Dispatch floor terpisah dari engine DCA_WATCH_MIN_ALERT_SCORE (50) --
+// engine tetap boleh WATCH dari 50, Telegram cuma kirim >= 65.
+export const DCA_WATCH_TELEGRAM_MIN_SCORE = 65;
 
 function isGridAlertWorthy(result: SymbolPipelineResult): boolean {
   if (!ALERTABLE_DECISIONS.has(result.decision)) return false;
   if (result.decision === "TRADE") return true;
-  if (result.risk?.gridRisk?.status === "HIGH_RISK") return true;
   return result.rankingScore >= WATCH_MIN_ALERT_SCORE && result.rankingScore < TRADE_RANKING_SCORE_THRESHOLD;
 }
 
-// DCA_WATCH dari dcaPipelineEngine SUDAH berarti confidence >= 50
-// (DCA_WATCH_MIN_ALERT_SCORE); DCA_NO_TRADE = di bawah itu / reject.
-// Phase 3 dcaSm: TRADE / WATCH / PAUSE_HARD / STOP tetap alertable.
-// DCA_PAUSE_SOFT SENGAJA tidak alert -- adapter memetakan timing < 60,
-// safety < 70, S_C < 25, DAN GRID_NO_TRADE ke PAUSE_SOFT, jadi hampir
-// setiap pair di watchlist kebanjiran notif Telegram (sama pola dengan
-// TRAD_WATCH dan WATCH skor < 40). State tetap dipersist; transisi ke
-// TRADE/WATCH/HARD/STOP tetap fire lewat composite dcaSm.
+function dcaWatchScore(dca: DcaHeadResult, dcaSm?: DcaSmartMoneyResult | null): number {
+  return dcaSm ? dcaSm.timingScore : dca.confidence;
+}
+
+// DCA_TRADE selalu alert. DCA_WATCH hanya kalau skor Telegram >= 65.
+// PAUSE_HARD / STOP / PAUSE_SOFT di-mute (bukan actionable entry).
 function isDcaAlertWorthy(dca: DcaHeadResult, dcaSm?: DcaSmartMoneyResult | null): boolean {
   if (dcaSm) {
-    return (
-      dcaSm.decision === "DCA_TRADE" ||
-      dcaSm.decision === "DCA_WATCH" ||
-      dcaSm.decision === "DCA_PAUSE_HARD" ||
-      dcaSm.decision === "DCA_STOP"
-    );
+    if (dcaSm.decision === "DCA_TRADE") return true;
+    if (dcaSm.decision === "DCA_WATCH") return dcaWatchScore(dca, dcaSm) >= DCA_WATCH_TELEGRAM_MIN_SCORE;
+    return false;
   }
-  return dca.decision !== "DCA_NO_TRADE";
+  if (dca.decision === "DCA_TRADE") return true;
+  if (dca.decision === "DCA_WATCH") return dca.confidence >= DCA_WATCH_TELEGRAM_MIN_SCORE;
+  return false;
 }
 
 // Traditional Futures: HANYA TRAD_TRADE yang alert (bracket lolos quality
@@ -165,6 +153,30 @@ function isDcaAlertWorthy(dca: DcaHeadResult, dcaSm?: DcaSmartMoneyResult | null
 // yang dilakukan buat WATCH grid/DCA).
 function isTradAlertWorthy(trad: TraditionalFuturesResult): boolean {
   return trad.decision === "TRAD_TRADE";
+}
+
+function dcaHeadDecision(r: TriplePipelineResult): string {
+  return r.dcaSm?.decision ?? r.dca.decision;
+}
+
+function countTradeHeads(r: TriplePipelineResult): number {
+  let n = 0;
+  if (r.grid.decision === "TRADE" && isGridAlertWorthy(r.grid)) n += 1;
+  if (dcaHeadDecision(r) === "DCA_TRADE" && isDcaAlertWorthy(r.dca, r.dcaSm)) n += 1;
+  if (isTradAlertWorthy(r.trad)) n += 1;
+  return n;
+}
+
+function classifyAlertHeads(r: TriplePipelineResult, muteTrade: boolean): {
+  gridOn: boolean;
+  dcaOn: boolean;
+  tradOn: boolean;
+  alertable: boolean;
+} {
+  const gridOn = isGridAlertWorthy(r.grid) && !(muteTrade && r.grid.decision === "TRADE");
+  const dcaOn = isDcaAlertWorthy(r.dca, r.dcaSm) && !(muteTrade && dcaHeadDecision(r) === "DCA_TRADE");
+  const tradOn = isTradAlertWorthy(r.trad) && !muteTrade;
+  return { gridOn, dcaOn, tradOn, alertable: gridOn || dcaOn || tradOn };
 }
 
 // Penanda Telegram: 🟢/🟡 grid (tak berubah), 🔵/🟠 DCA.
@@ -182,11 +194,9 @@ const DCA_LABEL: Record<string, string> = {
   DCA_STOP: "DCA PLAN INVALIDATED",
 };
 
-function formatEntryAlert(r: TriplePipelineResult): string {
+function formatEntryAlert(r: TriplePipelineResult, muteTrade = false): string {
   const { grid, dca, trad, dcaSm } = r;
-  const gridOn = isGridAlertWorthy(grid);
-  const dcaOn = isDcaAlertWorthy(dca, dcaSm);
-  const tradOn = isTradAlertWorthy(trad);
+  const { gridOn, dcaOn, tradOn } = classifyAlertHeads(r, muteTrade);
   const sm = grid.tier1?.smartMoney;
   const dcaDir = dca.direction ? ` (${dca.direction})` : "";
   const dcaHeadDecision = dcaSm?.decision ?? dca.decision;
@@ -288,11 +298,16 @@ export async function checkEntryAlertForSymbol(
   // Dedup: composite "grid/dca/trad" string. Transisi = string berubah (head
   // mana pun flip -> alert gabungan yang nunjukin state ketiga head). Cooldown
   // 4 jam pakai satu timestamp. Slot tengah pakai dcaSm.decision kalau ada
-  // supaya PAUSE_SOFT (yang tidak alert) -> TRADE/WATCH/HARD/STOP tetap
-  // ketahuan sebagai transisi, bukan tertelan cooldown slot legacy.
-  const dcaSlot = r.dcaSm?.decision ?? r.dca.decision;
+  // supaya PAUSE_SOFT (yang tidak alert) -> TRADE/WATCH tetap ketahuan
+  // sebagai transisi, bukan tertelan cooldown slot legacy.
+  const dcaSlot = dcaHeadDecision(r);
   const composite = `${r.grid.decision}/${dcaSlot}/${r.trad.decision}`;
-  const alertable = isGridAlertWorthy(r.grid) || isDcaAlertWorthy(r.dca, r.dcaSm) || isTradAlertWorthy(r.trad);
+  const muteTrade = await riskCircuit.isDailyLossCircuitOpen();
+  const tradeHeads = countTradeHeads(r);
+  if (muteTrade && tradeHeads > 0) {
+    await maybeNotifyDailyCircuit(env, now);
+  }
+  const { alertable } = classifyAlertHeads(r, muteTrade);
   const isTransition = alertable && previous?.lastDecision !== composite;
   const cooldownExpired =
     alertable && previous?.lastAlertAt != null && now - previous.lastAlertAt > COOLDOWN_MS;
@@ -305,8 +320,11 @@ export async function checkEntryAlertForSymbol(
   };
 
   if (alertable && (isTransition || cooldownExpired)) {
-    await sendTelegramAlert(env, formatEntryAlert(r));
+    await sendTelegramAlert(env, formatEntryAlert(r, muteTrade));
     await d1Client.upsertEntryAlertState({ symbol, lastDecision: composite, lastAlertAt: now });
+    if (!muteTrade && tradeHeads > 0) {
+      await riskCircuit.recordTradeAlert(DEFAULT_PIPELINE_OPTS.riskUsd, tradeHeads, now);
+    }
     await persistDcaActivePlan(symbol, r);
     return outcome;
   }
@@ -350,6 +368,28 @@ async function persistDcaActivePlan(symbol: string, r: TriplePipelineResult): Pr
 interface WatchlistBundle {
   watchlist: string[];
   prefetched: PrefetchedTickerFunding | undefined;
+  tickerBySymbol: Map<string, binanceProxy.Ticker24hr>;
+}
+
+async function maybeNotifyDailyCircuit(env: TelegramEnv, now: number): Promise<void> {
+  const state = await riskCircuit.getDailyLossCircuit();
+  if (!riskCircuit.shouldNotifyDailyLoss(state, now)) return;
+  await sendTelegramAlert(
+    env,
+    `🚨 *Circuit Breaker*: daily loss limit tercapai (count ${state?.count ?? 0} / ${riskCircuit.DAILY_LOSS_COUNT_LIMIT} atau total_loss $${state?.total_loss ?? 0} / $${riskCircuit.DAILY_LOSS_USD_LIMIT}). TRADE alert di-mute sampai window 24 jam roll-off atau \`whalescope_risk_circuit\` reset_daily. High-quality WATCH tetap boleh.`,
+  );
+  await riskCircuit.markDailyLossNotified(now);
+}
+
+async function maybeNotifyMacroPause(env: TelegramEnv, now: number): Promise<void> {
+  const state = await riskCircuit.getMacroRiskCircuit();
+  if (!riskCircuit.shouldNotifyMacro(state, now)) return;
+  const reason = state?.reason ? ` Alasan: ${state.reason}.` : "";
+  await sendTelegramAlert(
+    env,
+    `⏸️ *Macro Risk Switch*: entry-alert Phase 2 di-pause.${reason} Nyalakan lagi lewat \`whalescope_risk_circuit\` action=set_macro active=false.`,
+  );
+  await riskCircuit.markMacroNotified(now);
 }
 
 // Resolve watchlist + prefetch Map ticker24hr/premiumIndex dalam SATU set
@@ -372,11 +412,12 @@ async function resolveWatchlistAndPrefetch(): Promise<WatchlistBundle> {
   ]);
   const watchlist = selectUsdtPerpetualWatchlist(exchangeInfo.symbols, tickerList);
 
+  const tickerBySymbol = new Map(tickerList.map((t) => [t.symbol, t]));
   let prefetched: PrefetchedTickerFunding | undefined;
   try {
     const fundingList = await binanceProxy.getBulkFundingRatesNative();
     prefetched = {
-      ticker: new Map(tickerList.map((t) => [t.symbol, t])),
+      ticker: tickerBySymbol,
       funding: new Map(fundingList.map((f) => [f.symbol, f])),
     };
   } catch (err) {
@@ -386,30 +427,30 @@ async function resolveWatchlistAndPrefetch(): Promise<WatchlistBundle> {
     );
     prefetched = undefined;
   }
-  return { watchlist, prefetched };
+  return { watchlist, prefetched, tickerBySymbol };
 }
 
-// Pre-filter Wave 1 (STEP 2a): dari watchlist penuh ambil TOP-N pair
-// (entryRanking.ts), SISANYA di-skip total. Butuh `prefetched` (funding +
-// ticker) buat sinyal ranking -- kalau premiumIndex gagal tadi (prefetched
-// undefined), pre-filter DIMATIKAN tick ini: proses watchlist penuh, JANGAN
-// diam-diam skip pair berdasarkan data yang tidak lengkap.
-async function applyEntryPrefilter(
+// Phase 1 — F3 cheap grid score over the 250-volume universe, then TOP-N
+// (default 40). Fail-closed: kalau premiumIndex gagal, ranking tetap jalan
+// ticker-only (fundingAbs=0 → funding factor netral). JANGAN deep-run 250.
+async function runPhase1Prefilter(
   watchlist: string[],
-  prefetched: PrefetchedTickerFunding | undefined,
+  tickerBySymbol: Map<string, binanceProxy.Ticker24hr>,
+  fundingBySymbol: Map<string, binanceProxy.PremiumIndexPoint> | undefined,
   now: number,
 ): Promise<string[]> {
-  if (!prefetched) {
-    console.error("[entry-alert] premiumIndex tidak tersedia -- pre-filter Wave 1 dimatikan tick ini, proses watchlist penuh");
-    return watchlist;
-  }
-
   const topN = await resolveEntryTopN();
   if (topN >= watchlist.length) return watchlist;
 
+  if (!fundingBySymbol) {
+    console.error(
+      "[entry-alert] premiumIndex tidak tersedia -- Phase 1 tetap cut top-N pakai ticker-only F3 (fundingAbs=0)",
+    );
+  }
+
   const candidates: EntryRankingInput[] = watchlist.map((symbol) => {
-    const funding = prefetched.funding.get(symbol);
-    const ticker = prefetched.ticker.get(symbol);
+    const funding = fundingBySymbol?.get(symbol);
+    const ticker = tickerBySymbol.get(symbol);
     const fundingAbs = funding ? Math.abs(parseFloat(funding.lastFundingRate)) : 0;
     const priceChangePct24h = ticker ? parseFloat(ticker.priceChangePercent) : 0;
     const quoteVolumeUsd = ticker ? parseFloat(ticker.quoteVolume) : 0;
@@ -425,23 +466,37 @@ async function applyEntryPrefilter(
   const selectedSet = new Set(selected);
   const skipped = watchlist.filter((s) => !selectedSet.has(s));
 
-  // Audit trail (entry_alert_skip_log, D1) -- daftar SYMBOL yang di-skip,
-  // dicek belakangan apakah ada setup bagus yang kelewat. Best-effort:
-  // kegagalan D1 di sini TIDAK boleh menggagalkan tick (skip-list juga
-  // ada di log baris di bawah buat `wrangler tail`).
   await d1Client
     .insertEntryAlertSkipLog({ runAt: now, skippedSymbols: skipped, topN })
     .catch((err) => console.error("[entry-prefilter] gagal insert entry_alert_skip_log:", (err as Error)?.message ?? String(err)));
-  console.log(`[entry-prefilter] top_n=${topN} analysed=${selected.length} skipped=${skipped.length} skipped_symbols=${skipped.join(",")}`);
+  console.log(`[entry-prefilter] phase1 top_n=${topN} analysed=${selected.length} skipped=${skipped.length} skipped_symbols=${skipped.join(",")}`);
 
   return selected;
 }
 
 export async function runEntryAlertCheck(env: TelegramEnv): Promise<void> {
   const now = Date.now();
-  const { watchlist, prefetched } = await resolveWatchlistAndPrefetch();
-  const analysed = await applyEntryPrefilter(watchlist, prefetched, now);
+  if (await riskCircuit.isMacroRiskActive()) {
+    await maybeNotifyMacroPause(env, now);
+    await d1Client.insertEntryAlertRunLog({
+      runAt: now,
+      total: 0,
+      errors: 0,
+      watchCount: 0,
+      tradeCount: 0,
+      dcaWatchCount: 0,
+      dcaTradeCount: 0,
+      tradWatchCount: 0,
+      tradTradeCount: 0,
+    });
+    console.log("[entry-alert] macro risk circuit active -- skip Phase 2");
+    return;
+  }
+
+  const { watchlist, prefetched, tickerBySymbol } = await resolveWatchlistAndPrefetch();
+  const analysed = await runPhase1Prefilter(watchlist, tickerBySymbol, prefetched?.funding, now);
   const dcaOpts: DcaOpts = { modalAvailableUsd: await resolveDcaModalUsd() };
+  // Phase 2 — triple pipeline (Grid + DCA + Trad) HANYA pada top-N Phase 1.
   const outcomes = await mapWithConcurrency(analysed, CONCURRENCY, async (symbol): Promise<AlertCheckOutcome> => {
     try {
       return await checkEntryAlertForSymbol(symbol, env, now, prefetched, dcaOpts);

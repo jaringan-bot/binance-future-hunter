@@ -3,7 +3,7 @@
 // watches the entry-alert Telegram pipeline:
 //  - checkStreamGatewayHealth: VPS stream gateway WS to Binance down / stale
 //  - checkMarketSnapshotFreshness: the */5 basis+MM snapshot cron stopped
-//  - checkD1Capacity: the two unpruned D1 tables crossed a row-count ceiling
+//  - checkD1Capacity: market_snapshots + signal_history crossed a row-count ceiling
 // Each alerts at most once per cooldown window (KV-gated), same pattern as
 // checkEntryAlertCronFreshness.
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";

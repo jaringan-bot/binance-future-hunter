@@ -1,5 +1,5 @@
 // Test the infra-health read paths in d1Client.ts (latest market_snapshots
-// timestamp + row counts on the two unpruned tables). Same hand-rolled fake
+// timestamp + row counts on market_snapshots / signal_history). Same hand-rolled fake
 // D1Database approach as d1Client.entryAlertRunLog.test.ts -- dispatch by
 // matching the start of the SQL string.
 import { describe, it, expect, beforeEach, afterEach } from "vitest";

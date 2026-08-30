@@ -111,6 +111,12 @@ const CATALOG_METADATA: Record<string, CatalogMetadata> = {
   binance_get_rpi_depth: { category: "orderbook", tokenCost: "medium", useCase: "Order book termasuk RPI orders (beda dari depth biasa)", dependencies: [] },
   binance_get_trading_schedule: { category: "config", tokenCost: "low", useCase: "Jadwal sesi trading TradFi underlying assets", dependencies: [] },
   binance_get_all_force_orders: { category: "risk", tokenCost: "medium", useCase: "Histori force orders / liquidations market-wide", dependencies: [] },
+  whalescope_risk_circuit: {
+    category: "risk",
+    tokenCost: "low",
+    useCase: "Baca/set circuit breaker KV (daily-loss + macro pause) untuk entry-alert cron",
+    dependencies: [],
+  },
 };
 
 function truncateUseCase(description: string | undefined): string {

@@ -133,12 +133,9 @@ export async function querySignalHistory(
 // ini berhenti nambah baris tapi checkHeartbeat() (yang cuma pantau entry-alert)
 // gak akan tahu.
 //
-// count*Rows(): market_snapshots + signal_history adalah DUA tabel yang gak
-// punya pruning (beda dari request_log/wall_tracking/hyperliquid_whale_snapshots
-// yang di-prune tiap cron) -- row-nya nambah terus. D1 free tier 5GB storage
-// masih longgar untuk waktu lama tapi bukan tak terbatas; checkD1Capacity()
-// alert kalau gabungan dua tabel lewat ambang, jadi ada waktu buat nambah
-// pruning sebelum kena limit.
+// count*Rows(): market_snapshots + signal_history di-prune 90 hari (lihat
+// pruneOldMarketSnapshots / pruneOldSignalHistory). checkD1Capacity() tetap
+// backstop kalau gabungan dua tabel lewat ambang (prune gagal / backlog).
 export async function getLatestMarketSnapshotTimestamp(): Promise<number | null> {
   const row = await requireDb()
     .prepare("SELECT MAX(timestamp) as latest FROM market_snapshots")
@@ -231,6 +228,15 @@ export async function queryRequestLogSummary(hours: number): Promise<RequestLogS
 // signal_history yang row-nya kekontrol ketat, watchlist 10 pair tetap).
 export async function pruneOldRequestLogs(cutoffMs: number): Promise<void> {
   await requireDb().prepare("DELETE FROM request_log WHERE timestamp < ?").bind(cutoffMs).run();
+}
+
+// unix-ms INTEGER, sama seperti writer Date.now() -- JANGAN pakai datetime().
+export async function pruneOldMarketSnapshots(cutoffMs: number): Promise<void> {
+  await requireDb().prepare("DELETE FROM market_snapshots WHERE timestamp < ?").bind(cutoffMs).run();
+}
+
+export async function pruneOldSignalHistory(cutoffMs: number): Promise<void> {
+  await requireDb().prepare("DELETE FROM signal_history WHERE timestamp < ?").bind(cutoffMs).run();
 }
 
 // wall_tracking -- wall kandidat (qty >= 2x median level lain di sisi yang

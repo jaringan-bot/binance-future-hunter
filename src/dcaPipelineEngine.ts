@@ -29,7 +29,7 @@ export const DCA_DEAD_MARKET_ADX4H = 12; // flat, TIDAK di-scale per tier
 export const DCA_FUNDING_NEUTRAL_ABS = 0.0001; // "|rate| <= 0.01%"
 export const DCA_FUNDING_HARD_DROP = 0.0003; // "|rate| > 0.03%" -> reject
 export const DCA_LIQ_GATE_USD = 8_000_000;
-export const DCA_WATCH_MIN_ALERT_SCORE = 50; // analog grid WATCH_MIN_ALERT_SCORE=40, lebih ketat (multi-order)
+export const DCA_WATCH_MIN_ALERT_SCORE = 50; // analog grid WATCH_MIN_ALERT_SCORE=50; Telegram dispatch floor terpisah (65)
 export const DCA_MODAL_DEFAULT_USD = 200; // config default -- alert tidak punya saldo akun riil
 
 export type DcaDecision = "DCA_TRADE" | "DCA_WATCH" | "DCA_NO_TRADE";

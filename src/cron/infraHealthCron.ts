@@ -11,9 +11,8 @@
 //  2. checkMarketSnapshotFreshness -- the */5 basis+MM snapshot cron stopped
 //     writing rows (every symbol failing, or the tick Cancel'd platform-side).
 //     checkHeartbeat() only sees the entry-alert path, not this one.
-//  3. checkD1Capacity -- market_snapshots + signal_history are the only two D1
-//     tables with NO pruning; alert before the free-tier storage ceiling so
-//     there is time to add retention.
+//  3. checkD1Capacity -- market_snapshots + signal_history are pruned at 90
+//     days; alert if combined rows still cross the ceiling (prune lag / backlog).
 //
 // Each alert is KV-gated to at most one message per cooldown window, same
 // pattern as checkEntryAlertCronFreshness. now is injectable for tests.
@@ -103,12 +102,11 @@ export async function checkMarketSnapshotFreshness(env: TelegramEnv, now: number
 }
 
 // ─────────────────────────────────────────────────────────────
-// 3. D1 capacity (two unpruned tables)
+// 3. D1 capacity (90-day pruned tables -- backstop if prune lags)
 // ─────────────────────────────────────────────────────────────
 
-// market_snapshots (~50 pair x 288 tick/hari) + signal_history (~50 x 6 x 288)
-// = ~100k baris/hari gabungan. 5 juta baris ~= 50 hari runway dari alert ke
-// "harus tambah pruning" -- cukup longgar, jauh sebelum D1 free-tier 5GB.
+// market_snapshots + signal_history di-prune 90 hari di cron */5.
+// Ambang 5 juta baris tetap sebagai backstop kalau prune gagal / backlog.
 export const D1_ROW_COUNT_ALERT_THRESHOLD = 5_000_000;
 export const D1_CAPACITY_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const D1_CAPACITY_KV_KEY = "infra_d1_capacity_last_notified_at";
@@ -129,7 +127,7 @@ export async function checkD1Capacity(env: TelegramEnv, now: number = Date.now()
       "en-US",
     )}) = ${total.toLocaleString("en-US")} baris, lewat ambang ${D1_ROW_COUNT_ALERT_THRESHOLD.toLocaleString(
       "en-US",
-    )}. Dua tabel ini tidak punya pruning -- pertimbangkan tambah retention/DELETE baris lama sebelum kena limit D1 free tier.`,
+    )}. Dua tabel ini sudah di-prune 90 hari -- cek apakah prune */5 gagal atau backlog sebelum kena limit D1.`,
   );
   await recordNotified(D1_CAPACITY_KV_KEY, now, D1_CAPACITY_KV_TTL_SECONDS);
 }

@@ -68,7 +68,8 @@ const ENTRY_ALERT_CRON = "7-59/15 * * * *";
 // 00.00/08.00/16.00 UTC = 07.00/15.00/23.00 WIB (UTC+7) -- heartbeat
 // entry-alert (heartbeatCron.ts), user request 2026-08-25.
 const HEARTBEAT_CRON = "0 0,8,16 * * *";
-const ENTRY_ALERT_RUN_LOG_RETENTION_MS = 24 * 3600 * 1000; // 24 jam -- heartbeat cuma lookback 8 jam, buffer 3x cukup.
+const ENTRY_ALERT_RUN_LOG_RETENTION_MS = 2 * 24 * 3600 * 1000; // 2 hari -- heartbeat lookback 8 jam tetap muat.
+const MARKET_SIGNAL_RETENTION_MS = 90 * 24 * 3600 * 1000; // 90 hari -- market_snapshots + signal_history.
 // entry_alert_skip_log: window audit MANUAL multi-hari ("apakah pair yang
 // di-skip pre-filter pernah jadi setup bagus"), jadi retensi jauh lebih
 // panjang dari run_log. 7 hari.
@@ -267,7 +268,7 @@ export default {
   //   kirim 1 pesan Telegram yang bedain "market sepi" dari "backend
   //   bermasalah" (heartbeatCron.ts, tally dari entry_alert_run_log). JUGA
   //   checkD1Capacity() (infraHealthCron.ts) -- alert kalau market_snapshots
-  //   + signal_history (dua tabel tanpa pruning) lewat ambang baris.
+  //   + signal_history lewat ambang baris (backstop di atas prune 90 hari).
   // - selain itu (*/5, tiap 5 menit, DEFAULT/fallback): dua hal per symbol
   //   di SNAPSHOT_WATCHLIST -- (1) market snapshot (basis futures-vs-spot +
   //   funding + OI, dibaca binance_get_basis_history), (2) 6 skor sinyal MM
@@ -315,7 +316,7 @@ export default {
         runEntryAlertCheck({ TELEGRAM_BOT_TOKEN: env.TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID: env.TELEGRAM_CHAT_ID }),
       );
       // Prune entry_alert_run_log di sini (bukan cron ke-6 sendiri) -- retensi
-      // 24 jam gak butuh presisi tiap tick, sama alasan seperti prune lain.
+      // 2 hari gak butuh presisi tiap tick, sama alasan seperti prune lain.
       ctx.waitUntil(
         d1Client
           .pruneOldEntryAlertRunLog(Date.now() - ENTRY_ALERT_RUN_LOG_RETENTION_MS)
@@ -434,13 +435,22 @@ export default {
       ),
     );
 
-    // Prune request_log >30 hari -- tabel ini (beda dari market_snapshots/
-    // signal_history) bisa growth gak terduga kalau ada traffic asing,
-    // gak dibatasi watchlist tetap kayak 2 tabel lain.
+    // Prune request_log >30 hari -- tabel ini bisa growth gak terduga kalau
+    // ada traffic asing, gak dibatasi watchlist tetap kayak 2 tabel time-series.
     ctx.waitUntil(
       d1Client
         .pruneOldRequestLogs(Date.now() - REQUEST_LOG_RETENTION_MS)
         .catch((err) => console.error("[cron] gagal prune request_log:", (err as Error)?.message ?? String(err))),
+    );
+    ctx.waitUntil(
+      d1Client
+        .pruneOldMarketSnapshots(Date.now() - MARKET_SIGNAL_RETENTION_MS)
+        .catch((err) => console.error("[cron] gagal prune market_snapshots:", (err as Error)?.message ?? String(err))),
+    );
+    ctx.waitUntil(
+      d1Client
+        .pruneOldSignalHistory(Date.now() - MARKET_SIGNAL_RETENTION_MS)
+        .catch((err) => console.error("[cron] gagal prune signal_history:", (err as Error)?.message ?? String(err))),
     );
 
     // Prune wall_tracking >48 jam -- dilakukan di tick 5-menit ini (bukan
