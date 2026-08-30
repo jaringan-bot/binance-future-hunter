@@ -638,7 +638,7 @@ describe("checkEntryAlertForSymbol", () => {
     });
   });
 
-  it("still alerts on dcaSm PAUSE_HARD (actionable freeze)", async () => {
+  it("does NOT alert when dcaSm is DCA_PAUSE_HARD (safety freeze / long-squeeze / max entries)", async () => {
     vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue({
       grid: noTradeResult("SOLUSDT"),
       dca: stubDca("SOLUSDT", "DCA_WATCH"),
@@ -649,8 +649,67 @@ describe("checkEntryAlertForSymbol", () => {
 
     await checkEntryAlertForSymbol("SOLUSDT", ENV, 1_000_000);
 
+    expect(telegram.sendTelegramAlert).not.toHaveBeenCalled();
+    expect(d1Client.upsertEntryAlertState).toHaveBeenCalledWith({
+      symbol: "SOLUSDT",
+      lastDecision: "NO_TRADE/DCA_PAUSE_HARD/TRAD_NO_TRADE",
+      lastAlertAt: null,
+    });
+  });
+
+  it("does NOT re-alert PAUSE_HARD after the 4h cooldown (no reminder spam)", async () => {
+    vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue({
+      grid: noTradeResult("SOLUSDT"),
+      dca: stubDca("SOLUSDT", "DCA_WATCH"),
+      trad: stubTrad(),
+      dcaSm: stubDcaSm("DCA_PAUSE_HARD"),
+    });
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue({
+      symbol: "SOLUSDT",
+      lastDecision: "NO_TRADE/DCA_PAUSE_HARD/TRAD_NO_TRADE",
+      lastAlertAt: 1_000_000,
+    });
+
+    await checkEntryAlertForSymbol("SOLUSDT", ENV, 1_000_000 + 5 * 60 * 60 * 1000);
+
+    expect(telegram.sendTelegramAlert).not.toHaveBeenCalled();
+  });
+
+  it("does NOT put DCA PAUSE HARD in a grid-TRADE alert (grid still fires, DCA slot stays silent)", async () => {
+    vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue({
+      grid: tradeResult("SOLUSDT"),
+      dca: stubDca("SOLUSDT", "DCA_WATCH"),
+      trad: stubTrad(),
+      dcaSm: stubDcaSm("DCA_PAUSE_HARD"),
+    });
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
+
+    await checkEntryAlertForSymbol("SOLUSDT", ENV, 1_000_000);
+
     expect(telegram.sendTelegramAlert).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(telegram.sendTelegramAlert).mock.calls[0][1]).toContain("DCA PAUSE HARD");
+    const msg = vi.mocked(telegram.sendTelegramAlert).mock.calls[0][1];
+    expect(msg).toContain("GRID TRADE");
+    expect(msg).not.toContain("DCA PAUSE HARD");
+    expect(msg).not.toContain("🧊");
+  });
+
+  it("alerts when dcaSm leaves PAUSE_HARD for DCA_TRADE (quality transition still fires)", async () => {
+    vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue({
+      grid: noTradeResult("ETHUSDT"),
+      dca: stubDca("ETHUSDT", "DCA_TRADE"),
+      trad: stubTrad(),
+      dcaSm: stubDcaSm("DCA_TRADE"),
+    });
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue({
+      symbol: "ETHUSDT",
+      lastDecision: "NO_TRADE/DCA_PAUSE_HARD/TRAD_NO_TRADE",
+      lastAlertAt: null,
+    });
+
+    await checkEntryAlertForSymbol("ETHUSDT", ENV, 1_000_000);
+
+    expect(telegram.sendTelegramAlert).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(telegram.sendTelegramAlert).mock.calls[0][1]).toContain("DCA LAYAK ENTRY");
   });
 
   it("still alerts on dcaSm DCA_STOP (plan invalidated)", async () => {
