@@ -342,5 +342,33 @@ when `persist=true`.
 - **No second heavy cron.** Persist rides the entry-alert tick that
   already paid for `full_pipeline`.
 
+### Test protocol (agreed 2026-08-31)
+
+The initial formula is **frozen** for the test. It is the installed
+hypothesis, not a claim that it is already correct.
+
+| Parameter | Installed value |
+|---|---|
+| Ranking weights (MM / smart money / regime / buy pressure) | 35 / 30 / 20 / 15 |
+| TRADE threshold | 55 |
+| Minimum 24h quote volume | $5,000,000 |
+| Max \|funding\| | 0.05% (`0.0005`) |
+
+Rules:
+
+1. **Do not change** the weights, the 55 threshold, or the hard-screen
+   values above until the protocol below is met. A zero-TRADE risk-off day
+   is neither proof the formula is broken nor proof it is right.
+2. **24-hour peek** (reading the log / `whalescope_backtest_pipeline_decisions`)
+   is allowed — read-only, no number changes.
+3. **Serious review at 14 days** — first window to decide whether the gate
+   is too tight. 30/90 days are D1 retention, not a reason to delay reading.
+4. **Do not retune** until there are **≥20 TRADE** rows with both **4h and
+   24h** forward returns complete, across **≥3 distinct 4h regimes**.
+5. If **TRADE is still 0 after 14 days**, that **is the test result** (55 is
+   too tight for the observed market) — only then discuss loosening. Not a
+   rewrite on day one.
+
 *Created: 2026-08-22, alongside the `whalescope_full_pipeline` release.*
 *Updated 2026-08-31: pipeline_decision_log + on-demand backtest (§12).*
+*Updated 2026-08-31: freeze formula-test protocol (weights/55) until sample is enough.*
