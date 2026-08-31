@@ -446,7 +446,35 @@ kalau `persist=true`.
 - **Tidak ada cron berat kedua.** Persist menumpang tick entry-alert yang
   sudah bayar `full_pipeline`.
 
+### Protokol uji (disepakati 2026-08-31)
+
+Formula awal **dibekukan** selama uji. Hipotesis terpasang, bukan klaim sudah
+benar.
+
+| Parameter | Nilai terpasang |
+|---|---|
+| Bobot ranking (MM / smart money / regime / buy pressure) | 35 / 30 / 20 / 15 |
+| Ambang TRADE | 55 |
+| Volume quote 24h minimum | $5,000,000 |
+| \|funding\| maksimum | 0.05% (`0.0005`) |
+
+Aturan:
+
+1. **Jangan geser** bobot, threshold 55, atau hard screen di atas sampai
+   protokol di bawah terpenuhi. 0 TRADE di satu hari risk-off bukan bukti
+   rumus rusak, juga bukan bukti rumus benar.
+2. **Peek 24 jam** (boleh baca log / `whalescope_backtest_pipeline_decisions`)
+   — read-only, tidak mengubah angka.
+3. **Review serius 14 hari** — jendela pertama untuk memutus apakah gerbang
+   terlalu ketat. 30/90 hari adalah retensi D1, bukan alasan menunda baca.
+4. **Jangan retune** sampai ada **≥20 TRADE** dengan forward return **4h dan
+   24h sudah selesai**, lintas **≥3 rezim 4h yang berbeda**.
+5. Kalau **14 hari TRADE tetap 0**, itu **hasil tes** (55 terlalu ketat untuk
+   pasar yang teramati) — baru boleh dibahas longgarkan. Bukan rewrite di
+   hari pertama.
+
 *Dibuat: 2026-08-22, bareng rilis `whalescope_full_pipeline`.*
 *Update 2026-08-22: tambah non-gate Matches Needed + Estimated Time to Breakeven.*
 *Update 2026-08-29: head DCA + shared 2-wave fetch + F1→F3 ranking (§13-15).*
 *Update 2026-08-31: pipeline_decision_log + backtest on-demand (§16).*
+*Update 2026-08-31: protokol uji formula dibekukan (bobot/55) sampai sample cukup.*

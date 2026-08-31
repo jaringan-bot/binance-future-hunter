@@ -344,7 +344,11 @@ Detail penuh (termasuk raw data test per klaim): Section 10,
   keputusan per-symbol Phase 2 entry-alert (dan `persist=true`) disimpan
   compact 90 hari. Forward return / SL-touch dihitung on-demand dari
   klines — **bukan** precompute, **bukan** auto-tune bobot 35/30/20/15
-  atau threshold 55. `entry_alert_skip_log` retensi 30 hari.
+  atau threshold 55. `entry_alert_skip_log` retensi 30 hari. Formula awal
+  **dibekukan** selama uji (peek 24 jam read-only, review serius 14 hari;
+  jangan retune sampai ≥20 TRADE dengan 4h+24h selesai lintas ≥3 rezim 4h;
+  14 hari TRADE=0 = hasil tes bahwa 55 terlalu ketat). Protokol lengkap:
+  [`docs/full_pipeline_framework.md` §16](docs/full_pipeline_framework.md).
 - **`whalescope_compare_funding_across_exchanges`: Open Interest belum
   divalidasi silang ke data live** antar 4 exchange (SEHARUSNYA base-asset
   di semua exchange termasuk OKX yang pakai field `oiCcy`, tapi belum ada

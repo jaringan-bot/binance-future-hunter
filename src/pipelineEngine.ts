@@ -156,6 +156,8 @@ export function evaluateHardScreen(input: HardScreenInput): HardScreenResult {
 // adalah PILIHAN EKSPLISIT terdokumentasi (bukan hasil kalibrasi statistik) --
 // dicatat di docs/full_pipeline_framework.md Known Limitations, sama seperti
 // threshold-threshold lain di codebase ini (mis. smartMoneyAnalysis.ts).
+// FREEZE uji formula (2026-08-31): jangan ubah 35/30/20/15 atau ambang 55
+// sampai protokol di docs/full_pipeline_framework.md §16 terpenuhi.
 // ─────────────────────────────────────────────────────────────
 export interface Tier1ScoreInput {
   /** Jumlah 6 skor sinyal MM (detectMmActivity.ts pure scorers), rentang 0-6. */
@@ -282,7 +284,7 @@ export function scaleCapitalForTargetLoss(
 // KEPUTUSAN AKHIR PIPELINE -- kombinasi hard-screen + grid-risk status
 // leverage terpilih + rankingScore Tier-1 jadi satu TRADE/WATCH/NO_TRADE.
 // ─────────────────────────────────────────────────────────────
-export const TRADE_RANKING_SCORE_THRESHOLD = 55;
+export const TRADE_RANKING_SCORE_THRESHOLD = 55; // freeze: docs/full_pipeline_framework.md §16
 
 export interface DecidePipelineOutcomeInput {
   hardScreenPassed: boolean;

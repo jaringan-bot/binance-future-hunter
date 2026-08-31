@@ -353,6 +353,11 @@ Full detail (including raw test data per claim): Section 10,
   compactly for 90 days. Forward return / SL-touch are computed on-demand
   from klines — **not** precomputed, **not** auto-tuning the 35/30/20/15
   weights or the 55 threshold. `entry_alert_skip_log` retention is 30 days.
+  The initial formula is **frozen** during the test (24h peek is read-only;
+  serious review at 14 days; do not retune until ≥20 TRADE with completed
+  4h+24h returns across ≥3 distinct 4h regimes; 14 days of TRADE=0 **is**
+  the result that 55 is too tight). Full protocol:
+  [`docs/full_pipeline_framework.en.md` §12](docs/full_pipeline_framework.en.md).
 - **`whalescope_compare_funding_across_exchanges`: Open Interest hasn't
   been cross-validated against live data** across the 4 exchanges (SHOULD
   be base-asset denominated on all of them, including OKX which uses the
