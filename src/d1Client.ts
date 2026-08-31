@@ -4,6 +4,9 @@
 // scheduled handler) untuk SNAPSHOT_WATCHLIST (shared.ts). Pola module-level
 // setter sama seperti kvConfig.ts/binanceProxyClient.ts -- di-set sekali di
 // awal fetch()/scheduled() sebelum tool logic jalan.
+import type { PipelineDecisionLogRow } from "./pipelineDecisionLog.js";
+export type { PipelineDecisionLogRow };
+
 let db: D1Database | undefined;
 
 export function setD1Database(database: D1Database | undefined): void {
@@ -636,6 +639,130 @@ export async function insertEntryAlertSkipLog(row: EntryAlertSkipLogRow): Promis
 
 export async function pruneOldEntryAlertSkipLog(cutoffMs: number): Promise<void> {
   await requireDb().prepare("DELETE FROM entry_alert_skip_log WHERE run_at < ?").bind(cutoffMs).run();
+}
+
+// ── pipeline_decision_log (migration 0011) ───────────────────────────────
+// Compact per-symbol keputusan full_pipeline. Write path: entry-alert Phase 2
+// (selalu) + whalescope_full_pipeline kalau persist=true. Forward return
+// TIDAK disimpan -- query + klines on-demand di
+// whalescope_backtest_pipeline_decisions.
+
+interface RawPipelineDecisionLogRow {
+  run_at: number;
+  symbol: string;
+  source: string;
+  source_ref: string | null;
+  decision: string;
+  ranking_score: number;
+  hard_screen_passed: number;
+  hard_screen_reasons: string | null;
+  quote_volume_usd: number | null;
+  funding_rate: number | null;
+  regime_1h: string | null;
+  regime_4h: string | null;
+  grid_risk_status: string | null;
+  lower_price: number | null;
+  upper_price: number | null;
+  stop_loss: number | null;
+}
+
+function mapPipelineDecisionLogRow(r: RawPipelineDecisionLogRow): PipelineDecisionLogRow {
+  let reasons: string[] = [];
+  if (r.hard_screen_reasons) {
+    try {
+      const parsed = JSON.parse(r.hard_screen_reasons) as unknown;
+      reasons = Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : [];
+    } catch {
+      reasons = [];
+    }
+  }
+  return {
+    runAt: r.run_at,
+    symbol: r.symbol,
+    source: r.source as PipelineDecisionLogRow["source"],
+    sourceRef: r.source_ref,
+    decision: r.decision,
+    rankingScore: r.ranking_score,
+    hardScreenPassed: r.hard_screen_passed === 1,
+    hardScreenReasons: reasons,
+    quoteVolumeUsd: r.quote_volume_usd,
+    fundingRate: r.funding_rate,
+    regime1h: r.regime_1h,
+    regime4h: r.regime_4h,
+    gridRiskStatus: r.grid_risk_status,
+    lowerPrice: r.lower_price,
+    upperPrice: r.upper_price,
+    stopLoss: r.stop_loss,
+  };
+}
+
+export async function insertPipelineDecisionLogs(rows: PipelineDecisionLogRow[]): Promise<void> {
+  if (rows.length === 0) return;
+  const database = requireDb();
+  const stmt = database.prepare(
+    "INSERT INTO pipeline_decision_log (run_at, symbol, source, source_ref, decision, ranking_score, hard_screen_passed, hard_screen_reasons, quote_volume_usd, funding_rate, regime_1h, regime_4h, grid_risk_status, lower_price, upper_price, stop_loss) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  );
+  await database.batch(
+    rows.map((r) =>
+      stmt.bind(
+        r.runAt,
+        r.symbol.toUpperCase(),
+        r.source,
+        r.sourceRef,
+        r.decision,
+        r.rankingScore,
+        r.hardScreenPassed ? 1 : 0,
+        JSON.stringify(r.hardScreenReasons),
+        r.quoteVolumeUsd,
+        r.fundingRate,
+        r.regime1h,
+        r.regime4h,
+        r.gridRiskStatus,
+        r.lowerPrice,
+        r.upperPrice,
+        r.stopLoss,
+      ),
+    ),
+  );
+}
+
+export async function queryPipelineDecisionLog(opts: {
+  startTime: number;
+  endTime: number;
+  symbol?: string;
+  source?: string;
+  sourceRef?: string;
+  limit?: number;
+}): Promise<PipelineDecisionLogRow[]> {
+  const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
+  const database = requireDb();
+  const clauses = ["run_at BETWEEN ? AND ?"];
+  const binds: unknown[] = [opts.startTime, opts.endTime];
+  if (opts.symbol) {
+    clauses.push("symbol = ?");
+    binds.push(opts.symbol.toUpperCase());
+  }
+  if (opts.source) {
+    clauses.push("source = ?");
+    binds.push(opts.source);
+  }
+  if (opts.sourceRef) {
+    clauses.push("source_ref = ?");
+    binds.push(opts.sourceRef);
+  }
+  binds.push(limit);
+  const result = await database
+    .prepare(
+      `SELECT run_at, symbol, source, source_ref, decision, ranking_score, hard_screen_passed, hard_screen_reasons, quote_volume_usd, funding_rate, regime_1h, regime_4h, grid_risk_status, lower_price, upper_price, stop_loss FROM pipeline_decision_log WHERE ${clauses.join(" AND ")} ORDER BY run_at DESC LIMIT ?`,
+    )
+    .bind(...binds)
+    .all<RawPipelineDecisionLogRow>();
+  return (result.results ?? []).map(mapPipelineDecisionLogRow);
+}
+
+export async function pruneOldPipelineDecisionLog(cutoffMs: number): Promise<void> {
+  await requireDb().prepare("DELETE FROM pipeline_decision_log WHERE run_at < ?").bind(cutoffMs).run();
 }
 
 // Dipakai heartbeatCron.ts -- kalau ada minimal 1 alert TRADE/WATCH beneran

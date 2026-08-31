@@ -31,6 +31,7 @@ import { rankEntryCandidates, DEFAULT_ENTRY_TOP_N, type EntryRankingInput } from
 import * as kvConfig from "../kvConfig.js";
 import { mapWithConcurrency } from "../concurrency.js";
 import { TRADE_RANKING_SCORE_THRESHOLD } from "../pipelineEngine.js";
+import { toPipelineDecisionLogRow } from "../pipelineDecisionLog.js";
 import * as pacing from "../pacing.js";
 import { fmtPrice } from "../format.js";
 import * as riskCircuit from "../engine/riskCircuitBreaker.js";
@@ -278,6 +279,8 @@ export interface AlertCheckOutcome {
   dcaDecision: DcaHeadResult["decision"];
   tradDecision: TraditionalFuturesResult["decision"];
   hadError: boolean;
+  /** Compact grid decision for pipeline_decision_log -- absent kalau pipeline throw sebelum ada result. */
+  decisionLog?: ReturnType<typeof toPipelineDecisionLogRow>;
 }
 
 export async function checkEntryAlertForSymbol(
@@ -317,6 +320,7 @@ export async function checkEntryAlertForSymbol(
     dcaDecision: r.dca.decision,
     tradDecision: r.trad.decision,
     hadError: r.grid.error != null,
+    decisionLog: toPipelineDecisionLogRow(r.grid, now, "entry_alert"),
   };
 
   if (alertable && (isTransition || cooldownExpired)) {
@@ -527,4 +531,9 @@ export async function runEntryAlertCheck(env: TelegramEnv): Promise<void> {
     tradWatchCount,
     tradTradeCount,
   });
+
+  const decisionLogs = outcomes.flatMap((o) => (o.decisionLog ? [o.decisionLog] : []));
+  await d1Client
+    .insertPipelineDecisionLogs(decisionLogs)
+    .catch((err) => console.error("[entry-alert] gagal insert pipeline_decision_log:", (err as Error)?.message ?? String(err)));
 }
