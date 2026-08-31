@@ -23,6 +23,10 @@
 10. [Mapping Tool → Sinyal](#10-mapping-tool--sinyal)
 11. [Contoh Kasus (Worked Example)](#11-contoh-kasus-worked-example)
 12. [Known Limitations](#12-known-limitations)
+13. [Head DCA (entry-alert cron)](#13-head-dca-entry-alert-cron-2026-08-29)
+14. [Pre-filter ranking F1 → F3](#14-pre-filter-ranking-f1--f3-2026-08-29)
+15. [Deferred — grid volatility tiering](#15-deferred--grid-volatility-tiering)
+16. [Log keputusan & uji formula](#16-log-keputusan--uji-formula-2026-08-31)
 
 ---
 
@@ -41,7 +45,8 @@ mengembalikan tabel hasil terurut plus parameter Grid Bot siap copy-paste.
 
 **Yang TIDAK dilakukan tool ini:**
 
-- Tidak mengeksekusi order apapun (read-only, sama seperti 44 tool lain).
+- Tidak mengeksekusi order apapun. Default tetap screening-only; `persist=true`
+  hanya menulis row compact ke D1 (`pipeline_decision_log`), bukan order.
 - Tidak reverse-engineer algoritma Compass Binance (tidak publik) -- bound
   grid dihitung dengan heuristik ATR + swing high/low yang terdokumentasi
   jelas sebagai APPROXIMATE (Bagian 6).
@@ -352,7 +357,9 @@ hasil query live ke Binance.)_
 8. **rankingScore dan threshold TRADE/WATCH (55) adalah pilihan eksplisit
    terdokumentasi, bukan hasil kalibrasi statistik** -- sama seperti
    threshold-threshold lain di codebase ini (`smartMoneyAnalysis.ts`,
-   `detectMmActivity.ts`).
+   `detectMmActivity.ts`). `pipeline_decision_log` +
+   `whalescope_backtest_pipeline_decisions` ada supaya threshold ini bisa
+   diuji maju; log **tidak** men-auto-tune bobot.
 9. **Token cost TINGGI.** Satu panggilan bisa memicu belasan fetch proxy
    per symbol (lebih untuk symbol yang lolos hard screen) -- pakai untuk
    keputusan akhir, bukan eksplorasi awal.
@@ -417,6 +424,29 @@ yang direncanakan) — follow-up terpisah, data-gated.
 
 ---
 
+## 16. Log keputusan & uji formula (2026-08-31)
+
+`pipeline_decision_log` (migration 0011) menyimpan row compact per symbol
+setelah Phase 2 entry-alert (selalu) dan setelah `whalescope_full_pipeline`
+kalau `persist=true`.
+
+- **Yang disimpan:** `run_at`, symbol, `source` (`entry_alert` | `manual` |
+  `dropstab`), `source_ref` (slug tab Dropstab / label), keputusan,
+  `ranking_score`, hard-screen pass + alasan, volume, funding, regime 1h/4h,
+  `grid_risk_status`, lower/upper/SL. Hard-screen reject tetap di-log
+  (bound grid boleh null).
+- **Yang TIDAK disimpan:** `forward_return_*`. Dihitung on-demand oleh
+  `whalescope_backtest_pipeline_decisions` dari klines 1h (pola
+  `binance_backtest_signal`): win rate / avg return / SL-touch, di-bucket
+  per keputusan dan skor (`lt_40` / `40_55` / `gte_55`).
+- **Yang TIDAK dilakukan:** auto-tune bobot ranking 35/30/20/15 atau
+  threshold 55. Log adalah bahan uji, bukan input optimizer.
+- **Retensi:** 90 hari (sama `market_snapshots` / `signal_history`).
+  `entry_alert_skip_log` diperpanjang 7 → 30 hari untuk audit F3.
+- **Tidak ada cron berat kedua.** Persist menumpang tick entry-alert yang
+  sudah bayar `full_pipeline`.
+
 *Dibuat: 2026-08-22, bareng rilis `whalescope_full_pipeline`.*
 *Update 2026-08-22: tambah non-gate Matches Needed + Estimated Time to Breakeven.*
 *Update 2026-08-29: head DCA + shared 2-wave fetch + F1→F3 ranking (§13-15).*
+*Update 2026-08-31: pipeline_decision_log + backtest on-demand (§16).*

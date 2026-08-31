@@ -150,6 +150,7 @@ kredensial atau setup tambahan buat 3 exchange itu.
 | `binance_detect_mm_activity` | Skor + tier (Weak/Moderate/Strong/Extreme) dari 6 sinyal MM/whale sekaligus (absorption, spoofing 2-snapshot RIIL, stop-hunt simetris + OI-drop proxy + trade-volume-concentration proxy, basis arbitrage, OI divergence, funding extreme) — ganti 5-6 tool call manual. Stop-hunt TETAP tanpa data liquidation riil (dihapus permanen), lihat [Keterbatasan](#keterbatasan-yang-jujur-perlu-diketahui) | Binance native |
 | `binance_market_regime` | Klasifikasi kondisi pasar: TRENDING_UP/DOWN, RANGING, BREAKOUT, ACCUMULATION, DISTRIBUTION — pakai ADX(14), tren OI, CVD, spike volatilitas/volume | Binance native |
 | `binance_backtest_signal` | Validasi empiris sinyal `binance_detect_mm_activity`: win rate/avg return/max drawdown dari histori sinyal D1 (watchlist tetap), forward return dihitung on-demand dari klines historis | D1 + Binance native |
+| `whalescope_backtest_pipeline_decisions` | Uji maju keputusan `full_pipeline` yang tersimpan di `pipeline_decision_log` (entry-alert Phase 2 + `persist=true`): win rate / avg return / SL-touch per keputusan (TRADE/WATCH/NO_TRADE) dan bucket skor (`lt_40` / `40_55` / `gte_55`). Forward return on-demand dari klines, bukan kolom precompute, bukan auto-tune bobot | D1 + Binance native |
 | `binance_analyze_smart_money` | Skor divergensi smart money (top trader) vs retail (global account) dari 5 variabel: top trader ratio, global account ratio, delta OI, funding rate, orderbook imbalance — kondisi LONG_LIQUIDATION_RISK/BULLISH_ACCUMULATION/SHORT_SQUEEZE_RISK/NEUTRAL + confidenceScore. Beda dari `binance_detect_mm_activity` (6 sinyal absorption/spoofing/stop-hunt/basis-arb) — fokus khusus top-trader-vs-retail | Binance native |
 | `whalescope_compare_funding_across_exchanges` | Bandingkan funding rate, last price, open interest, 24h change 1 pair across Binance/Bybit/OKX/Hyperliquid, deteksi divergensi — cross-confirm sinyal MM detection antar exchange. Satu-satunya tool yang BUKAN Binance-only | Binance native + Bybit + OKX + Hyperliquid |
 | `binance_get_tool_catalog` | Daftar semua tool + kategori/token-cost/use-case, filter per kategori — cek ini dulu sebelum manggil banyak tool individual. Nama+description auto dari tool registry (selalu akurat), kategori/token-cost tetap manual | Semi-otomatis |
@@ -162,7 +163,7 @@ kredensial atau setup tambahan buat 3 exchange itu.
 | `binance_get_quarterly_settlement_price` | Histori delivery/settlement price kontrak quarterly (tidak berlaku untuk perpetual) | Binance native |
 | `binance_get_composite_index_info` | Komposisi base asset + bobot sebuah composite index symbol (mis. BTCDOMUSDT) | Binance native |
 | `binance_get_index_constituents` | Daftar exchange+harga+bobot penyusun index price sebuah pair | Binance native |
-| `whalescope_full_pipeline` | Decision chain PENUH Grid Bot Futures (composite tertinggi): hard screen → Tier-1 intelligence (smart money, MM composite, regime 1h+4h, order book) → hitung bound grid Compass-equivalent (ATR + swing high/low) → capital-solve EXACT ke budget rugi (`risk_usd`) per opsi leverage → keputusan TRADE/WATCH/NO_TRADE + parameter Grid Bot siap copy-paste, untuk 1-20 symbol sekaligus. Token cost TINGGI — lihat [`docs/full_pipeline_framework.md`](docs/full_pipeline_framework.md) | Binance native |
+| `whalescope_full_pipeline` | Decision chain PENUH Grid Bot Futures (composite tertinggi): hard screen → Tier-1 intelligence (smart money, MM composite, regime 1h+4h, order book) → hitung bound grid Compass-equivalent (ATR + swing high/low) → capital-solve EXACT ke budget rugi (`risk_usd`) per opsi leverage → keputusan TRADE/WATCH/NO_TRADE + parameter Grid Bot siap copy-paste, untuk 1-20 symbol sekaligus. `persist=true` (opsional) menulis row compact ke `pipeline_decision_log` (`source=manual` atau `dropstab` + `persist_ref` slug tab). Token cost TINGGI — lihat [`docs/full_pipeline_framework.md`](docs/full_pipeline_framework.md) | Binance native |
 
 ## Konvensi `detail`: summary vs full (hemat token)
 
@@ -339,6 +340,11 @@ Detail penuh (termasuk raw data test per klaim): Section 10,
   size kecil (di bawah ~20 sinyal) berarti confidence rendah, jangan
   simpulkan sinyal "reliable" dari sedikit data historis (baru mulai
   terkumpul dari kapan fitur ini deploy, bukan retroaktif).
+- **`pipeline_decision_log` + `whalescope_backtest_pipeline_decisions`:**
+  keputusan per-symbol Phase 2 entry-alert (dan `persist=true`) disimpan
+  compact 90 hari. Forward return / SL-touch dihitung on-demand dari
+  klines — **bukan** precompute, **bukan** auto-tune bobot 35/30/20/15
+  atau threshold 55. `entry_alert_skip_log` retensi 30 hari.
 - **`whalescope_compare_funding_across_exchanges`: Open Interest belum
   divalidasi silang ke data live** antar 4 exchange (SEHARUSNYA base-asset
   di semua exchange termasuk OKX yang pakai field `oiCcy`, tapi belum ada

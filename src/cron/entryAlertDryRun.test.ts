@@ -74,6 +74,7 @@ vi.mock("../d1Client.js", () => ({
   upsertEntryAlertState: vi.fn().mockResolvedValue(undefined),
   insertEntryAlertRunLog: vi.fn().mockResolvedValue(undefined),
   insertEntryAlertSkipLog: vi.fn().mockResolvedValue(undefined),
+  insertPipelineDecisionLogs: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("../kvConfig.js", () => ({
   getJson: vi.fn().mockResolvedValue(null),

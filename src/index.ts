@@ -72,8 +72,12 @@ const ENTRY_ALERT_RUN_LOG_RETENTION_MS = 2 * 24 * 3600 * 1000; // 2 hari -- hear
 const MARKET_SIGNAL_RETENTION_MS = 90 * 24 * 3600 * 1000; // 90 hari -- market_snapshots + signal_history.
 // entry_alert_skip_log: window audit MANUAL multi-hari ("apakah pair yang
 // di-skip pre-filter pernah jadi setup bagus"), jadi retensi jauh lebih
-// panjang dari run_log. 7 hari.
-const ENTRY_ALERT_SKIP_LOG_RETENTION_MS = 7 * 24 * 3600 * 1000;
+// panjang dari run_log. 30 hari -- 7 hari terlalu pendek untuk uji F3.
+const ENTRY_ALERT_SKIP_LOG_RETENTION_MS = 30 * 24 * 3600 * 1000;
+// pipeline_decision_log: keputusan per-symbol Phase 2. 90 hari, sama
+// dengan market_snapshots / signal_history -- cukup untuk uji maju skor 55
+// lintas beberapa rezim, ~40 row/tick * 96 tick/hari * 90 ≈ 350k row.
+const PIPELINE_DECISION_LOG_RETENTION_MS = 90 * 24 * 3600 * 1000;
 
 // Server ini STATELESS (sessionIdGenerator: undefined): setiap request
 // membuat instance server + transport baru. Ini pola resmi yang
@@ -326,6 +330,11 @@ export default {
         d1Client
           .pruneOldEntryAlertSkipLog(Date.now() - ENTRY_ALERT_SKIP_LOG_RETENTION_MS)
           .catch((err) => console.error("[cron] gagal prune entry_alert_skip_log:", (err as Error)?.message ?? String(err))),
+      );
+      ctx.waitUntil(
+        d1Client
+          .pruneOldPipelineDecisionLog(Date.now() - PIPELINE_DECISION_LOG_RETENTION_MS)
+          .catch((err) => console.error("[cron] gagal prune pipeline_decision_log:", (err as Error)?.message ?? String(err))),
       );
       return;
     }

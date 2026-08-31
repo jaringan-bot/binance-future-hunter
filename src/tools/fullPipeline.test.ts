@@ -10,6 +10,7 @@ import {
 } from "./fullPipeline.js";
 import * as binanceProxy from "../binanceProxyClient.js";
 import type { KlineTuple } from "../binanceProxyClient.js";
+import * as d1Client from "../d1Client.js";
 
 // ─────────────────────────────────────────────────────────────
 // Mock binanceProxyClient.js -- diresolve ke MODUL YANG SAMA oleh
@@ -19,6 +20,10 @@ import type { KlineTuple } from "../binanceProxyClient.js";
 // dipakai calculateGridRisk lewat fetchSymbolTradingRules) -- semua fungsi
 // yang disentuh SATU pun dari 3 modul itu HARUS ada di sini.
 // ─────────────────────────────────────────────────────────────
+vi.mock("../d1Client.js", () => ({
+  insertPipelineDecisionLogs: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock("../binanceProxyClient.js", () => ({
   getTicker24hrNative: vi.fn(),
   getCurrentFundingRateNative: vi.fn(),
@@ -374,6 +379,46 @@ describe("whalescope_full_pipeline tool handler", () => {
     expect(parsed.margin_mode).toBe("ISOLATED");
     expect(parsed.max_leverage_options).toEqual([3, 5, 10]);
     expect(parsed.concurrency).toBe(6);
+    expect(parsed.persist).toBe(false);
+    expect(parsed.persist_source).toBe("manual");
+  });
+
+  it("does not write pipeline_decision_log when persist defaults to false", async () => {
+    const args = z.object(inputSchema).parse({ symbols: "BTCUSDT" });
+    await handler(args);
+    expect(d1Client.insertPipelineDecisionLogs).not.toHaveBeenCalled();
+  });
+
+  it("persists compact rows with dropstab source_ref when persist=true", async () => {
+    vi.mocked(d1Client.insertPipelineDecisionLogs).mockResolvedValue(undefined);
+    const args = z.object(inputSchema).parse({
+      symbols: "BTCUSDT",
+      persist: true,
+      persist_source: "dropstab",
+      persist_ref: "bullish-coins-in-accumulation-ktg7cz8t70",
+    });
+    const result = await handler(args);
+    expect(d1Client.insertPipelineDecisionLogs).toHaveBeenCalledTimes(1);
+    const rows = vi.mocked(d1Client.insertPipelineDecisionLogs).mock.calls[0][0];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      symbol: "BTCUSDT",
+      source: "dropstab",
+      sourceRef: "bullish-coins-in-accumulation-ktg7cz8t70",
+    });
+    const params = (result.structuredContent as { params: { persisted: boolean } }).params;
+    expect(params.persisted).toBe(true);
+  });
+
+  it("keeps the pipeline response when persist write fails", async () => {
+    vi.mocked(d1Client.insertPipelineDecisionLogs).mockRejectedValueOnce(new Error("D1 down"));
+    const args = z.object(inputSchema).parse({ symbols: "BTCUSDT", persist: true });
+    const result = await handler(args);
+    expect(result.isError).not.toBe(true);
+    const structured = result.structuredContent as { params: { persisted: boolean; persistError: string }; results: unknown[] };
+    expect(structured.params.persisted).toBe(false);
+    expect(structured.params.persistError).toContain("D1 down");
+    expect(structured.results).toHaveLength(1);
   });
 });
 

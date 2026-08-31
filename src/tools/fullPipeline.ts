@@ -62,6 +62,8 @@ import { registerSafeTool } from "../toolWrapper.js";
 import { ToolResponseBuilder } from "../responseBuilder.js";
 import { fmtPrice } from "../format.js";
 import { computeGridVelocity, type GridVelocityResult } from "../gridVelocity.js";
+import { insertPipelineDecisionLogs } from "../d1Client.js";
+import { toPipelineDecisionLogRow, type PipelineDecisionLogSource } from "../pipelineDecisionLog.js";
 
 const REFERENCE_CAPITAL = 1000;
 
@@ -1058,6 +1060,22 @@ const fullPipelineInputSchema = {
     .describe("Ambang volume quote 24h (USD) absolut untuk hard screen -- pendekatan kasar dari cutoff 'bottom 20%', BUKAN percentile fetcher bulk-ticker. Default $5,000,000."),
   max_abs_funding_rate: z.number().positive().default(0.0005).describe("Ambang |funding rate| absolut untuk hard screen. Default 0.0005 (0.05%)."),
   concurrency: z.number().int().min(1).max(8).default(6).describe("Batas jumlah symbol yang diproses paralel dalam satu tool call. Default 6."),
+  persist: z
+    .boolean()
+    .default(false)
+    .describe(
+      "Kalau true, tulis row compact per symbol ke pipeline_decision_log (D1) setelah pipeline selesai. " +
+        "Default false -- screening biasa tidak menulis. Gagal tulis D1 tidak menggagalkan response.",
+    ),
+  persist_source: z
+    .enum(["manual", "dropstab"])
+    .default("manual")
+    .describe("Sumber row kalau persist=true. manual = screening ad-hoc; dropstab = tab Dropstab (isi persist_ref = slug tab)."),
+  persist_ref: z
+    .string()
+    .max(128)
+    .optional()
+    .describe("Referensi opsional (slug tab Dropstab, label eksperimen). Diabaikan kalau persist=false."),
 };
 
 export function registerFullPipelineTools(server: McpServer): void {
@@ -1070,10 +1088,11 @@ export function registerFullPipelineTools(server: McpServer): void {
         "Decision chain Grid Bot Futures penuh dalam 1 call, 1-20 symbol: hard screen -> Tier-1 intel (rankingScore " +
         "0-100) -> grid bounds (ATR + swing high/low) -> capital-solve exact per leverage -> TRADE/WATCH/NO_TRADE " +
         "+ parameter Grid Bot siap-pakai. Juga mengembalikan Matches Needed + Estimasi Durasi ke Impas sebagai " +
-        "informasi non-gate. Gantikan ~8 tool call manual. Token cost TINGGI -- pakai untuk keputusan akhir, " +
+        "informasi non-gate. persist=true (opsional) menulis row compact ke pipeline_decision_log untuk uji formula " +
+        "(bukan auto-tune). Gantikan ~8 tool call manual. Token cost TINGGI -- pakai untuk keputusan akhir, " +
         "bukan eksplorasi. Known limitations: docs/full_pipeline_framework.md.",
       inputSchema: fullPipelineInputSchema,
-      annotations: { readOnlyHint: true, openWorldHint: true },
+      annotations: { readOnlyHint: false, openWorldHint: true },
     },
     async ({
       symbols,
@@ -1089,6 +1108,9 @@ export function registerFullPipelineTools(server: McpServer): void {
       min_quote_volume_usd,
       max_abs_funding_rate,
       concurrency,
+      persist,
+      persist_source,
+      persist_ref,
     }) => {
       try {
         const opts: PipelineOpts = {
@@ -1112,6 +1134,20 @@ export function registerFullPipelineTools(server: McpServer): void {
           const rankDiff = decisionRank(b) - decisionRank(a);
           return rankDiff !== 0 ? rankDiff : b.rankingScore - a.rankingScore;
         });
+
+        let persisted = false;
+        let persistError: string | undefined;
+        if (persist) {
+          const now = Date.now();
+          const source: PipelineDecisionLogSource = persist_source;
+          const rows = sorted.map((r) => toPipelineDecisionLogRow(r, now, source, persist_ref ?? null));
+          try {
+            await insertPipelineDecisionLogs(rows);
+            persisted = true;
+          } catch (err) {
+            persistError = (err as Error)?.message ?? String(err);
+          }
+        }
 
         const summary = {
           total: sorted.length,
@@ -1156,6 +1192,13 @@ export function registerFullPipelineTools(server: McpServer): void {
           "Detail lengkap per symbol (gridBotConfig, reasoning, hardScreen, tier1, risk, breakevenInfo) ada di structuredContent.results[i]. " +
             "Matches Needed & Estimasi Durasi ke Impas adalah informasi non-gate (tidak mempengaruhi keputusan TRADE/WATCH/NO_TRADE).",
         );
+        if (persist) {
+          builder.note(
+            persisted
+              ? `Keputusan ${sorted.length} symbol disimpan ke pipeline_decision_log (source=${persist_source}${persist_ref ? `, ref=${persist_ref}` : ""}).`
+              : `Persist diminta tapi gagal: ${persistError ?? "unknown"}. Response pipeline tetap dikembalikan.`,
+          );
+        }
 
         const built = builder.build();
 
@@ -1176,6 +1219,11 @@ export function registerFullPipelineTools(server: McpServer): void {
               min_quote_volume_usd,
               max_abs_funding_rate,
               concurrency,
+              persist,
+              persist_source,
+              persist_ref: persist_ref ?? null,
+              persisted,
+              persistError: persistError ?? null,
             },
             summary,
             results: sorted,

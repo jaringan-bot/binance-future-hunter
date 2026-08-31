@@ -22,6 +22,7 @@ vi.mock("../d1Client.js", () => ({
   upsertEntryAlertState: vi.fn(),
   insertEntryAlertRunLog: vi.fn(),
   insertEntryAlertSkipLog: vi.fn().mockResolvedValue(undefined),
+  insertPipelineDecisionLogs: vi.fn().mockResolvedValue(undefined),
   getDcaActivePlan: vi.fn().mockResolvedValue(null),
   upsertDcaActivePlan: vi.fn().mockResolvedValue(undefined),
   deleteDcaActivePlan: vi.fn().mockResolvedValue(undefined),
@@ -808,6 +809,15 @@ describe("runEntryAlertCheck", () => {
       dcaTradeCount: 0,
       tradWatchCount: 0, // all trad heads NO_TRADE in this fixture
       tradTradeCount: 0,
+    });
+    // ADAUSDT threw before a result existed -- only BTC/ETH/SOL get a decision row.
+    expect(d1Client.insertPipelineDecisionLogs).toHaveBeenCalledTimes(1);
+    const logged = vi.mocked(d1Client.insertPipelineDecisionLogs).mock.calls[0][0];
+    expect(logged.map((r) => r.symbol).sort()).toEqual(["BTCUSDT", "ETHUSDT", "SOLUSDT"]);
+    expect(logged.find((r) => r.symbol === "BTCUSDT")).toMatchObject({
+      source: "entry_alert",
+      decision: "TRADE",
+      rankingScore: 80,
     });
   });
 
