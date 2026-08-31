@@ -83,6 +83,12 @@ const CATALOG_METADATA: Record<string, CatalogMetadata> = {
   binance_get_basis: { category: "history", tokenCost: "medium", useCase: "Histori basis native index vs futures (GET /futures/data/basis) — semua pair, period 5m–1d", dependencies: [] },
   binance_get_basis_history: { category: "history", tokenCost: "medium", useCase: "Histori basis+funding+OI dari snapshot cron 5 menit ke D1 -- selalu tersedia untuk 50-pair watchlist tetap, best-effort untuk pair lain yang sering di-query", dependencies: [] },
   binance_backtest_signal: { category: "backtest", tokenCost: "high", useCase: "Validasi empiris sinyal MM detection: win rate/avg return/max drawdown dari histori sinyal D1 + forward return on-demand", dependencies: ["history", "technical"] },
+  whalescope_backtest_pipeline_decisions: {
+    category: "backtest",
+    tokenCost: "high",
+    useCase: "Uji maju keputusan full pipeline (TRADE/WATCH/NO_TRADE + bucket skor 55) dari D1 + forward return/SL-touch on-demand",
+    dependencies: ["history", "technical"],
+  },
   whalescope_compare_funding_across_exchanges: { category: "cross-exchange", tokenCost: "medium", useCase: "Bandingkan funding rate, price, OI, 24h change 1 pair across Binance/Bybit/OKX/Hyperliquid, deteksi divergensi", dependencies: ["funding"] },
   binance_get_realtime_liquidations: { category: "realtime", tokenCost: "medium", useCase: "Likuidasi paksa terbaru market-wide dari WS stream (di-buffer di gateway VPS, feed di-sampel Binance)", dependencies: [] },
   binance_get_contract_events: { category: "realtime", tokenCost: "low", useCase: "Event listing/delisting/settlement kontrak futures dari WS !contractInfo (buffer 30 hari)", dependencies: [] },

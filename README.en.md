@@ -154,6 +154,7 @@ setup needed for those 3 exchanges.
 | `binance_detect_mm_activity` | Score + tier (Weak/Moderate/Strong/Extreme) from 6 MM/whale signals at once (absorption, real 2-snapshot spoofing, symmetric stop-hunt + OI-drop proxy + trade-volume-concentration proxy, basis arbitrage, OI divergence, funding extreme) — replaces 5-6 manual tool calls. Stop-hunt is STILL without real liquidation data (permanently removed), see [Honest limitations](#honest-limitations-you-should-know) | Binance native |
 | `binance_market_regime` | Classifies current market condition: TRENDING_UP/DOWN, RANGING, BREAKOUT, ACCUMULATION, DISTRIBUTION — uses ADX(14), OI trend, CVD, volatility/volume spike ratio | Binance native |
 | `binance_backtest_signal` | Empirically validates `binance_detect_mm_activity` signals: win rate/avg return/max drawdown from D1 signal history (fixed watchlist), forward return computed on-demand from historical klines | D1 + Binance native |
+| `whalescope_backtest_pipeline_decisions` | Tests stored `full_pipeline` decisions in `pipeline_decision_log` (entry-alert Phase 2 + `persist=true`): win rate / avg return / SL-touch by decision (TRADE/WATCH/NO_TRADE) and score bucket (`lt_40` / `40_55` / `gte_55`). Forward return is on-demand from klines — not a precomputed column, not weight auto-tuning | D1 + Binance native |
 | `binance_analyze_smart_money` | Smart money (top trader) vs retail (global account) divergence score from 5 variables: top trader ratio, global account ratio, OI delta, funding rate, orderbook imbalance — condition LONG_LIQUIDATION_RISK/BULLISH_ACCUMULATION/SHORT_SQUEEZE_RISK/NEUTRAL + confidenceScore. Different from `binance_detect_mm_activity` (6 absorption/spoofing/stop-hunt/basis-arb signals) — narrowly focused on top-trader-vs-retail | Binance native |
 | `whalescope_compare_funding_across_exchanges` | Compares funding rate, last price, open interest, and 24h change for one pair across Binance/Bybit/OKX/Hyperliquid, flags divergence — cross-confirms MM detection signals across venues. The only tool that is NOT Binance-only | Binance native + Bybit + OKX + Hyperliquid |
 | `binance_get_tool_catalog` | Lists all tools with category/token-cost/use-case, filterable by category — check this before calling many individual tools. Name+description are auto-pulled from the tool registry (always accurate); category/token-cost stay manual | Semi-automatic |
@@ -166,7 +167,7 @@ setup needed for those 3 exchanges.
 | `binance_get_quarterly_settlement_price` | Historical delivery/settlement price for quarterly contracts (not applicable to perpetuals) | Binance native |
 | `binance_get_composite_index_info` | Base asset composition + weights for a composite index symbol (e.g. BTCDOMUSDT) | Binance native |
 | `binance_get_index_constituents` | List of exchanges+prices+weights making up a pair's index price | Binance native |
-| `whalescope_full_pipeline` | The FULL Futures Grid Bot decision chain (highest-level composite tool): hard screen → Tier-1 intelligence (smart money, MM composite, 1h+4h regime, order book) → Compass-equivalent grid bound calculation (ATR + swing high/low) → EXACT capital-solve against a loss budget (`risk_usd`) per leverage option → TRADE/WATCH/NO_TRADE decision + copy-paste-ready Grid Bot config, for 1-20 symbols at once. HIGH token cost — see [`docs/full_pipeline_framework.md`](docs/full_pipeline_framework.md) (`docs/full_pipeline_framework.en.md` for the English mirror) | Binance native |
+| `whalescope_full_pipeline` | The FULL Futures Grid Bot decision chain (highest-level composite tool): hard screen → Tier-1 intelligence (smart money, MM composite, 1h+4h regime, order book) → Compass-equivalent grid bound calculation (ATR + swing high/low) → EXACT capital-solve against a loss budget (`risk_usd`) per leverage option → TRADE/WATCH/NO_TRADE decision + copy-paste-ready Grid Bot config, for 1-20 symbols at once. `persist=true` (optional) writes a compact row to `pipeline_decision_log` (`source=manual` or `dropstab` + `persist_ref` tab slug). HIGH token cost — see [`docs/full_pipeline_framework.md`](docs/full_pipeline_framework.md) (`docs/full_pipeline_framework.en.md` for the English mirror) | Binance native |
 
 ## The `detail` convention: summary vs full (token efficiency)
 
@@ -347,6 +348,11 @@ Full detail (including raw test data per claim): Section 10,
   confidence — don't conclude a signal is "reliable" from little historical
   data (data only starts accumulating from when this feature was deployed,
   not retroactively).
+- **`pipeline_decision_log` + `whalescope_backtest_pipeline_decisions`:**
+  per-symbol Phase 2 entry-alert decisions (and `persist=true`) are stored
+  compactly for 90 days. Forward return / SL-touch are computed on-demand
+  from klines — **not** precomputed, **not** auto-tuning the 35/30/20/15
+  weights or the 55 threshold. `entry_alert_skip_log` retention is 30 days.
 - **`whalescope_compare_funding_across_exchanges`: Open Interest hasn't
   been cross-validated against live data** across the 4 exchanges (SHOULD
   be base-asset denominated on all of them, including OKX which uses the

@@ -22,6 +22,7 @@
 9. [Tool → Signal Mapping](#9-tool--signal-mapping)
 10. [Worked Example](#10-worked-example)
 11. [Known Limitations](#11-known-limitations)
+12. [Decision log & formula tests](#12-decision-log--formula-tests-2026-08-31)
 
 ---
 
@@ -40,7 +41,9 @@ plus copy-paste-ready Grid Bot parameters.
 
 **What this tool does NOT do:**
 
-- Doesn't execute any orders (read-only, same as the other 44 tools).
+- Doesn't execute any orders. Default is still screening-only;
+  `persist=true` only writes a compact D1 row (`pipeline_decision_log`),
+  not an order.
 - Doesn't reverse-engineer Binance's Compass feature (not public) -- grid
   bounds are computed with an ATR + swing-high/low heuristic, clearly
   documented as APPROXIMATE (Section 6).
@@ -308,11 +311,36 @@ _(The numbers above are illustrative, to walk through the computation flow
 8. **`rankingScore` and the TRADE/WATCH threshold (55) are explicit,
    documented choices, not the result of statistical calibration** --
    same as other thresholds in this codebase (`smartMoneyAnalysis.ts`,
-   `detectMmActivity.ts`).
+   `detectMmActivity.ts`). `pipeline_decision_log` +
+   `whalescope_backtest_pipeline_decisions` exist so this threshold can be
+   tested going forward; the log does **not** auto-tune weights.
 9. **HIGH token cost.** A single call can trigger over a dozen proxy
    fetches per symbol (more for symbols that pass the hard screen) -- use
    this for final decisions, not initial exploration.
 
 ---
 
+## 12. Decision log & formula tests (2026-08-31)
+
+`pipeline_decision_log` (migration 0011) stores one compact row per symbol
+after entry-alert Phase 2 (always) and after `whalescope_full_pipeline`
+when `persist=true`.
+
+- **Stored:** `run_at`, symbol, `source` (`entry_alert` | `manual` |
+  `dropstab`), `source_ref` (Dropstab tab slug / label), decision,
+  `ranking_score`, hard-screen pass + reasons, volume, funding, 1h/4h
+  regime, `grid_risk_status`, lower/upper/SL. Hard-screen rejects are
+  still logged (grid bounds may be null).
+- **Not stored:** `forward_return_*`. Computed on-demand by
+  `whalescope_backtest_pipeline_decisions` from 1h klines (same pattern as
+  `binance_backtest_signal`): win rate / avg return / SL-touch, bucketed
+  by decision and score (`lt_40` / `40_55` / `gte_55`).
+- **Not done:** auto-tuning the 35/30/20/15 ranking weights or the 55
+  threshold. The log is test material, not an optimizer input.
+- **Retention:** 90 days (same as `market_snapshots` / `signal_history`).
+  `entry_alert_skip_log` extended 7 → 30 days for F3 audits.
+- **No second heavy cron.** Persist rides the entry-alert tick that
+  already paid for `full_pipeline`.
+
 *Created: 2026-08-22, alongside the `whalescope_full_pipeline` release.*
+*Updated 2026-08-31: pipeline_decision_log + on-demand backtest (§12).*

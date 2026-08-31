@@ -21,6 +21,7 @@ import { registerSmartMoneyTools } from "./tools/smartMoney.js";
 import { registerFuturesGridRiskTool } from "./tools/futuresGridRisk.js";
 import { registerRiskTools } from "./tools/risk.js";
 import { registerFullPipelineTools } from "./tools/fullPipeline.js";
+import { registerPipelineDecisionBacktestTools } from "./tools/pipelineDecisionBacktest.js";
 import { registerNativeExtrasTools } from "./tools/nativeExtras.js";
 import { registerHyperliquidWhaleTools } from "./tools/hyperliquidWhale.js";
 import { registerCrossVenueDepthTools } from "./tools/crossVenueDepth.js";
@@ -64,6 +65,7 @@ export function createServer(): McpServer {
   registerFuturesGridRiskTool(server);
   registerRiskTools(server);
   registerFullPipelineTools(server);
+  registerPipelineDecisionBacktestTools(server);
   registerNativeExtrasTools(server);
   registerHyperliquidWhaleTools(server);
   registerCrossVenueDepthTools(server);
