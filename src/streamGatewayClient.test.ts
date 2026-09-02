@@ -113,6 +113,17 @@ describe("streamGatewayClient", () => {
     expect(r.ok).toBe(true);
   });
 
+  it("watchOrderBook includes wallMinNotionalUsd in the body when given, omits it otherwise", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ ok: true, watching: true, symbol: "BTCUSDT", wallMinNotionalUsd: 2_000_000 }));
+    await watchOrderBook("BTCUSDT", undefined, 2_000_000);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body as string)).toEqual({ symbol: "BTCUSDT", wallMinNotionalUsd: 2_000_000 });
+
+    fetchMock.mockClear();
+    fetchMock.mockResolvedValue(jsonResponse({ ok: true }));
+    await watchOrderBook("BTCUSDT");
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body as string)).toEqual({ symbol: "BTCUSDT" });
+  });
+
   it("watchOrderBook passes a non-2xx JSON body back as data (e.g. 429 max watches)", async () => {
     fetchMock.mockResolvedValue(jsonResponse({ ok: false, error: "batas 8 watch bersamaan tercapai" }, 429));
     const r = await watchOrderBook("BTCUSDT");

@@ -28,8 +28,14 @@ export const MAX_TTL_MS = 15 * 60_000;
 // (src/shared.ts). Each watch = 1 socket + 2 small Maps + an event ring.
 export const DEFAULT_MAX_WATCHES = 8;
 // Heuristik, BELUM dikalibrasi -- "a resting order worth >= this much USD
-// at one price level is a wall". Override via ctor.
+// at one price level is a wall". Fallback dipakai kalau watch() tidak diberi
+// threshold per-watch. Flat threshold di BTCUSDT (buku sangat dalam) nangkep
+// banyak level transient -> caller (MCP tool) sebaiknya kirim threshold
+// yang di-skala volume 24h. Lihat wallThresholdForVolume di realtimeStream.ts.
 export const DEFAULT_WALL_MIN_NOTIONAL_USD = 250_000;
+// Batas bawah yang dipaksakan buat threshold per-watch -- di bawah ini,
+// hampir semua pair likuid bikin event ring penuh dalam hitungan detik.
+export const MIN_WALL_NOTIONAL_USD = 25_000;
 export const EVENT_BUFFER_PER_SYMBOL = 500;
 export const DEFAULT_WARMUP_MS = 1_500;
 // Track levels down to 50% of the wall threshold so we can watch one grow
@@ -97,6 +103,7 @@ export function createDepthWatcher(opts = {}) {
 
   function applyLevels(w, side, levels, warming) {
     const book = side === "bid" ? w.bids : w.asks;
+    const wallMin = w.wallMinNotionalUsd;
     for (const entry of levels) {
       if (!Array.isArray(entry) || entry.length < 2) continue;
       const price = Number(entry[0]);
@@ -104,7 +111,7 @@ export function createDepthWatcher(opts = {}) {
       if (!Number.isFinite(price) || !Number.isFinite(qty) || price <= 0 || qty < 0) continue;
 
       const prevQty = book.get(price) ?? 0;
-      const t = classifyLevelTransition(prevQty, qty, price, wallMinNotionalUsd);
+      const t = classifyLevelTransition(prevQty, qty, price, wallMin);
       // Warmup: don't spam WALL_APPEARED for walls that were already resting
       // when we connected. GREW/SHRANK/VANISHED need a prior tracked state,
       // which can't exist yet, so this only suppresses the connect burst.
@@ -122,7 +129,7 @@ export function createDepthWatcher(opts = {}) {
         });
       }
 
-      if (qty * price >= wallMinNotionalUsd * TRACK_FLOOR_FRACTION) book.set(price, qty);
+      if (qty * price >= wallMin * TRACK_FLOOR_FRACTION) book.set(price, qty);
       else book.delete(price);
     }
   }
@@ -172,12 +179,22 @@ export function createDepthWatcher(opts = {}) {
     return Math.min(Math.max(n, MIN_TTL_MS), MAX_TTL_MS);
   }
 
+  function clampWallMin(v) {
+    const n = Number(v);
+    if (!Number.isFinite(n) || n <= 0) return wallMinNotionalUsd;
+    return Math.max(n, MIN_WALL_NOTIONAL_USD);
+  }
+
   return {
     /**
-     * Start OR renew a watch. Renewing just extends the TTL. Returns
-     * { ok:false, error } when the symbol is invalid or maxWatches is hit.
+     * Start OR renew a watch. Renewing just extends the TTL (threshold stays
+     * locked to the arming value — changing it mid-watch would make the
+     * coarse book inconsistent). Returns { ok:false, error } when the symbol
+     * is invalid or maxWatches is hit.
+     * @param {number} [wallMinNotionalUsd] per-watch wall threshold; falls
+     *   back to the ctor default. Clamped to >= MIN_WALL_NOTIONAL_USD.
      */
-    watch(symbol, ttlMs) {
+    watch(symbol, ttlMs, wallMinNotionalUsd) {
       const sym = String(symbol ?? "").toUpperCase();
       if (!/^[A-Z0-9]{5,20}$/.test(sym)) {
         return { ok: false, error: "symbol tidak valid (harus [A-Z0-9]{5,20})" };
@@ -186,7 +203,14 @@ export function createDepthWatcher(opts = {}) {
       const existing = watches.get(sym);
       if (existing) {
         existing.expiresAt = now() + ttl;
-        return { ok: true, watching: true, symbol: sym, expiresAt: existing.expiresAt, renewed: true };
+        return {
+          ok: true,
+          watching: true,
+          symbol: sym,
+          expiresAt: existing.expiresAt,
+          renewed: true,
+          wallMinNotionalUsd: existing.wallMinNotionalUsd,
+        };
       }
       if (watches.size >= maxWatches) {
         return {
@@ -199,6 +223,7 @@ export function createDepthWatcher(opts = {}) {
         expiresAt: now() + ttl,
         startedAt: now(),
         lastMessageAt: null,
+        wallMinNotionalUsd: clampWallMin(wallMinNotionalUsd),
         bids: new Map(),
         asks: new Map(),
         events: [],
@@ -214,7 +239,14 @@ export function createDepthWatcher(opts = {}) {
       watches.set(sym, w);
       w.ws.start();
       ensureSweep();
-      return { ok: true, watching: true, symbol: sym, expiresAt: w.expiresAt, renewed: false };
+      return {
+        ok: true,
+        watching: true,
+        symbol: sym,
+        expiresAt: w.expiresAt,
+        renewed: false,
+        wallMinNotionalUsd: w.wallMinNotionalUsd,
+      };
     },
 
     /**
@@ -241,7 +273,7 @@ export function createDepthWatcher(opts = {}) {
           trackedAskLevels: w.asks.size,
           wsOk: h.ok,
           lastMessageAgeMs: h.lastMessageAgeMs,
-          wallMinNotionalUsd,
+          wallMinNotionalUsd: w.wallMinNotionalUsd,
         },
       };
     },
@@ -254,6 +286,7 @@ export function createDepthWatcher(opts = {}) {
           symbol: sym,
           expiresAt: w.expiresAt,
           events: w.events.length,
+          wallMinNotionalUsd: w.wallMinNotionalUsd,
           wsOk: w.ws.getHealth().ok,
         })),
       };

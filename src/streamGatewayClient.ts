@@ -204,6 +204,9 @@ export interface WatchResult {
   symbol?: string;
   expiresAt?: number;
   renewed?: boolean;
+  /** Ambang wall efektif (USD) yang dipakai watch ini — locked ke nilai
+   *  saat arming, tidak berubah waktu renew. */
+  wallMinNotionalUsd?: number;
   error?: string;
   activeWatches?: string[];
 }
@@ -229,10 +232,19 @@ export interface DepthDiffResult {
   degradedReason: string | null;
 }
 
-/** Arm or renew a depth watch for `symbol`. TTL clamped gateway-side. */
-export async function watchOrderBook(symbol: string, ttlMs?: number): Promise<WatchResult> {
+/**
+ * Arm or renew a depth watch for `symbol`. TTL + wall threshold clamped
+ * gateway-side. `wallMinNotionalUsd` only applies on the FIRST arm — a
+ * renew keeps the original (gateway locks it).
+ */
+export async function watchOrderBook(
+  symbol: string,
+  ttlMs?: number,
+  wallMinNotionalUsd?: number,
+): Promise<WatchResult> {
   const body: Record<string, unknown> = { symbol: symbol.toUpperCase() };
   if (ttlMs != null) body.ttlMs = ttlMs;
+  if (wallMinNotionalUsd != null) body.wallMinNotionalUsd = wallMinNotionalUsd;
   return postJson<WatchResult>("/stream/watch", body);
 }
 

@@ -5,6 +5,7 @@ import {
   classifyLevelTransition,
   depthWsUrl,
   DEFAULT_WALL_MIN_NOTIONAL_USD,
+  MIN_WALL_NOTIONAL_USD,
 } from "./depthWatch.mjs";
 
 // ---- fakes (same shape as ws-client.test.mjs) ---------------------------
@@ -161,6 +162,34 @@ test("renewing a watch extends expiresAt without opening a second socket", () =>
   assert.equal(b.renewed, true);
   assert.equal(FakeWS.instances.length, 1);
   assert.ok(b.expiresAt > a.expiresAt);
+});
+
+test("per-watch wall threshold: used for classification + returned; renew keeps the arming value", () => {
+  const { dw, last, clock } = setup();
+  const armed = dw.watch("BTCUSDT", 60_000, 1_000_000);
+  assert.equal(armed.wallMinNotionalUsd, 1_000_000);
+  last().fire("open", {});
+  clock.advance(1_000);
+  // price 100 => $1M wall needs qty >= 10000. 8000 (=$800k) is below.
+  last().fire("message", { data: depthFrame({ b: [["100", "8000"]] }) });
+  assert.equal(dw.queryDepthDiff("BTCUSDT", 0).events.length, 0, "$800k not a wall at a $1M threshold");
+  last().fire("message", { data: depthFrame({ b: [["100", "12000"]] }) }); // $1.2M
+  const evs = dw.queryDepthDiff("BTCUSDT", 0).events;
+  assert.equal(evs.length, 1);
+  assert.equal(evs[0].type, "WALL_APPEARED");
+  assert.equal(dw.queryDepthDiff("BTCUSDT", 0).meta.wallMinNotionalUsd, 1_000_000);
+
+  // renew with a different threshold -> ignored, locked to 1M
+  const renewed = dw.watch("BTCUSDT", 60_000, 50_000);
+  assert.equal(renewed.renewed, true);
+  assert.equal(renewed.wallMinNotionalUsd, 1_000_000);
+});
+
+test("wall threshold falls back to the ctor default when not given, and clamps to MIN", () => {
+  const { dw } = setup({ wallMinNotionalUsd: 400_000 });
+  assert.equal(dw.watch("BTCUSDT").wallMinNotionalUsd, 400_000);
+  assert.equal(dw.watch("ETHUSDT", undefined, 1).wallMinNotionalUsd, MIN_WALL_NOTIONAL_USD);
+  assert.equal(dw.watch("SOLUSDT", undefined, 0).wallMinNotionalUsd, 400_000); // 0 -> default
 });
 
 test("maxWatches caps concurrent watches", () => {

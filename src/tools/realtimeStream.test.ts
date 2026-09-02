@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { registerRealtimeStreamTools } from "./realtimeStream.js";
+import { registerRealtimeStreamTools, wallThresholdForVolume } from "./realtimeStream.js";
 import * as gw from "../streamGatewayClient.js";
+import * as binanceProxy from "../binanceProxyClient.js";
 
 vi.mock("../streamGatewayClient.js", () => ({
   fetchLiquidations: vi.fn(),
@@ -18,6 +19,9 @@ vi.mock("../streamGatewayClient.js", () => ({
       this.name = "StreamGatewayError";
     }
   },
+}));
+vi.mock("../binanceProxyClient.js", () => ({
+  getTicker24hrNative: vi.fn(),
 }));
 
 type ToolResult = {
@@ -41,6 +45,27 @@ function mkLiqs(n: number) {
   }));
 }
 
+describe("wallThresholdForVolume", () => {
+  it("tiers by 24h quote volume, more permissive for thinner books", () => {
+    expect(wallThresholdForVolume(30_000_000_000)).toBe(2_000_000); // BTC
+    expect(wallThresholdForVolume(5_000_000_000)).toBe(2_000_000);
+    expect(wallThresholdForVolume(2_000_000_000)).toBe(800_000); // SOL
+    expect(wallThresholdForVolume(300_000_000)).toBe(350_000); // mid alt
+    expect(wallThresholdForVolume(50_000_000)).toBe(150_000);
+    expect(wallThresholdForVolume(5_000_000)).toBe(80_000); // micro
+  });
+  it("falls back to the old flat default for unknown/invalid volume", () => {
+    expect(wallThresholdForVolume(undefined)).toBe(250_000);
+    expect(wallThresholdForVolume(0)).toBe(250_000);
+    expect(wallThresholdForVolume(Number.NaN)).toBe(250_000);
+  });
+  it("is monotonic — a thinner pair never gets a higher threshold", () => {
+    const vols = [1e7, 5e7, 3e8, 2e9, 1e10];
+    const thr = vols.map(wallThresholdForVolume);
+    for (let i = 1; i < thr.length; i++) expect(thr[i]).toBeGreaterThanOrEqual(thr[i - 1]);
+  });
+});
+
 describe("realtime stream tools", () => {
   let handlers: Map<string, { handler: ToolHandler; inputSchema: Record<string, z.ZodTypeAny> }>;
 
@@ -58,7 +83,9 @@ describe("realtime stream tools", () => {
       symbol: "BTCUSDT",
       expiresAt: 1_700_000_300_000,
       renewed: false,
+      wallMinNotionalUsd: 2_000_000,
     });
+    vi.mocked(binanceProxy.getTicker24hrNative).mockResolvedValue({ quoteVolume: "30000000000" } as never);
     vi.mocked(gw.fetchDepthDiff).mockResolvedValue({
       watching: true,
       symbol: "BTCUSDT",
@@ -109,7 +136,8 @@ describe("realtime stream tools", () => {
   describe("binance_watch_orderbook_realtime", () => {
     it("arms/renews the watch then returns wall-lifecycle events", async () => {
       const r = await call("binance_watch_orderbook_realtime", { symbol: "BTCUSDT", ttlMs: 60000, sinceMs: 1 });
-      expect(gw.watchOrderBook).toHaveBeenCalledWith("BTCUSDT", 60000);
+      // 3rd arg = volume-scaled threshold ($30B -> $2M tier)
+      expect(gw.watchOrderBook).toHaveBeenCalledWith("BTCUSDT", 60000, 2_000_000);
       expect(gw.fetchDepthDiff).toHaveBeenCalledWith("BTCUSDT", 1);
       const sc = r.structuredContent!;
       expect(sc.armed).toBe(true);
@@ -119,6 +147,29 @@ describe("realtime stream tools", () => {
       expect((sc.counts as Record<string, number>).WALL_VANISHED).toBe(1);
       expect(sc.events).toBeUndefined();
       expect(Array.isArray(sc.recent)).toBe(true);
+    });
+
+    it("scales the wall threshold from 24h volume, and reports it", async () => {
+      vi.mocked(binanceProxy.getTicker24hrNative).mockResolvedValueOnce({ quoteVolume: "150000000" } as never); // $150M -> $150k tier
+      const r = await call("binance_watch_orderbook_realtime", { symbol: "ATOMUSDT" });
+      expect(gw.watchOrderBook).toHaveBeenCalledWith("ATOMUSDT", undefined, 150_000);
+      expect(r.structuredContent!.thresholdSource).toMatch(/volume-scaled/);
+      expect(r.content[0].text).toMatch(/Ambang wall/);
+    });
+
+    it("an explicit wall_min_notional_usd overrides the volume scaling", async () => {
+      const r = await call("binance_watch_orderbook_realtime", { symbol: "BTCUSDT", wall_min_notional_usd: 5_000_000 });
+      expect(binanceProxy.getTicker24hrNative).not.toHaveBeenCalled();
+      expect(gw.watchOrderBook).toHaveBeenCalledWith("BTCUSDT", undefined, 5_000_000);
+      expect(r.structuredContent!.thresholdSource).toBe("explicit");
+    });
+
+    it("a failed ticker fetch falls back to the gateway default (undefined passed)", async () => {
+      vi.mocked(binanceProxy.getTicker24hrNative).mockRejectedValueOnce(new Error("proxy down"));
+      const r = await call("binance_watch_orderbook_realtime", { symbol: "BTCUSDT" });
+      expect(gw.watchOrderBook).toHaveBeenCalledWith("BTCUSDT", undefined, undefined);
+      expect(r.structuredContent!.thresholdSource).toBe("gateway-default");
+      expect(r.isError).toBeUndefined();
     });
 
     it('detail:"full" includes the whole events array', async () => {

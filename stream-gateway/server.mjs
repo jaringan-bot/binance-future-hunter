@@ -52,7 +52,7 @@ export function route(method, pathname, query, headers, deps, body = null) {
     }
     if (!depthWatch) return { status: 503, json: { error: "depth watch not available on this gateway" } };
     const b = body && typeof body === "object" ? body : {};
-    const result = depthWatch.watch(b.symbol, b.ttlMs);
+    const result = depthWatch.watch(b.symbol, b.ttlMs, b.wallMinNotionalUsd);
     return { status: result.ok ? 200 : (result.error && /batas/.test(result.error) ? 429 : 400), json: result };
   }
 
