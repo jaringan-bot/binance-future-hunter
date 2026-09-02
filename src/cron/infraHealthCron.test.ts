@@ -10,11 +10,13 @@ import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import * as d1Client from "../d1Client.js";
 import * as kvConfig from "../kvConfig.js";
 import * as streamGateway from "../streamGatewayClient.js";
+import * as binanceProxy from "../binanceProxyClient.js";
 import * as telegram from "../telegram.js";
 import {
   checkStreamGatewayHealth,
   checkMarketSnapshotFreshness,
   checkD1Capacity,
+  checkRelayHealth,
   STREAM_GATEWAY_STALE_THRESHOLD_MS,
   MARKET_SNAPSHOT_STALE_THRESHOLD_MS,
   INFRA_NOTIFY_COOLDOWN_MS,
@@ -29,6 +31,7 @@ vi.mock("../d1Client.js", () => ({
 }));
 vi.mock("../kvConfig.js", () => ({ getJson: vi.fn(), putJson: vi.fn() }));
 vi.mock("../streamGatewayClient.js", () => ({ fetchStreamHealth: vi.fn() }));
+vi.mock("../binanceProxyClient.js", () => ({ getRelayEndpoints: vi.fn() }));
 vi.mock("../telegram.js", () => ({ sendTelegramAlert: vi.fn() }));
 
 const ENV = { TELEGRAM_BOT_TOKEN: "abc", TELEGRAM_CHAT_ID: "999" };
@@ -208,6 +211,110 @@ describe("checkD1Capacity", () => {
       "infra_d1_capacity_last_notified_at",
       { at: NOW },
       expect.objectContaining({ expirationTtl: expect.any(Number) }),
+    );
+  });
+});
+
+describe("checkRelayHealth", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  // fresh Response per call — a Response body stream can only be read once,
+  // and checkRelayHealth probes each relay with its own fetch.
+  const okBody = () => Promise.resolve(new Response(JSON.stringify({ ok: true, service: "x" }), { status: 200 }));
+
+  it("does nothing when no relay is configured", async () => {
+    vi.mocked(binanceProxy.getRelayEndpoints).mockReturnValue([]);
+    await checkRelayHealth(ENV, NOW);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(telegram.sendTelegramAlert).not.toHaveBeenCalled();
+  });
+
+  it("stays silent when every configured relay's /health returns {ok:true}", async () => {
+    vi.mocked(binanceProxy.getRelayEndpoints).mockReturnValue([
+      { label: "primary", url: "https://a.example" },
+      { label: "secondary", url: "https://b.example" },
+    ]);
+    fetchMock.mockImplementation(() => okBody());
+    await checkRelayHealth(ENV, NOW);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[0][0])).toBe("https://a.example/health");
+    expect(telegram.sendTelegramAlert).not.toHaveBeenCalled();
+  });
+
+  it("alerts and names the down relay, noting failover still holds when another is up", async () => {
+    vi.mocked(binanceProxy.getRelayEndpoints).mockReturnValue([
+      { label: "primary", url: "https://a.example" },
+      { label: "secondary", url: "https://b.example" },
+    ]);
+    fetchMock.mockImplementation((u: string) =>
+      String(u).includes("b.example") ? Promise.resolve(new Response("nope", { status: 502 })) : okBody(),
+    );
+    vi.mocked(kvConfig.getJson).mockResolvedValue(null);
+
+    await checkRelayHealth(ENV, NOW);
+
+    const msg = vi.mocked(telegram.sendTelegramAlert).mock.calls[0][1] as string;
+    expect(msg).toContain("REST Relay");
+    expect(msg).toContain("secondary (HTTP 502)");
+    expect(msg).toMatch(/1 relay lain masih jalan|weight Binance per-IP/i);
+  });
+
+  it("uses the 'total outage' wording when every relay is down", async () => {
+    vi.mocked(binanceProxy.getRelayEndpoints).mockReturnValue([
+      { label: "primary", url: "https://a.example" },
+      { label: "secondary", url: "https://b.example" },
+    ]);
+    fetchMock.mockRejectedValue(new Error("ECONNREFUSED"));
+    vi.mocked(kvConfig.getJson).mockResolvedValue(null);
+
+    await checkRelayHealth(ENV, NOW);
+
+    const msg = vi.mocked(telegram.sendTelegramAlert).mock.calls[0][1] as string;
+    expect(msg).toMatch(/SEMUA relay down/i);
+    expect(msg).toContain("primary (ECONNREFUSED)");
+  });
+
+  it("treats a 200 with a non-{ok:true} body as down", async () => {
+    vi.mocked(binanceProxy.getRelayEndpoints).mockReturnValue([{ label: "primary", url: "https://a.example" }]);
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ status: "degraded" }), { status: 200 }));
+    vi.mocked(kvConfig.getJson).mockResolvedValue(null);
+
+    await checkRelayHealth(ENV, NOW);
+
+    expect((vi.mocked(telegram.sendTelegramAlert).mock.calls[0][1] as string)).toContain("body bukan {ok:true}");
+  });
+
+  it("does not re-alert within the cooldown window", async () => {
+    vi.mocked(binanceProxy.getRelayEndpoints).mockReturnValue([{ label: "primary", url: "https://a.example" }]);
+    fetchMock.mockResolvedValue(new Response("x", { status: 503 }));
+    vi.mocked(kvConfig.getJson).mockResolvedValue({ at: NOW - (INFRA_NOTIFY_COOLDOWN_MS - 60_000) });
+
+    await checkRelayHealth(ENV, NOW);
+
+    expect(telegram.sendTelegramAlert).not.toHaveBeenCalled();
+  });
+
+  it("records a KV notice after alerting", async () => {
+    vi.mocked(binanceProxy.getRelayEndpoints).mockReturnValue([{ label: "primary", url: "https://a.example" }]);
+    fetchMock.mockResolvedValue(new Response("x", { status: 503 }));
+    vi.mocked(kvConfig.getJson).mockResolvedValue(null);
+
+    await checkRelayHealth(ENV, NOW);
+
+    expect(kvConfig.putJson).toHaveBeenCalledWith(
+      "infra_relay_health_last_notified_at",
+      { at: NOW },
+      { expirationTtl: 24 * 60 * 60 },
     );
   });
 });
