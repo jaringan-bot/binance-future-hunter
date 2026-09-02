@@ -47,6 +47,11 @@ interface Env {
   // di-skip + di-log (lihat src/telegram.ts), TIDAK menggagalkan cron.
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_CHAT_ID?: string;
+  // OPSIONAL -- channel notifikasi tambahan (src/notify.ts). Kosong =
+  // channel itu di-skip, Telegram tetap default. DISCORD_WEBHOOK_URL:
+  // webhook Discord. NOTIFY_WEBHOOK_URL: endpoint generic (POST JSON {text}).
+  DISCORD_WEBHOOK_URL?: string;
+  NOTIFY_WEBHOOK_URL?: string;
 }
 
 const REQUEST_LOG_RETENTION_MS = 30 * 24 * 3600 * 1000; // 30 hari
@@ -319,7 +324,12 @@ export default {
 
     if (event.cron === ENTRY_ALERT_CRON) {
       ctx.waitUntil(
-        runEntryAlertCheck({ TELEGRAM_BOT_TOKEN: env.TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID: env.TELEGRAM_CHAT_ID }),
+        runEntryAlertCheck({
+          TELEGRAM_BOT_TOKEN: env.TELEGRAM_BOT_TOKEN,
+          TELEGRAM_CHAT_ID: env.TELEGRAM_CHAT_ID,
+          DISCORD_WEBHOOK_URL: env.DISCORD_WEBHOOK_URL,
+          NOTIFY_WEBHOOK_URL: env.NOTIFY_WEBHOOK_URL,
+        }),
       );
       // Prune entry_alert_run_log di sini (bukan cron ke-6 sendiri) -- retensi
       // 2 hari gak butuh presisi tiap tick, sama alasan seperti prune lain.
@@ -342,7 +352,12 @@ export default {
     }
 
     if (event.cron === HEARTBEAT_CRON) {
-      const telegramEnv = { TELEGRAM_BOT_TOKEN: env.TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID: env.TELEGRAM_CHAT_ID };
+      const telegramEnv = {
+        TELEGRAM_BOT_TOKEN: env.TELEGRAM_BOT_TOKEN,
+        TELEGRAM_CHAT_ID: env.TELEGRAM_CHAT_ID,
+        DISCORD_WEBHOOK_URL: env.DISCORD_WEBHOOK_URL,
+        NOTIFY_WEBHOOK_URL: env.NOTIFY_WEBHOOK_URL,
+      };
       ctx.waitUntil(checkHeartbeat(telegramEnv));
       // D1 capacity check di sini (3x/hari, bukan tiap */5) -- COUNT(*) di
       // tabel jutaan baris gak murah, dan runway dari alert ke "harus prune"
@@ -397,6 +412,8 @@ export default {
     const defaultTickTelegramEnv = {
       TELEGRAM_BOT_TOKEN: env.TELEGRAM_BOT_TOKEN,
       TELEGRAM_CHAT_ID: env.TELEGRAM_CHAT_ID,
+      DISCORD_WEBHOOK_URL: env.DISCORD_WEBHOOK_URL,
+      NOTIFY_WEBHOOK_URL: env.NOTIFY_WEBHOOK_URL,
     };
     ctx.waitUntil(
       checkEntryAlertCronFreshness(defaultTickTelegramEnv).catch((err) =>
