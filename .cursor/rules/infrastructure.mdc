@@ -1,0 +1,37 @@
+---
+description: Deploy Worker, D1 remote, Vercel proxy, VPS systemd — Cursor only
+globs: wrangler.toml,proxy-standalone/**,stream-gateway/**,.cursor/environment.json
+alwaysApply: false
+---
+
+# Infrastructure — Krakatau only (minta acc user dulu)
+
+> Cursor default = **Rinjani** (koding). File ini = guardrail **Krakatau**.
+> Jangan jalankan perintah di bawah tanpa user bilang "acc" eksplisit.
+
+## Cloudflare Worker
+
+- Worker: `binance-future-hunter`
+- D1/KV di `wrangler.toml` bisa nunjuk resource lama (rebrand continuity) — tanya user sebelum `d1 create` / ganti `database_id`
+- Urutan: `typecheck`+`test` hijau → `d1 migrations apply … --remote` → `wrangler deploy`
+- Verify: `GET /` → `"name":"binance-future-hunter"`; tool via `POST /mcp`
+
+## Bukan Docker
+
+- VPS Oracle: systemd units (`whale-binance-proxy`, `whale-stream-gateway`) + Caddy
+- `stream-gateway/install.sh` idempotent; Node 22+ (`node:sqlite`)
+- WS process terpisah dari REST relay — bug WS tidak boleh matikan relay
+
+## proxy-standalone
+
+- Vercel relay REST; secrets Worker: `PROXY_URL`, `PROXY_SECRET`
+- Jangan taruh logic pipeline di sini
+
+## Monitoring gap (Stage 4, belum ada)
+
+- Uptime eksternal: worker `/` + VPS `/health`
+- CF notification rule error-rate/CPU — observability on, alert rule belum
+
+## Drift migration
+
+Kalau `migrations apply` gagal "table already exists": cek `d1_migrations` vs `sqlite_master`, backfill record tanpa re-run DDL.

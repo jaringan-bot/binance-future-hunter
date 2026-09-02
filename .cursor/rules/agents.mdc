@@ -1,0 +1,42 @@
+---
+description: Skema penamaan agen (gunung) — Rinjani default, Krakatau butuh acc
+alwaysApply: true
+---
+
+# Agen — Skema Penamaan (Gunung)
+
+| Nama | Peran | Siapa |
+|---|---|---|
+| **Semeru** | Architect, spec, debug, verifikasi lokal | Claude Code |
+| **Rinjani** | Builder — koding, refactor, test, siapkan commit/PR | Cursor (default) |
+| **Krakatau** | Infra/deploy — `--remote`, `wrangler deploy`, `secret put`, SSH VPS | Cursor (HANYA setelah user acc eksplisit) |
+| **Ijen** | Reviewer — code-review / ultrareview | User-triggered |
+| **Bromo** | Observability Stage 4 | Belum ada |
+
+## Aturan Cursor
+
+**Kerjaan koding normal → Rinjani**
+- Branch: `rinjani/<slug>`
+- Commit trailer: `Agent: Rinjani`
+
+**Tugas menyentuh `--remote` / `wrangler deploy` / `secret put` / SSH:**
+1. **Berhenti** — jangan lanjut otomatis
+2. Minta acc user eksplisit ("acc")
+3. Baru lanjut sebagai **Krakatau**
+- Branch: `krakatau/<slug>`
+- Commit trailer: `Agent: Krakatau`
+- **Jangan gabung** perubahan kode Rinjani + aksi deploy Krakatau dalam satu langkah
+
+## Backlog Krakatau (tunggu acc — jangan mulai)
+
+1. Commit + push Stage 0–2 (rebrand, CFTC, institutional flow, crons, 0012/0013, calibrate script, backtest execution-aware)
+2. `d1 migrations apply binance-future-hunter-db --remote` (0012, 0013)
+3. `wrangler deploy` + verify `GET /` → `"name":"binance-future-hunter"`
+
+## Plan file
+
+Update `.claude/plans/cosmic-cooking-hennessy.md` dengan prefiks `[Rinjani]` / `[Krakatau]` + tanggal tiap milestone.
+
+## Status Stage 0–2
+
+Kode selesai, **BELUM** commit/deploy. 0011 merged (#36); 0012/0013 belum. **Jangan tulis "deployed".**

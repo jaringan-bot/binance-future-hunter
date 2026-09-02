@@ -1,0 +1,31 @@
+---
+description: Registrasi MCP tool, naming whalescope_*, catalog
+globs: src/tools/**/*.ts,src/toolWrapper.ts,src/responseBuilder.ts
+alwaysApply: false
+---
+
+# MCP Tool Conventions
+
+## Registrasi
+
+1. `registerSafeTool` di file tool
+2. Panggil `register*Tools(server)` dari **`src/server.ts`** (bukan `index.ts` — itu cuma entry `fetch`/`scheduled`)
+3. Tambah metadata editorial di `src/tools/catalog.ts` (`CATALOG_METADATA`)
+
+## Naming
+
+- **`whalescope_*` — JANGAN rename** (connector Claude sudah terdaftar)
+- Tool baru prefer prefix `binance_*` atau `cme_*` sesuai domain
+- Composite tool: deskripsi jelas komponen mana yang bisa "tidak tersedia"
+
+## Handler
+
+- Input: Zod schema di `inputSchema`
+- Output: `ToolResponseBuilder` + `structuredContent` untuk data machine-readable
+- Error: `errorResult(err)` — jangan throw ke MCP layer
+- `readOnlyHint: true` untuk tool yang tidak mutate state
+
+## Pure logic
+
+Ekstrak scoring/aggregation ke modul di `src/` (bukan di handler), contoh:
+`institutionalFlow.ts`, `cftcClient.ts`, `gridBoundEngine.ts`
