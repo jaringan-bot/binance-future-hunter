@@ -4,9 +4,27 @@ import { registerSafeTool } from "../toolWrapper.js";
 import { symbolSchema, errorResult, detailParam } from "../shared.js";
 import { fmtNum, fmtPrice, fmtTime } from "../format.js";
 import * as gw from "../streamGatewayClient.js";
+import * as binanceProxy from "../binanceProxyClient.js";
 
 const RECENT_LIMIT = 15;
 const DEPTH_EVENT_LIMIT = 40;
+
+// Ambang "wall" di-skala volume 24h (heuristik, BELUM dikalibrasi ke data).
+// Threshold flat bikin BTCUSDT (buku ~$30B/hari) nangkep ratusan level
+// transient dalam hitungan detik — verified live 2026-09-02 (245 APPEARED /
+// 233 VANISHED @ $250k dalam ~5s). Pair kecil butuh threshold jauh lebih
+// rendah. Tier by quote volume 24h (USDT), sama pola
+// estimateMaintenanceMarginBufferPct di gridRiskEngine.ts.
+export function wallThresholdForVolume(quoteVolume24hUsd: number | undefined): number {
+  if (quoteVolume24hUsd === undefined || !Number.isFinite(quoteVolume24hUsd) || quoteVolume24hUsd <= 0) {
+    return 250_000; // fallback = default lama
+  }
+  if (quoteVolume24hUsd >= 5_000_000_000) return 2_000_000; // BTC/ETH
+  if (quoteVolume24hUsd >= 1_000_000_000) return 800_000; // SOL / top alts
+  if (quoteVolume24hUsd >= 200_000_000) return 350_000; // mid alts
+  if (quoteVolume24hUsd >= 20_000_000) return 150_000;
+  return 80_000; // micro caps
+}
 
 // Binance throttles !forceOrder@arr to at most one event per symbol per
 // second — this feed is a SAMPLE of liquidations, not every one. Said in
@@ -173,8 +191,10 @@ export function registerRealtimeStreamTools(server: McpServer): void {
         "`sinceMs` = ts event terakhir untuk lihat perubahan baru. Watch auto-mati setelah `ttlMs` (default 5 menit) " +
         "tanpa perpanjangan. BUKAN L2 book penuh: cuma level di atas ambang notional yang dilacak (hemat memori VPS " +
         "1GB, ada batas jumlah watch bersamaan). Wall pre-existing bisa muncul sebagai 1 WALL_APPEARED saat konek " +
-        "(warmup ~1.5s menekan sebagian besar). Ambang wall heuristik, BELUM dikalibrasi. Kalau gateway belum " +
-        "di-upgrade / watch penuh / stream putus: balik `degraded: true` + alasan, bukan diam-diam kosong.",
+        "(warmup ~1.5s menekan sebagian besar). Ambang wall default DI-SKALA volume 24h symbol (BTC ~$2M, mid alt " +
+        "~$350k, micro ~$80k — heuristik, BELUM dikalibrasi); override lewat `wall_min_notional_usd`. Ambang LOCKED " +
+        "ke nilai saat arming — panggilan renew tidak mengubahnya. Kalau gateway belum di-upgrade / watch penuh / " +
+        "stream putus: balik `degraded: true` + alasan, bukan diam-diam kosong.",
       inputSchema: {
         symbol: symbolSchema,
         ttlMs: z
@@ -190,14 +210,40 @@ export function registerRealtimeStreamTools(server: McpServer): void {
           .nonnegative()
           .optional()
           .describe("Hanya event dengan ts > nilai ini. Pakai ts event terakhir dari panggilan sebelumnya."),
+        wall_min_notional_usd: z
+          .number()
+          .positive()
+          .optional()
+          .describe(
+            "Override ambang wall (USD notional per level). Kosong = di-skala otomatis dari volume 24h symbol. " +
+              "Cuma dipakai saat watch PERTAMA di-arm; renew abaikan.",
+          ),
         detail: detailParam,
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ symbol, ttlMs, sinceMs, detail }) => {
+    async ({ symbol, ttlMs, sinceMs, wall_min_notional_usd, detail }) => {
       const header = `# Watch Order Book Real-Time — ${symbol}`;
       try {
-        const armed = await gw.watchOrderBook(symbol, ttlMs);
+        // Resolve the wall threshold: explicit override > volume-scaled >
+        // gateway default. The gateway locks it to the arming value, so a
+        // renew ignores whatever we pass — that's fine.
+        let wallMin: number | undefined = wall_min_notional_usd;
+        let thresholdSource = wall_min_notional_usd != null ? "explicit" : "gateway-default";
+        if (wallMin == null) {
+          try {
+            const t = await binanceProxy.getTicker24hrNative(symbol);
+            const qv = parseFloat(t.quoteVolume);
+            if (Number.isFinite(qv) && qv > 0) {
+              wallMin = wallThresholdForVolume(qv);
+              thresholdSource = `volume-scaled (24h ~$${fmtNum(qv, 0)})`;
+            }
+          } catch {
+            // ticker fetch failed — let the gateway use its own default
+          }
+        }
+
+        const armed = await gw.watchOrderBook(symbol, ttlMs, wallMin);
         if (!armed || !armed.ok) {
           const reason = armed?.error ?? "gateway tidak balikin respons yang valid (relay tidak bisa dihubungi?)";
           return {
@@ -227,9 +273,18 @@ export function registerRealtimeStreamTools(server: McpServer): void {
         const askEvents = evs.filter((e) => e.side === "ask").length;
         const latestTs = evs.length ? evs[evs.length - 1].ts : (sinceMs ?? 0);
 
+        const effectiveWallMin =
+          armed.wallMinNotionalUsd ??
+          (typeof diff.meta?.wallMinNotionalUsd === "number" ? diff.meta.wallMinNotionalUsd : undefined);
         const lines = [header, ""];
-        if (armed.renewed) lines.push(`Watch diperpanjang — kedaluwarsa ~${fmtTime(armed.expiresAt ?? 0)}.`);
-        else lines.push(`Watch BARU diaktifkan — kedaluwarsa ~${fmtTime(armed.expiresAt ?? 0)}. Panggil lagi beberapa detik lagi dengan sinceMs=${latestTs} untuk lihat perubahan.`);
+        if (armed.renewed) {
+          lines.push(`Watch diperpanjang — kedaluwarsa ~${fmtTime(armed.expiresAt ?? 0)}. Ambang wall (locked): $${fmtNum(effectiveWallMin ?? 0, 0)}.`);
+        } else {
+          lines.push(
+            `Watch BARU diaktifkan — kedaluwarsa ~${fmtTime(armed.expiresAt ?? 0)}. Ambang wall: $${fmtNum(effectiveWallMin ?? 0, 0)} (${thresholdSource}).`,
+            `Panggil lagi beberapa detik lagi dengan sinceMs=${latestTs} untuk lihat perubahan.`,
+          );
+        }
         lines.push("");
         if (diff.degraded) {
           lines.push(`⚠️ **STREAM DEGRADED**: ${diff.degradedReason}. Data di bawah mungkin belum lengkap.`, "");
@@ -261,6 +316,8 @@ export function registerRealtimeStreamTools(server: McpServer): void {
             armed: true,
             renewed: armed.renewed ?? false,
             expiresAt: armed.expiresAt ?? null,
+            wallMinNotionalUsd: effectiveWallMin ?? null,
+            thresholdSource,
             degraded: diff.degraded,
             degradedReason: diff.degradedReason,
             eventCount: evs.length,

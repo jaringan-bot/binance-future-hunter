@@ -24,11 +24,11 @@ const HEALTH = {
 
 function fakeDepthWatch(over = {}) {
   return {
-    watch: (symbol, ttlMs) =>
+    watch: (symbol, ttlMs, wallMinNotionalUsd) =>
       symbol === "FULLUSDT"
         ? { ok: false, error: "batas 2 watch bersamaan tercapai (VPS 1GB)", activeWatches: ["BTCUSDT", "ETHUSDT"] }
         : symbol
-          ? { ok: true, watching: true, symbol: String(symbol).toUpperCase(), expiresAt: 9000, renewed: false }
+          ? { ok: true, watching: true, symbol: String(symbol).toUpperCase(), expiresAt: 9000, renewed: false, wallMinNotionalUsd: wallMinNotionalUsd ?? 250_000 }
           : { ok: false, error: "symbol tidak valid (harus [A-Z0-9]{5,20})" },
     queryDepthDiff: (symbol, sinceMs) =>
       symbol === "BTCUSDT"
@@ -105,6 +105,12 @@ test("POST /stream/watch arms a watch and returns its expiry", () => {
   assert.equal(r.json.ok, true);
   assert.equal(r.json.symbol, "BTCUSDT");
   assert.equal(r.json.expiresAt, 9000);
+});
+
+test("POST /stream/watch forwards wallMinNotionalUsd from the body", () => {
+  const r = route("POST", "/stream/watch", {}, { "x-proxy-secret": SECRET }, deps(), { symbol: "BTCUSDT", wallMinNotionalUsd: 2_000_000 });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.wallMinNotionalUsd, 2_000_000);
 });
 
 test("POST /stream/watch: an invalid symbol is 400", () => {

@@ -138,14 +138,25 @@ bound memory on a 1GB VPS), and emits wall-lifecycle events:
 
 | Event | Meaning |
 |---|---|
-| `WALL_APPEARED` | A level crosses the wall notional threshold (default $250k, heuristic — NOT calibrated) |
+| `WALL_APPEARED` | A level crosses the wall notional threshold |
 | `WALL_GREW` / `WALL_SHRANK` | An existing wall changes qty ≥40% (still above threshold) |
 | `WALL_VANISHED` | A wall drops below the threshold / qty 0 |
 
+- **Wall threshold scales with 24h quote volume** (`wallThresholdForVolume`,
+  `src/tools/realtimeStream.ts`) — heuristic, NOT calibrated: BTC/ETH
+  (≥$5B/day) → $2M · SOL/top alt (≥$1B) → $800k · mid alt (≥$200M) → $350k ·
+  (≥$20M) → $150k · else → $80k. The old flat $250k caught hundreds of
+  transient levels on BTCUSDT (~$30B book) within seconds (verified live
+  2026-09-02: 245 APPEARED / 233 VANISHED @ $250k in ~5s). Manual override:
+  the `wall_min_notional_usd` param. The threshold is **locked** to the
+  arming value (a renew won't change it — otherwise the coarse book goes
+  inconsistent).
 - **TTL-bounded** (default 5 min, max 15): with no renewal the watch dies,
   the socket closes, the slot frees.
 - **Concurrent-watch cap** (default 8, `STREAM_DEPTH_MAX_WATCHES`) — same
-  class of constraint that cut `WALL_SCAN_WATCHLIST` 50→15.
+  class of constraint that cut `WALL_SCAN_WATCHLIST` 50→15. Per-symbol event
+  ring `EVENT_BUFFER_PER_SYMBOL=500`: on very liquid pairs the ring fills
+  fast, so poll often (`sinceMs`) if you need the full history.
 - **NOT a full L2 book** — a wall that never ticks won't show; a pre-existing
   wall may register one `WALL_APPEARED` on connect (a ~1.5s warmup
   suppresses most). This is a *lifecycle* feed, not a depth snapshot.

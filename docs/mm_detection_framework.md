@@ -139,14 +139,25 @@ maintain book KASAR (cuma level di atas ambang notional — hemat memori VPS
 
 | Event | Arti |
 |---|---|
-| `WALL_APPEARED` | Level baru menembus ambang wall notional (default $250k, heuristik BELUM dikalibrasi) |
+| `WALL_APPEARED` | Level baru menembus ambang wall notional |
 | `WALL_GREW` / `WALL_SHRANK` | Wall existing berubah qty ≥40% (masih di atas ambang) |
 | `WALL_VANISHED` | Wall drop di bawah ambang / qty 0 |
 
+- **Ambang wall di-skala volume 24h** (`wallThresholdForVolume`,
+  `src/tools/realtimeStream.ts`) — heuristik, BELUM dikalibrasi:
+  BTC/ETH (≥$5B/hari) → $2M · SOL/top alt (≥$1B) → $800k · mid alt (≥$200M)
+  → $350k · (≥$20M) → $150k · sisanya → $80k. Threshold flat lama ($250k)
+  di BTCUSDT (buku ~$30B) nangkep ratusan level transient dalam hitungan
+  detik (verified live 2026-09-02: 245 APPEARED / 233 VANISHED @ $250k
+  dalam ~5s). Override manual: param `wall_min_notional_usd`. Ambang
+  **locked** ke nilai saat arming (renew tidak mengubahnya — kalau tidak,
+  book kasar jadi inkonsisten).
 - **TTL-bounded** (default 5 menit, maks 15): watch auto-mati tanpa
   perpanjangan → socket ditutup, slot dibebaskan.
 - **Batas watch bersamaan** (default 8, `STREAM_DEPTH_MAX_WATCHES`) — sama
-  kelas constraint yang motong `WALL_SCAN_WATCHLIST` 50→15.
+  kelas constraint yang motong `WALL_SCAN_WATCHLIST` 50→15. Event ring
+  `EVENT_BUFFER_PER_SYMBOL=500` per symbol: di pair sangat likuid ring
+  penuh cepat, jadi poll sering (`sinceMs`) kalau butuh histori lengkap.
 - **BUKAN L2 book penuh** — wall yang tidak pernah tick tidak akan muncul;
   wall pre-existing bisa register 1 `WALL_APPEARED` saat konek (warmup ~1.5s
   menekan sebagian besar). Ini feed *lifecycle*, bukan snapshot depth.
