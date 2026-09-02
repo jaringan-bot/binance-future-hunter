@@ -15,8 +15,8 @@ Stage 4 rencana: generalisasi ke `notify.ts` (belum ada).
 | Worker + cron + MCP | `src/`, `wrangler.toml` | `npx wrangler deploy` (manual, by design) |
 | D1 time-series | `migrations/`, binding `DB` | `wrangler d1 migrations apply … --remote` |
 | KV config | binding `CONFIG_KV` | jarang write |
-| Binance REST relay | `proxy-standalone/` | Vercel + systemd di Oracle VPS |
-| WS liquidations | `stream-gateway/` | systemd `whale-stream-gateway` + Caddy |
+| Binance REST relay | `proxy-standalone/` | AWS VPS systemd (`svm-vps`, 13.212.7.132) |
+| WS liquidations | `stream-gateway/` | AWS VPS — `whale-stream-gateway` + Caddy |
 
 **Tidak ada:** Docker, docker-compose, Nginx, GitHub Actions → VPS, Telegraf/webhook bot.
 

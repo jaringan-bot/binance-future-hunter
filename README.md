@@ -24,7 +24,7 @@ generate `id`/`database_id` baru buat akun kamu, gak perlu bikin manual).
 **Bukan zero-touch sepenuhnya** — biar jujur soal apa yang masih manual:
 setelah klik, kamu TETAP perlu set secret (Cloudflare gak bisa nebak value
 dari layanan eksternal) — lihat `.dev.vars.example` di repo ini buat daftar
-lengkap, atau [Setup Proxy Vercel](#setup-proxy-vercel-wajib-sekali-saja)
+lengkap, atau [Setup Proxy Relay](#setup-proxy-relay-wajib-sekali-saja)
 di bawah. `PROXY_URL`/`PROXY_SECRET` WAJIB (semua 46 tool butuh).
 
 ## Tujuan
@@ -62,9 +62,10 @@ dalam percakapan dengan Claude, tanpa perlu buka dashboard exchange terpisah.
   akun Binance/data pihak luar sama sekali.
 - Transparan soal keterbatasan tiap tool (lihat bagian di bawah), bukan
   dibungkus seolah semua data sempurna.
-- Infrastruktur cukup dengan free tier (Cloudflare Workers + Vercel Hobby)
-  untuk pemakaian personal — 100% Binance-native, tidak ada dependensi
-  agregator pihak ketiga lagi.
+- Infrastruktur cukup dengan free tier (Cloudflare Workers + host relay
+  gratis seperti Fly.io / Deno Deploy, atau VPS ~$5/bln) untuk pemakaian
+  personal — 100% Binance-native, tidak ada dependensi agregator pihak
+  ketiga lagi.
 
 ## Kekurangan
 
@@ -75,33 +76,36 @@ dalam percakapan dengan Claude, tanpa perlu buka dashboard exchange terpisah.
   harga / order book.
 - **Liquidation: SAMPLED, bukan lengkap.** Sejak 2026-08-28 ada
   `binance_get_realtime_liquidations` — WebSocket `!forceOrder@arr`
-  (`dstream.binance.com`) di-buffer always-on di VPS Oracle Singapore
-  (`stream-gateway/`, di luar Cloudflare — worker Cloudflare sendiri masih
-  di-WAF-block dari Binance). Binance men-throttle stream ini maks 1
+  (`dstream.binance.com`) di-buffer always-on di **VPS AWS Singapore**
+  (`svm-vps`, `13.212.7.132` — `stream-gateway/`, di luar Cloudflare).
+  Catatan IP: `fstream.binance.com` di-black-hole dari IP Oracle lama
+  (146.235.17.228); produksi pindah AWS 2026-09-02. Binance men-throttle stream ini maks 1
   event/symbol/detik, jadi ini SAMPEL likuidasi, bukan tiap satu. Tetap cukup
   buat konfirmasi cluster stop-hunt di `binance_detect_mm_activity` (proxy
   ke-3, price-anchored & sisi-hunt). Tidak ada histori liquidation jauh ke
   belakang (buffer 24 jam).
-- **Setup awal butuh proxy Vercel** (wajib) — bukan pasang-langsung-jalan,
-  ada langkah konfigurasi manual sekali di awal.
+- **Setup awal butuh proxy relay** (wajib, `proxy-standalone/`) — bukan
+  pasang-langsung-jalan, ada langkah konfigurasi manual sekali di awal.
 - Tidak ada data wallet on-chain atau data dari exchange selain Binance
   Futures USDS-M.
 
 **Sumber data: satu jalur, 100% Binance native.**
 
-- **Binance native, lewat proxy relay Vercel.** Domain Binance
+- **Binance native, lewat proxy relay.** Domain Binance
   (`fapi.binance.com`) memblokir traffic dari Cloudflare Workers di level WAF
   (403, company-wide — sudah dites langsung dari worker ini, bukan asumsi).
-  Vercel pakai IP pool berbeda, jadi tidak kena block yang sama. Worker
-  Cloudflare relay lewat proxy kecil di `proxy/` (project Vercel terpisah,
-  lihat `proxy/README.md`). Ini jalur untuk funding rate (current & histori),
-  klines/OHLCV, bias multi-timeframe, realized volatility, statistik 24 jam,
-  order book depth, aggregate trades, open interest (current & histori),
-  long/short ratio (blended & top-trader), taker buy/sell volume ratio, dan
-  harga spot (proxy juga relay ke Binance Spot API `api.binance.com` lewat
-  parameter `market=spot`, lihat `proxy/README.md`).
+  Host relay (VPS/Fly.io/Deno di region Singapore/Tokyo) pakai IP yang tidak
+  kena block itu. Worker Cloudflare relay lewat proxy kecil di
+  `proxy-standalone/` (`handler.mjs`, lihat
+  [`proxy-standalone/README.md`](proxy-standalone/README.md); relay awal di
+  `proxy/` berbasis Vercel sudah retired). Ini jalur untuk funding rate
+  (current & histori), klines/OHLCV, bias multi-timeframe, realized
+  volatility, statistik 24 jam, order book depth, aggregate trades, open
+  interest (current & histori), long/short ratio (blended & top-trader),
+  taker buy/sell volume ratio, dan harga spot (proxy juga relay ke Binance
+  Spot API `api.binance.com` lewat parameter `market=spot`).
 
-Konsekuensinya, worker ini butuh `PROXY_URL`/`PROXY_SECRET` (proxy Vercel,
+Konsekuensinya, worker ini butuh `PROXY_URL`/`PROXY_SECRET` (proxy relay,
 wajib buat semua 46 tool) — lihat bagian Setup di bawah.
 
 **Caching & state, tanpa kredensial tambahan.** Response upstream (funding
@@ -301,8 +305,9 @@ Detail penuh (termasuk raw data test per klaim): Section 10,
 - Tidak ada data wallet on-chain.
 - **Liquidation cuma near-real-time + SAMPLED, tidak ada histori panjang.**
   `binance_get_realtime_liquidations` baca buffer 24 jam dari stream gateway
-  VPS (`!forceOrder@arr` via `dstream.binance.com` — `fstream.binance.com`
-  di-black-hole dari IP VPS). Binance throttle 1 event/symbol/detik → sampel,
+  VPS AWS (`!forceOrder@arr` via `dstream.binance.com` — `fstream.binance.com`
+  di-black-hole dari IP Oracle lama; produksi = AWS ap-southeast-1).
+  Binance throttle 1 event/symbol/detik → sampel,
   bukan lengkap. Tidak ada REST publik market-wide buat backfill historis.
   Worker Cloudflare sendiri masih tidak bisa WS langsung ke Binance (WAF).
 - **`binance_detect_mm_activity`: spoofing sekarang 2-snapshot RIIL**
@@ -376,22 +381,33 @@ Detail penuh (termasuk raw data test per klaim): Section 10,
   mengukur margin di atas threshold, BUKAN probabilitas statistik
   terkalibrasi.
 
-## Setup Proxy Vercel (wajib, sekali saja)
+## Setup Proxy Relay (wajib, sekali saja)
 
-Tool berlabel "Binance native" di tabel atas butuh proxy relay di Vercel,
-karena worker Cloudflare diblokir langsung oleh WAF Binance. Detail deploy
-proxy ada di `proxy/README.md` — ringkasnya:
+Tool berlabel "Binance native" di tabel atas butuh proxy relay, karena
+worker Cloudflare diblokir langsung oleh WAF Binance. Jalur utama sekarang
+adalah **`proxy-standalone/`** (deploy ke VPS / Fly.io / Deno Deploy /
+Render — zero-dependency, satu file `handler.mjs`). Detail lengkap +
+opsi hosting ada di [`proxy-standalone/README.md`](proxy-standalone/README.md).
 
-1. Deploy folder `proxy/` sebagai project Vercel terpisah (Root Directory =
-   `proxy`), set env var `PROXY_SECRET` di Vercel (string acak, generate
-   sendiri, misal `openssl rand -hex 32`).
+> **Catatan historis:** relay awal proyek ini adalah project Vercel di
+> `proxy/`. Vercel mem-*pause*-nya untuk commercial-use di Hobby plan, jadi
+> `proxy/` **sudah retired** — jangan dipakai untuk setup baru. `proxy/` dan
+> `PROXY_URL` pointing ke Vercel masih jalan secara kode kalau kamu sudah
+> punya, tapi bukan jalur yang didukung.
+
+Ringkasnya:
+
+1. Deploy `proxy-standalone/` ke salah satu host di
+   [`proxy-standalone/README.md`](proxy-standalone/README.md) (pilih region
+   Singapore/Tokyo — hindari `us-*`). Set env `PROXY_SECRET` di host itu
+   (string acak, misal `openssl rand -hex 32`).
 2. Set dua secret ini di worker Cloudflare:
    ```bash
    npx wrangler secret put PROXY_URL
    npx wrangler secret put PROXY_SECRET
    ```
-   `PROXY_URL` = URL project Vercel (contoh `https://whale-pearl.vercel.app`),
-   `PROXY_SECRET` = string yang sama persis dengan yang di-set di Vercel.
+   `PROXY_URL` = URL relay yang barusan di-deploy, `PROXY_SECRET` = string
+   yang sama persis dengan yang di-set di host relay.
 
 Tanpa dua secret ini, tool berlabel "Binance native" akan gagal dengan pesan
 error yang jelas ("PROXY_URL atau PROXY_SECRET belum diset di worker").
@@ -407,10 +423,12 @@ aman.
 Kalau proxy primary kena WAF block/rate-limit/5xx, worker otomatis coba
 proxy sekunder — TAPI cuma kalau dikonfigurasi. Tanpa ini, perilaku persis
 sama seperti sebelumnya (1 proxy, error langsung dilempar kalau gagal).
+Ini juga mitigasi weight-ban IP tunggal: kalau SEMUA traffic Binance keluar
+dari 1 IP relay, sekali kena `-1003` (HTTP 418) semua tool ikut kena.
 
-1. Deploy instance Vercel KEDUA dari folder `proxy/` yang sama (region
-   beda kalau mau, misal Hong Kong vs Singapore) dengan `PROXY_SECRET`
-   sendiri (boleh beda dari primary).
+1. Deploy instance `proxy-standalone/` KEDUA di host BEDA (IP beda — Fly.io
+   region lain, Deno Deploy, atau VPS kedua; **bukan** Vercel) dengan
+   `PROXY_SECRET` sendiri (boleh beda dari primary).
 2. Set dua secret tambahan:
    ```bash
    npx wrangler secret put PROXY_URL_2
@@ -499,7 +517,7 @@ ini bisa liat IP visitor lain, kontradiksi sama tujuannya.
 
 ## Monitoring & Alerting
 
-Backend ini punya beberapa titik gagal diam-diam (proxy Vercel/VPS mati, WS
+Backend ini punya beberapa titik gagal diam-diam (proxy relay mati, WS
 stream gateway putus, Cron Trigger di-Cancel platform). Yang ada sekarang,
 semua lewat **Telegram** (butuh `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`
 di-set — kalau tidak, alert cuma ke Workers Logs):
@@ -515,6 +533,26 @@ di-set — kalau tidak, alert cuma ke Workers Logs):
 Semua cek KV-gated (maks 1 alert per cooldown selagi kondisi persist), aman
 dijalanin tiap 5 menit.
 
+### Notifikasi Multi-Channel (OPSIONAL)
+
+`src/notify.ts` fan-out tiap alert ke SEMUA channel yang dikonfigurasi
+(`Promise.allSettled` — satu channel gagal tidak menggagalkan yang lain
+atau cron). Telegram tetap default; channel lain opt-in via secret:
+
+| Secret | Channel | Kalau kosong |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | Telegram (`sendMessage`, Markdown) | di-skip |
+| `DISCORD_WEBHOOK_URL` | Discord webhook (`{content}`, cap 2000 char) | di-skip |
+| `NOTIFY_WEBHOOK_URL` | Generic — POST JSON `{text}` ke endpoint apa pun | di-skip |
+
+```bash
+npx wrangler secret put DISCORD_WEBHOOK_URL   # opsional
+npx wrangler secret put NOTIFY_WEBHOOK_URL     # opsional
+```
+
+Isi/format pesan identik di semua channel. Kalau tidak ada satu pun channel
+di-set, alert cuma masuk Workers Logs (tidak menggagalkan cron).
+
 **Yang MASIH belum ada** (kerjaan dashboard, bukan kode):
 
 - **Uptime monitor eksternal** ke worker `/` + relay `https://<vps>/health` —
@@ -524,6 +562,22 @@ dijalanin tiap 5 menit.
 - **Cloudflare notification** untuk spike error-rate Workers / CPU-limit —
   observability (`[observability] enabled = true`) cuma ngumpulin data, gak
   ada rule alert.
+
+## Dashboard read-only (OPSIONAL)
+
+Dashboard sederhana di-serve dari worker yang SAMA (bukan Cloudflare Pages
+terpisah). Gated `?key=<ADMIN_SECRET>` persis seperti `/admin/usage` —
+punya kamu sendiri, bukan publik. Tanpa `ADMIN_SECRET` di-set, SELALU 403.
+
+- **Halaman:** `https://<worker-url>/dashboard?key=<ADMIN_SECRET>` — 1 file
+  HTML+JS inline (vanilla `fetch`, no build step), auto-refresh 60 detik.
+- **API (JSON, gated sama):**
+  - `GET /api/dashboard/pipeline-decisions?hours=24&limit=100&symbol=<opt>`
+  - `GET /api/dashboard/signals?symbol=BTCUSDT&hours=24&type=<opt>`
+  - `GET /api/dashboard/whales?coin=BTC`
+  - `GET /api/dashboard/circuit-breaker` — daily-loss + macro-risk KV state
+
+Semua reuse query `d1Client` yang sudah ada (tidak ada query D1 baru).
 
 ## Keamanan: DNS Rebinding Protection (OPSIONAL)
 
@@ -673,7 +727,7 @@ curl -X POST http://localhost:8787/mcp \
 ```
 
 Kalau ini mengembalikan data funding rate + basis BTCUSDT yang valid, jalur
-proxy Vercel bekerja.
+proxy relay bekerja.
 
 ## Audit & Hasil
 
@@ -725,7 +779,7 @@ sesudah perubahan), bukan angka token exact.
   Workers KV milik worker sendiri.
 - **Kredensial selalu lewat Wrangler secret**, tidak pernah di-hardcode atau
   masuk `wrangler.toml`/git — lihat peringatan eksplisit di bagian
-  [Setup Proxy Vercel](#setup-proxy-vercel-wajib-sekali-saja) soal cara
+  [Setup Proxy Relay](#setup-proxy-relay-wajib-sekali-saja) soal cara
   aman set secret.
 - Repo ini di-scan manual untuk memastikan tidak ada API key, secret, atau
   kredensial nyata yang ter-commit — hanya placeholder/contoh (misal URL
@@ -736,8 +790,10 @@ sesudah perubahan), bukan angka token exact.
 
 - Cloudflare Workers: free tier 100.000 request/hari — untuk pemakaian
   personal trading analysis ini jauh dari cukup.
-- Vercel (proxy relay): free tier Hobby plan mencakup jutaan invocation/bulan
-  untuk serverless function — tidak akan kena biaya untuk pemakaian personal.
+- Proxy relay (`proxy-standalone/`): host gratis (Fly.io free tier, Deno
+  Deploy) cukup untuk pemakaian personal; VPS kecil ~$5/bln kalau mau
+  kontrol penuh / relay kedua. Vercel Hobby lama sudah tidak dipakai
+  (di-pause untuk commercial use).
   Perhatikan: `PROXY_SECRET` wajib dijaga kerahasiaannya, karena siapapun
   yang tahu URL + secret bisa memakai quota proxy ini atas nama kamu.
 

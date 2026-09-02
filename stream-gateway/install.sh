@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Idempotent install / update for whale-stream-gateway on the Oracle VPS.
+# Idempotent install / update for whale-stream-gateway on the production AWS VPS.
+# SSH: Host svm-vps (13.212.7.132, ap-southeast-1) — see ~/.ssh/config.
 # ASCII-only on purpose (the OCI console cloud-init textarea runs btoa()).
 #
 # Usage, from the repo's stream-gateway/ dir:

@@ -2,9 +2,20 @@
 
 > [Semeru] 2026-09-02: Ditulis setelah Stage 0-2 selesai + committed
 > (`3bb8f0e`, branch `rinjani/stage-0-2`, 808 test pass, typecheck bersih).
+> **VPS produksi = AWS** (`svm-vps`, 13.212.7.132) — Oracle historis.
 > Agent: **Rinjani** untuk semua Task di bawah (koding + test lokal).
 > **Krakatau TIDAK mulai apapun di sini sampai user acc eksplisit** (lihat
 > Task D) -- ini bukan pengecualian, tetap ikuti gating CLAUDE.md.
+>
+> **PROGRES [Rinjani] 2026-09-02:**
+> - A0 SELESAI — `5e0790f` (dynamic MMR buffer)
+> - A  SELESAI — `89e467c` (migration 0014 + persist 4 sub-skor)
+> - C  SELESAI — `449efae` (notify.ts multi-channel) + section README (ID+EN)
+> - D  SELESAI — `68a3dc0` (dashboard read-only) + section README (ID+EN)
+> - D2 SELESAI — README ID+EN proxy-relay rewrite + binanceProxyClient error wording
+> - B  BELUM (spike test Krakatau UNBLOCKED — lihat Task B; implement depthWatch.mjs belum, user bilang stop before B)
+> - E  BELUM (gated, tunggu acc user)
+> 835 test pass, typecheck bersih.
 
 ## Goal
 
@@ -159,14 +170,9 @@ nyata buat kalibrasi jalan pakai data production asli.
 **Files:**
 - `stream-gateway/depthWatch.mjs` (baru) -- ikuti pola `ws-client.mjs`
   (backoff array, watchdog liveness) TAPI per-symbol ON-DEMAND, bukan
-  always-on: buka `wss://fstream.binance.com/ws/<symbol>@depth@100ms`
-  (catatan: `fstream` di-black-hole dari IP VPS ini per
-  `docs/superpowers/specs/2026-08-11-realtime-liquidation-stream-design.md`
-  -- **VERIFIKASI DULU** apakah `@depth@100ms` per-symbol kena black-hole
-  yang sama atau cuma `!forceOrder@arr` yang kena; kalau sama-sama
-  di-black-hole, coba host `dstream.binance.com` equivalent-nya kalau ada,
-  atau laporkan balik sebagai blocker -- JANGAN asumsikan salah satu
-  kerja tanpa tes riil ke VPS). TTL 5 menit per subscribe (default), auto-
+  always-on:   buka `wss://fstream.binance.com/ws/<symbol>@depth@100ms` di **AWS VPS
+  produksi** (verified Krakatau spike 2026-09-02, ~588 msg/60s — black-hole
+  Oracle tidak apply). TTL 5 menit per subscribe (default), auto-
   unsubscribe + close WS kalau tidak ada permintaan baru sebelum TTL
   habis -- supaya VPS 1GB tidak overload (constraint sama kayak alasan
   `WALL_SCAN_WATCHLIST` dipotong dari 50->15 pair, lihat `src/shared.ts`).
@@ -187,13 +193,17 @@ nyata buat kalibrasi jalan pakai data production asli.
   belum aktif (pola sama 2 tool existing di file ini).
 
 **Steps:**
-- [ ] Spike test manual dulu (di VPS via SSH -- **ini satu-satunya bagian
-      Task B yang butuh Krakatau**, koordinasikan sebelum lanjut coding
-      penuh): konfirmasi `@depth@100ms` per-symbol accessible dari IP VPS
-      atau tidak. Kalau TIDAK accessible sama sekali (WAF/black-hole),
-      STOP Task B di sini, laporkan balik ke Semeru buat re-desain (opsi
-      fallback: polling REST lebih sering, bukan WS).
-- [ ] Kalau accessible: `depthWatch.mjs` + endpoint `server.mjs`.
+- [x] Spike test (Krakatau 2026-09-02, AWS `svm-vps` 13.212.7.132) — **UNBLOCKED**
+      | # | URL | Upgrade | 1st msg | Msgs/60s |
+      |---|---|---|---|
+      | 1 | `fstream…/btcusdt@depth@100ms` | OK | 75ms | 588 |
+      | 2 | `fstream…/btcusdt@aggTrade` | OK | — | 0 (silent) |
+      | 3 | `fstream…/stream?streams=…depth@100ms` | OK | 193ms | 587 |
+      | 4 | `dstream…/btcusdt@depth@100ms` | OK | 62ms | 587 |
+      | 5 | spot depth | OK | 82ms | 600 |
+      **Keputusan:** Rinjani lanjut `depthWatch.mjs` pakai `fstream` `#1` atau `#3`
+      di **AWS VPS produksi**. Black-hole Oracle tidak generalize ke AWS.
+- [ ] Implement `depthWatch.mjs` + endpoint `server.mjs` (Rinjani, AWS `fstream` depth)
 - [ ] `streamGatewayClient.ts` + tool MCP baru.
 - [ ] Test: `stream-gateway/depthWatch.test.mjs` (pola sama
       `ws-client.test.mjs`) + `src/tools/realtimeStream.test.ts` (extend,

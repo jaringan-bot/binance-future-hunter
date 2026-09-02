@@ -4,6 +4,11 @@ Always-on consumer of two low-volume Binance USD-M Futures WebSocket
 streams, buffering them into SQLite so the WAF-blocked `binance-future-hunter`
 Cloudflare Worker can read near-real-time data over plain HTTP.
 
+**Production host:** AWS VPS `svm-vps` (`13.212.7.132`, ap-southeast-1).
+Oracle SG (`146.235.17.228`) was the original deploy; production moves to AWS
+(2026-09-02). `fstream` black-hole is IP-specific — AWS can use `fstream`
+`@depth@100ms` for Task B depth watch (verified Krakatau spike).
+
 - `!forceOrder@arr` — market-wide forced liquidations (Binance throttles
   this server-side to at most one event per symbol per second, so the feed
   is **sampled**, not exhaustive).
@@ -49,9 +54,9 @@ buffer from a fresh one in a single request.
 ## Deploy
 
 ```sh
-# Node 22+ required (node:sqlite). From this directory:
-scp -i <key> *.mjs package.json whale-stream-gateway.service install.sh ubuntu@<vps>:/tmp/gw/
-ssh -i <key> ubuntu@<vps> 'sudo bash /tmp/gw/install.sh'
+# Node 22+ required (node:sqlite). Production AWS VPS (SSH Host svm-vps):
+scp -i ~/.ssh/jaringan.pem *.mjs package.json whale-stream-gateway.service install.sh ubuntu@svm-vps:/tmp/gw/
+ssh svm-vps 'sudo bash /tmp/gw/install.sh'
 ```
 
 `install.sh` reuses `PROXY_SECRET` from `/opt/whale-binance-proxy/.env`,

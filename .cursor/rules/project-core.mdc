@@ -14,8 +14,8 @@ Codebase **matang** (~90 src + ~90 test). Jangan buat "struktur folder awal", Do
 | Worker MCP + cron | `src/`, `wrangler.toml` | `npx wrangler deploy` (manual) |
 | D1 | `migrations/` | `wrangler d1 migrations apply … --remote` |
 | KV config | `CONFIG_KV` | jarang write |
-| REST relay | `proxy-standalone/` | Vercel + systemd Oracle VPS |
-| WS stream | `stream-gateway/` | systemd + Caddy (bukan Docker) |
+| REST relay | `proxy-standalone/` | AWS VPS systemd (+ Caddy); Vercel = legacy |
+| WS stream | `stream-gateway/` | AWS VPS systemd + Caddy (bukan Docker) |
 
 Telegram = outbound notifier (`src/telegram.ts`). Stage 4 rencana `notify.ts` — belum ada.
 

@@ -18,13 +18,16 @@ alwaysApply: false
 
 ## Bukan Docker
 
-- VPS Oracle: systemd units (`whale-binance-proxy`, `whale-stream-gateway`) + Caddy
+- **VPS produksi = AWS** (`svm-vps`, `13.212.7.132`, ap-southeast-1) — SSH via `~/.ssh/config` Host `svm-vps`
+- Oracle (`146.235.17.228`) = historis; `fstream` di-black-hole dari IP Oracle, **bukan** dari IP AWS (Krakatau spike 2026-09-02)
+- systemd: `whale-binance-proxy` + `whale-stream-gateway` + Caddy — proses terpisah
 - `stream-gateway/install.sh` idempotent; Node 22+ (`node:sqlite`)
-- WS process terpisah dari REST relay — bug WS tidak boleh matikan relay
+- Task B depth watch: pakai `wss://fstream.binance.com/ws/<symbol>@depth@100ms` dari AWS (verified ~588 msg/60s)
 
 ## proxy-standalone
 
-- Vercel relay REST; secrets Worker: `PROXY_URL`, `PROXY_SECRET`
+- Target produksi: deploy ke **AWS VPS** (`proxy-standalone/` systemd) — Vercel relay = legacy/transisi
+- Secrets Worker: `PROXY_URL`, `PROXY_SECRET` (origin VPS, bukan `/api/binance`)
 - Jangan taruh logic pipeline di sini
 
 ## Monitoring gap (Stage 4, belum ada)

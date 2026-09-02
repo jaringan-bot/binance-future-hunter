@@ -2,11 +2,12 @@
 
 > **UPDATE 2026-08-28 — SUPERSEDED / dibangun dengan arsitektur berbeda.**
 > Bukan Durable Object di worker (spec di bawah), tapi komponen always-on
-> `whale-stream-gateway` di Oracle VPS Singapore (`stream-gateway/` di repo):
-> Node + `node:sqlite`, WS ke `dstream.binance.com` (BUKAN `fstream` — itu
-> di-black-hole dari IP VPS: accept upgrade, kirim nol data; `dstream` serve
-> `!forceOrder@arr` yang sama incl. simbol USD-M), HTTP read API di `/stream/*`
-> di balik Caddy yang sama dengan relay. Worker baca via `PROXY_URL`. Tools
+> `whale-stream-gateway` (`stream-gateway/` di repo): Node + `node:sqlite`,
+> WS ke `dstream.binance.com` untuk always-on `!forceOrder@arr` (BUKAN
+> `fstream` dari **IP Oracle** — di-black-hole; lihat catatan IP di bawah).
+> **Produksi VPS = AWS ap-southeast-1** (`svm-vps`, 13.212.7.132) sejak
+> 2026-09-02; Oracle (`146.235.17.228`) historis. HTTP read API di `/stream/*`
+> di balik Caddy + relay. Worker baca via `PROXY_URL`. Tools
 > `binance_get_realtime_liquidations` + `binance_get_contract_events`. Feed
 > di-sampel Binance (1/symbol/detik). Spec DO di bawah dibiarkan sebagai
 > catatan pendekatan yang tidak dipakai.
