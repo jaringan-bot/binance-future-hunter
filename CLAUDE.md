@@ -35,10 +35,25 @@ live `e511dcad`. Detail per-task + hasil deploy: `docs/superpowers/plans/2026-09
 
 | | Semeru (Claude) | Rinjani / Krakatau (Cursor) |
 |---|---|---|
-| Boleh | `typecheck`, `npm test`, `wrangler dev` | Rinjani: kode + test + commit prep. Krakatau: `--remote`, `wrangler deploy`, secrets, SSH VPS |
-| Jangan | `--remote`, deploy, SSH, secret put | Redesign arsitektur tanpa spec; gabung perubahan kode + aksi deploy dalam satu langkah |
+| Boleh | `typecheck`, `npm test`, `wrangler dev`, tulis kode+test+migration+docs | Rinjani: infra-mechanics + commit hasil kerja Semeru dari tree. Krakatau: `--remote`, `wrangler deploy`, secrets, SSH VPS, AWS SG |
+| Jangan | `--remote`, deploy, SSH, secret put, AWS SG | Ubah file milik Semeru (lihat ownership) tanpa lapor dulu; gabung perubahan kode + aksi deploy dalam satu langkah |
 
-**Konvensi:** branch `rinjani/<slug>` / `krakatau/<slug>`; commit trailer `Agent: Rinjani` / `Agent: Krakatau`;
+### Ownership file/direktori (hindari edit bertabrakan)
+
+**Akar friksi 2026-09-02: dua agen ngedit file sama di working tree yang sama, barengan.** Aturan:
+
+| Owner | Path | Agen lain |
+|---|---|---|
+| **Semeru** | `src/**`, `migrations/**`, `stream-gateway/*.mjs` (logika), `proxy-standalone/handler.mjs`+`server.mjs` (logika), `scripts/**`, `docs/**`, `README*.md`, `CLAUDE.md`, `.cursor/rules/**`, `vitest.config.ts`, `.gitattributes`, `.gitignore` | Cursor **lapor di chat** kalau nemu bug / mau ubah wording — Semeru yang edit. Kalau Semeru idle & perubahan trivial, Cursor boleh tapi **ping dulu** + trailer `Agent: Rinjani`. |
+| **Cursor** | `*.service`, `stream-gateway/install.sh`, `proxy-standalone/oracle-*.sh`, `.cursor/environment.json` `.cursor/settings.json` `.cursor/mcp.json`, `wrangler.toml` (resource id/binding), eksekusi `wrangler`/`ssh`/`scp`/`aws` | Semeru boleh baca, tapi tidak edit deploy-mechanics tanpa minta Cursor. |
+
+**Plan file (`docs/superpowers/plans/*.md`) = SEMERU ONLY.** Cursor lapor hasil (step pass/fail, output, version id) **di chat**; Semeru yang tulis ke plan file. Jangan dua-duanya nulis ke file yang sama.
+
+**Timing:** satu agen aktif di tree pada satu waktu. Handoff eksplisit ("Semeru selesai X, giliran Cursor Y"). Jangan jalan paralel di area yang overlap.
+
+**Scratch/diagnostik:** `.tmp-*` sudah di-gitignore. Cursor: taruh spike/diagnostic file di `.tmp-*` atau di luar repo, jangan di root — `git add -A` bisa nyapu.
+
+**Konvensi:** branch `rinjani/<slug>` / `krakatau/<slug>`; commit trailer `Agent: Rinjani` / `Agent: Krakatau` / `Agent: Semeru`;
 status di plan file & handoff diprefiks `[Semeru]` / `[Rinjani]` / `[Krakatau]` + tanggal.
 
 **Infra live (Stage 0–4 deployed 2026-09-02):**

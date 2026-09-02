@@ -7,38 +7,43 @@ alwaysApply: true
 
 `docs/full_pipeline_framework.md` Tahap 1–5 (hard screen → capital solve) **sudah di kode merged**. Jangan disamakan dengan Stage rebrand di bawah.
 
-## Stage 0–2 — kode selesai, BELUM di-commit/deploy
+## Stage 0–4 — ✅ DEPLOYED (2026-09-02)
 
-Kode + test lokal hijau (`typecheck` bersih, ~800 test). Semua masih di working tree `main` (untracked/modified). **Belum:** commit, push, PR, `d1 migrations apply --remote`, `wrangler deploy`. Itu tugas Cursor setelah user acc.
+PR #1 (`a343004`) + PR #2 (`c522e37`) → `main`. Worker live `e511dcad`.
+`tsc` bersih · 849 src test · 51 stream-gateway test.
 
-- **0011** (`pipeline_decision_log`) = **SUDAH merged** (`8beca7b`, PR #36)
-- **0012/0013** = **BELUM** — `?? migrations/0012_cftc_positioning_history.sql`, `?? migrations/0013_pipeline_decision_outcomes.sql`
+- **0** rebrand → `binance-future-hunter` ✅
+- **1** CFTC trend + `binance_analyze_institutional_flow` (mig 0012) ✅
+- **2** outcomes cron (mig 0013), execution-aware backtest (`fee_bps`/`slippage_bps`),
+  `scripts/calibrate-ranking-weights.mjs`, ranking sub-scores (mig 0014) ✅
+- **3** `binance_watch_orderbook_realtime` — on-demand depth watch WS `@depth@100ms`
+  (`stream-gateway/depthWatch.mjs`), live-verified ✅
+- **4** `src/notify.ts` multi-channel (Telegram/Discord/webhook) + dashboard
+  read-only (`/dashboard`, `/api/dashboard/*`) ✅
 
-**Isi Stage 0–2 (untracked):**
-- CFTC `cftc_positioning_history` + `cme_get_institutional_positioning_trend` + `cftcPositioningCron`
-- `binance_analyze_institutional_flow` (`src/institutionalFlow.ts`, `src/tools/institutionalFlow.ts`)
-- `pipelineDecisionOutcomeCron` (backfill `forward_return_1h/4h/24h`, `sl_touched_24h`)
-- `scripts/calibrate-ranking-weights.mjs` + test — standalone, input JSON export manual, **TIDAK auto-apply**
-  - GAP follow-up: 4 sub-skor komponen belum kolom D1 → migration 0014 / `scoreTier1Signals` breakdown
-- backtest execution-aware: `fee_bps` (def 4) + `slippage_bps` (def 2), `net = gross − 2·(fee+slip)/1e4`
+D1 = instance existing (`database_id 3600a9bb-…`), migrations 0001–0014 applied
+`--remote`. VPS AWS `svm-vps` (`13.212.7.132`): proxy + stream-gateway + Caddy.
 
-**Jangan tulis "deployed"** di docs/rules sampai commit + migrate remote + deploy terverifikasi.
+Detail per-task + hasil live-verify: `docs/superpowers/plans/2026-09-02-stage-3-4-realtime-dashboard.md` (status block atas — **Semeru yang maintain**).
 
-## Stage 3 — belum ditulis
+## Backlog (tunggu acc user — jangan mulai)
 
-VPS/stream-gateway enhancements. Spec: `docs/superpowers/specs/2026-09-01-whale-wallet-discovery.md`.
-- Opsi A direkomendasikan: `hyperliquid_validate_candidate_wallet`
-- `HYPERLIQUID_WHALE_WATCHLIST` manual by design
-- Validasi endpoint live sebelum commit
-
-## Stage 4 — belum ditulis
-
-- Observability eksternal (uptime + CF alerts) — lihat README "Yang MASIH belum ada"
-- Generalisasi notifier: `src/telegram.ts` → `notify.ts` (multi-channel) — **belum ada file**
-- Bukan refactor MCP jadi dashboard web
+- **Relay REST kedua** (Krakatau) — mitigasi weight-ban IP tunggal
+  (`whale-binance-proxy` 1 IP pernah kena `-1003`). Deploy instance ke-2
+  `proxy-standalone/` di host BEDA (Fly.io/Deno/VPS ke-2, **BUKAN** Vercel)
+  + `PROXY_URL_2`/`PROXY_SECRET_2`. Setelah failover verified live: Semeru
+  naikkan `ENTRY_WATCHLIST_SIZE` (`src/entryWatchlist.ts`) 250 → 350–500.
+- **Whale-wallet-discovery** — spec `docs/superpowers/specs/2026-09-01-whale-wallet-discovery.md` (belum jadi Task, butuh verifikasi endpoint live dulu).
+- **Provision D1/KV baru** — dibatalkan (lanjut instance existing).
 
 ## Deferred
 
-- Leverage Bracket riil — butuh API key Binance + desain
+- Leverage Bracket riil — butuh API key Binance + desain Semeru.
 
-Jangan mulai Stage 3/4 tanpa spec/task eksplisit dari user.
+## Follow-up tuning (BUKAN bug — tercatat di plan file)
+
+- Ambang wall depth-watch `$250k` kekecilan buat buku BTC (churn tinggi) —
+  pertimbangkan per-symbol / skala-volume.
+- `EVENT_BUFFER_PER_SYMBOL=500` penuh cepat di pair likuid.
+
+Jangan mulai fitur baru tanpa spec/task eksplisit dari user.

@@ -1,42 +1,64 @@
 ---
-description: Skema penamaan agen (gunung) — Rinjani default, Krakatau butuh acc
+description: Skema agen (gunung) + ownership file — hindari edit bertabrakan
 alwaysApply: true
 ---
 
-# Agen — Skema Penamaan (Gunung)
+# Agen — Penamaan + Ownership
 
 | Nama | Peran | Siapa |
 |---|---|---|
-| **Semeru** | Architect, spec, debug, verifikasi lokal | Claude Code |
-| **Rinjani** | Builder — koding, refactor, test, siapkan commit/PR | Cursor (default) |
-| **Krakatau** | Infra/deploy — `--remote`, `wrangler deploy`, `secret put`, SSH VPS | Cursor (HANYA setelah user acc eksplisit) |
-| **Ijen** | Reviewer — code-review / ultrareview | User-triggered |
-| **Bromo** | Observability Stage 4 | Belum ada |
+| **Semeru** | Architect + primary builder — spec, desain, tulis kode/test/migration/docs, debug, verifikasi lokal | Claude Code |
+| **Rinjani** | Executor — commit hasil kerja Semeru dari working tree, infra-mechanics files, siapkan PR | Cursor (default) |
+| **Krakatau** | Infra/deploy — `--remote`, `wrangler deploy`, `secret put`, SSH VPS, AWS SG | Cursor (HANYA setelah user acc eksplisit "acc") |
+| **Ijen** | Reviewer — `/code-review` / ultrareview | User-triggered |
+| **Bromo** | Observability — uptime + CF alert | Belum ada |
 
-## Aturan Cursor
+## Ownership file/direktori (WAJIB — akar friksi 2026-09-02)
 
-**Kerjaan koding normal → Rinjani**
-- Branch: `rinjani/<slug>`
-- Commit trailer: `Agent: Rinjani`
+Dua agen di satu working tree yang sama, ngedit file sama, barengan → tabrakan.
 
-**Tugas menyentuh `--remote` / `wrangler deploy` / `secret put` / SSH:**
+**SEMERU owns** (Cursor jangan edit tanpa lapor chat dulu):
+`src/**` · `migrations/**` · `stream-gateway/*.mjs` (logika) ·
+`proxy-standalone/{handler,server}.mjs` (logika) · `scripts/**` · `docs/**` ·
+`README*.md` · `CLAUDE.md` · `.cursor/rules/**` · `vitest.config.ts` ·
+`.gitattributes` · `.gitignore`
+
+**CURSOR owns** (Semeru baca boleh, edit jangan tanpa minta):
+`*.service` · `stream-gateway/install.sh` · `proxy-standalone/oracle-*.sh` ·
+`.cursor/{environment,settings,mcp}.json` · `wrangler.toml` (resource id/binding) ·
+eksekusi `wrangler`/`ssh`/`scp`/`aws`
+
+**Nemu bug / mau ubah wording di file Semeru?** Lapor di chat, Semeru yang edit.
+Kalau Semeru idle + perubahan trivial: boleh, tapi **ping dulu** + trailer `Agent: Rinjani`.
+
+## Plan file & status doc — SEMERU ONLY
+
+`docs/superpowers/plans/*.md` + `CLAUDE.md` cuma di-update Semeru.
+**Cursor: lapor hasil (step pass/fail, output, version id, error) DI CHAT.**
+Semeru yang tulis ke file. Jangan dua-duanya nulis ke file yang sama.
+
+## Timing
+
+Satu agen aktif di tree pada satu waktu. Handoff eksplisit
+("Semeru selesai X, giliran Cursor Y"). Jangan paralel di area overlap.
+
+## Aturan deploy
+
+Tugas menyentuh `--remote` / `wrangler deploy` / `secret put` / SSH / AWS SG:
 1. **Berhenti** — jangan lanjut otomatis
 2. Minta acc user eksplisit ("acc")
-3. Baru lanjut sebagai **Krakatau**
-- Branch: `krakatau/<slug>`
-- Commit trailer: `Agent: Krakatau`
-- **Jangan gabung** perubahan kode Rinjani + aksi deploy Krakatau dalam satu langkah
+3. Lanjut sebagai **Krakatau** — branch `krakatau/<slug>`, trailer `Agent: Krakatau`
+4. **Jangan gabung** perubahan kode + aksi deploy dalam satu commit/langkah
 
-## Backlog Krakatau (tunggu acc — jangan mulai)
+## Scratch
 
-1. Commit + push Stage 0–2 (rebrand, CFTC, institutional flow, crons, 0012/0013, calibrate script, backtest execution-aware)
-2. `d1 migrations apply binance-future-hunter-db --remote` (0012, 0013)
-3. `wrangler deploy` + verify `GET /` → `"name":"binance-future-hunter"`
+`.tmp-*` sudah di-gitignore. Taruh spike/diagnostic file di `.tmp-*` atau di
+luar repo — jangan di root (`git add -A` nyapu).
 
-## Plan file
+## Status (2026-09-02)
 
-Update `.claude/plans/cosmic-cooking-hennessy.md` dengan prefiks `[Rinjani]` / `[Krakatau]` + tanggal tiap milestone.
-
-## Status Stage 0–2
-
-Kode selesai, **BELUM** commit/deploy. 0011 merged (#36); 0012/0013 belum. **Jangan tulis "deployed".**
+Stage 0–4 **DEPLOYED** (PR #1 `a343004` + PR #2 `c522e37` → `main`; worker
+`e511dcad`). D1 = instance existing (`3600a9bb-…`), migrations 0001–0014
+applied `--remote`. VPS AWS `svm-vps` (`13.212.7.132`).
+Backlog Krakatau (tunggu acc): relay REST kedua + naikkan `ENTRY_WATCHLIST_SIZE`.
+Detail: `docs/superpowers/plans/2026-09-02-stage-3-4-realtime-dashboard.md`.

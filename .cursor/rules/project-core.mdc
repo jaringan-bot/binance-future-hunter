@@ -17,21 +17,24 @@ Codebase **matang** (~90 src + ~90 test). Jangan buat "struktur folder awal", Do
 | REST relay | `proxy-standalone/` | AWS VPS systemd (+ Caddy); Vercel = legacy |
 | WS stream | `stream-gateway/` | AWS VPS systemd + Caddy (bukan Docker) |
 
-Telegram = outbound notifier (`src/telegram.ts`). Stage 4 rencana `notify.ts` — belum ada.
+Notifikasi = `src/notify.ts` (fan-out Telegram + Discord + generic webhook;
+`src/telegram.ts` = impl Telegram). Stage 0–4 sudah **deployed** (2026-09-02).
 
-## Agen (lihat `agents.mdc`)
+## Agen + ownership — lihat `agents.mdc` (WAJIB baca)
 
-| Nama | Peran |
-|---|---|
-| Semeru | Claude Code — architect, spec, verifikasi lokal |
-| **Rinjani** | Cursor default — koding, test, commit/PR |
-| **Krakatau** | Deploy/infra — HANYA setelah user acc eksplisit |
+- **Semeru** (Claude Code) = primary builder + architect. Owns `src/**`,
+  `migrations/**`, `docs/**`, `README*`, `CLAUDE.md`, `.cursor/rules/**`,
+  gateway/proxy `.mjs` **logika**, `scripts/**`. Plan file + status doc = Semeru only.
+- **Rinjani** (Cursor default) = commit hasil kerja Semeru dari tree, owns
+  infra-mechanics files (`*.service`, `install.sh`, `oracle-*.sh`,
+  `.cursor/*.json`, `wrangler.toml` resource id). Branch `rinjani/<slug>`,
+  trailer `Agent: Rinjani`.
+- **Krakatau** (Cursor infra) = `--remote`, `wrangler deploy`, `secret put`,
+  SSH, AWS SG — **minta acc user dulu**, branch `krakatau/<slug>`, jangan
+  gabung diff kode + aksi deploy.
 
-## Semeru vs Rinjani vs Krakatau
-
-- **Semeru:** `typecheck` + `npm test` + `wrangler dev` lokal — tanpa `--remote`, deploy, SSH, secrets
-- **Rinjani:** implementasi, refactor, test, siapkan branch `rinjani/<slug>`, trailer `Agent: Rinjani`
-- **Krakatau:** migrate `--remote`, deploy, secret put, SSH — branch `krakatau/<slug>`, trailer `Agent: Krakatau`; **minta acc dulu**, jangan gabung dengan diff Rinjani
+**Cursor nemu bug / mau ubah file Semeru → lapor di chat, Semeru yang edit.**
+Satu agen aktif di tree pada satu waktu; handoff eksplisit.
 
 ## Larangan umum
 
