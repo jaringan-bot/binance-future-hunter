@@ -4,9 +4,12 @@ Ringkasan untuk sesi architect. Cursor rules detail ada di `.cursor/rules/`.
 
 ## Apa ini
 
-MCP server Cloudflare Worker untuk analisis Binance Futures (~90 modul TS, ~90 file test).
-Bukan greenfield. Bukan Telegram bot — `src/telegram.ts` = **outbound notifier** 1-arah saja.
-Stage 4 rencana: generalisasi ke `notify.ts` (belum ada).
+MCP server Cloudflare Worker untuk analisis Binance Futures (~95 modul TS, ~95 file test).
+Bukan greenfield. Bukan Telegram bot — notifikasi lewat `src/notify.ts` (fan-out
+Telegram + Discord + generic webhook; `src/telegram.ts` = impl Telegram-nya).
+
+**Stage 0–4 SELESAI + DEPLOYED (2026-09-02, PR #1 → `main` `a343004`).** Worker
+live `e511dcad`. Detail per-task + hasil deploy: `docs/superpowers/plans/2026-09-02-stage-3-4-realtime-dashboard.md` (status block paling atas).
 
 ## Stack nyata
 
@@ -26,9 +29,9 @@ Stage 4 rencana: generalisasi ke `notify.ts` (belum ada).
 |---|---|---|
 | **Semeru** | Architect & Problem Solver — spec, desain logika, debug rumit, verifikasi lokal | Claude Code (sesi ini) |
 | **Rinjani** | Builder & Executor — koding, refactor, boilerplate, test, siapkan commit/PR | Cursor Agent (mode normal) |
-| **Krakatau** | Infra & Deploy — `d1 migrations apply --remote`, `wrangler deploy`, `secret put`, SSH VPS. **GATED: hanya setelah user acc** | Cursor Agent (mode infra) |
+| **Krakatau** | Infra & Deploy — `d1 migrations apply --remote`, `wrangler deploy`, `secret put`, SSH VPS, AWS SG. **GATED: hanya setelah user acc eksplisit** | Cursor Agent (mode infra) |
 | **Ijen** | Reviewer — `/code-review`, ultrareview, audit diff pre-merge | Claude cloud (user-triggered) |
-| **Bromo** | Observability — uptime eksternal + CF alert (Stage 4) | belum ada |
+| **Bromo** | Observability — uptime eksternal + CF alert | belum ada |
 
 | | Semeru (Claude) | Rinjani / Krakatau (Cursor) |
 |---|---|---|
@@ -38,21 +41,26 @@ Stage 4 rencana: generalisasi ke `notify.ts` (belum ada).
 **Konvensi:** branch `rinjani/<slug>` / `krakatau/<slug>`; commit trailer `Agent: Rinjani` / `Agent: Krakatau`;
 status di plan file & handoff diprefiks `[Semeru]` / `[Rinjani]` / `[Krakatau]` + tanggal.
 
-**Backlog Krakatau (tunggu acc — jangan mulai), detail lengkap Task E di**
-**`docs/superpowers/plans/2026-09-02-stage-3-4-realtime-dashboard.md`:**
-(1) provision D1/KV **BARU** (`binance-future-hunter-db` + namespace baru —
-keputusan final 2026-09-01: TIDAK numpang resource `whalescope-mcp` lama),
-(2) migrate 0001–0014 `--remote` ke DB baru itu, (3) set secret wajib
-(`PROXY_URL`/`PROXY_SECRET`, belum ke-copy dari worker lama), (4) `wrangler
-deploy` + verify `GET /`, (5) push branch `rinjani/stage-0-2` + PR (cek
-tracking branch-nya dulu, kelihatan mismatch ke `origin/semeru/agent-rules-docs`),
-(6) **relay REST kedua** — Vercel (`proxy/`) SUDAH RETIRED (dipause
-Vercel sendiri, lihat `proxy-standalone/README.md:3-4`), REST relay VPS
-tunggal (`whale-binance-proxy`) sudah pernah kena weight-ban Binance HTTP
-418 -1003 (1 IP nanggung semua traffic) — deploy instance kedua
-`proxy-standalone/` (Fly.io/Deno/VPS kedua, BUKAN Vercel) + wire
-`PROXY_URL_2`/`PROXY_SECRET_2`, baru setelah itu Rinjani naikkan
-`ENTRY_WATCHLIST_SIZE` balik ke 350–500 (`src/entryWatchlist.ts`).
+**Infra live (Stage 0–4 deployed 2026-09-02):**
+- Worker `binance-future-hunter.jaringan.workers.dev` (version `e511dcad`).
+- D1 = **instance existing** (`database_id 3600a9bb-9261-492a-bf06-3a11b0448f4e`
+  di `wrangler.toml`). User batalkan rencana D1/KV baru — lanjut yang ada.
+  Migrations 0001–0014 applied `--remote`.
+- VPS AWS `svm-vps` (`13.212.7.132`, SSH Host `svm-vps`): `whale-binance-proxy`
+  (:8080) + `whale-stream-gateway` (:8081, `!forceOrder@arr` always-on +
+  on-demand depth watch) + Caddy TLS. Relay: `https://13.212.7.132.sslip.io`.
+- Secret di-set: `PROXY_URL`, `PROXY_SECRET`. Belum di-set (opsional):
+  `ADMIN_SECRET` (dashboard SELALU 403 tanpa ini),
+  `DISCORD_WEBHOOK_URL`/`NOTIFY_WEBHOOK_URL`, `TELEGRAM_*`.
+
+**Backlog Krakatau (tunggu acc eksplisit — jangan mulai):**
+- **Relay REST kedua** (mitigasi weight-ban IP tunggal — `whale-binance-proxy`
+  1 IP sudah pernah kena `-1003`/HTTP 418). Deploy instance ke-2
+  `proxy-standalone/` di host BEDA (Fly.io `sin` / Deno / VPS ke-2, **BUKAN**
+  Vercel — sudah retired) + `PROXY_URL_2`/`PROXY_SECRET_2`. **Setelah** failover
+  terverifikasi live: Rinjani naikkan `ENTRY_WATCHLIST_SIZE`
+  (`src/entryWatchlist.ts`) 250 → 350–500.
+- Provision D1/KV baru — **dibatalkan** (lihat di atas); re-evaluate terpisah.
 
 ## Konvensi kode (wajib)
 
@@ -67,27 +75,18 @@ tunggal (`whale-binance-proxy`) sudah pernah kena weight-ban Binance HTTP
 
 | Stage | Status |
 |---|---|
-| 0–2 | **Kode selesai + COMMITTED** (`3bb8f0e`, branch `rinjani/stage-0-2`), **BELUM deploy** — lihat detail di bawah |
-| 3 | Plan ditulis (Task B) — `docs/superpowers/plans/2026-09-02-stage-3-4-realtime-dashboard.md`. Whale-wallet-discovery spec (`docs/superpowers/specs/2026-09-01-whale-wallet-discovery.md`) sudah ada dari sebelumnya, cakupan beda (Bagian A whale/options data, bukan depth watch) |
-| 4 | Plan ditulis (Task C/D, plan file sama dengan Stage 3) — multi-channel `notify.ts` + dashboard read-only |
-| 0014 (follow-up Stage 2) | Plan ditulis (Task A, plan file sama) — persist 4 sub-skor ranking ke D1 |
-| Deferred | Leverage Bracket riil (butuh API key Binance, butuh desain Semeru dulu sebelum jadi Task) |
+| 0 rebrand → `binance-future-hunter` | ✅ deployed |
+| 1 institutional flow — CFTC trend, `binance_analyze_institutional_flow` (mig 0012) | ✅ deployed |
+| 2 backtest rigor — outcomes cron (mig 0013), execution-aware backtest, `calibrate-ranking-weights.mjs`, ranking sub-scores (mig 0014) | ✅ deployed |
+| 3 real-time — `binance_watch_orderbook_realtime` (on-demand depth watch, WS `@depth@100ms`) | ✅ deployed + live-verified |
+| 4 — `notify.ts` multi-channel + dashboard read-only (`/dashboard`, `/api/dashboard/*`) | ✅ deployed |
+| Deferred | Leverage Bracket riil (butuh API key Binance, butuh desain Semeru dulu). Relay REST kedua + `ENTRY_WATCHLIST_SIZE` (backlog Krakatau di atas). Whale-wallet-discovery spec `docs/superpowers/specs/2026-09-01-whale-wallet-discovery.md` (belum jadi Task) |
 
-### Stage 0–2 — kode selesai + committed, BELUM deploy
+Detail per-task + hasil live-verify: plan file Stage 3-4 (status block atas).
 
-Kode + test lokal hijau (`typecheck` bersih, 808 test), commit `3bb8f0e` di branch `rinjani/stage-0-2` (tracking `origin/semeru/agent-rules-docs`, ahead 1 — cek dulu apa mismatch ini sengaja sebelum push). **Belum:** push, PR, provision D1/KV baru, `d1 migrations apply --remote`, `wrangler deploy`. Itu Task E (Krakatau) di plan Stage 3-4, tunggu acc user.
-
-- **0011** (`pipeline_decision_log`) = **SUDAH merged** (`8beca7b`, PR #36)
-- **0012** (`cftc_positioning_history`), **0013** (`pipeline_decision_outcomes`) = kode selesai + committed, **BELUM di-apply ke D1 remote manapun**
-
-**Stage 2 — kode selesai + committed (termasuk):**
-- migration 0013 + `pipelineDecisionOutcomeCron` (backfill `forward_return_*`)
-- `scripts/calibrate-ranking-weights.mjs` (+ test) — standalone, input JSON export manual, **TIDAK auto-apply**
-  - GAP follow-up: 4 sub-skor komponen belum jadi kolom D1 (baru di notes string) → migration 0014, lihat plan Stage 3-4 Task A
-- backtest execution-aware: `fee_bps` (def 4) + `slippage_bps` (def 2), `net = gross − 2·(fee+slip)/1e4` — bukan replay order-book penuh
-- CFTC trend + `binance_analyze_institutional_flow` — `src/institutionalFlow.ts`, crons, tools
-
-**Jangan tulis "deployed"** sampai migrate remote + deploy terverifikasi di git (commit sudah ada, deploy belum).
+**Follow-up tuning tercatat (BUKAN bug):** ambang wall depth-watch `$250k`
+kekecilan buat buku BTC (churn tinggi); `EVENT_BUFFER_PER_SYMBOL=500` penuh
+cepat di pair likuid. Lihat plan file.
 
 ## Dokumen wajib baca sebelum desain fitur
 

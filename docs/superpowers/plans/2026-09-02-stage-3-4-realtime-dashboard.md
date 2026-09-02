@@ -1,59 +1,62 @@
 # Stage 3-4 — Real-time Depth Watch + Dashboard/Notify + Ranking Sub-Score Persist
 
-> [Semeru] 2026-09-02: Ditulis setelah Stage 0-2 selesai + committed
-> (`3bb8f0e`, branch `rinjani/stage-0-2`). **VPS produksi = AWS**
-> (`svm-vps`, 13.212.7.132) — Oracle historis.
-> Agent: **Rinjani** untuk semua Task koding (selesai). **Krakatau**
-> (Cursor) untuk deploy — **user acc 2026-09-02**. Deploy PARSIAL (step 2-4
-> ok, step 1 AWS SG blocker) — hasil di status bawah. Semeru (Claude Code)
-> tidak jalanin deploy/`--remote`/SSH/SG.
+> ## ✅ SELESAI + DEPLOYED — 2026-09-02
 >
-> **PROGRES 2026-09-02 — KODE SELESAI, DEPLOY PARSIAL (blocker AWS SG):**
+> **PR #1 squash-merged ke `main` @ `a343004`.** Worker live `e511dcad` @
+> `binance-future-hunter.jaringan.workers.dev`. VPS relay+gateway (AWS
+> `svm-vps` / `13.212.7.132`) via `https://13.212.7.132.sslip.io`.
+> Migration 0014 applied `--remote` (no drift). Stage E (D1/KV baru, relay
+> kedua, `ENTRY_WATCHLIST_SIZE`) sengaja TIDAK dikerjakan.
 >
-> Branch `rinjani/stage-0-2` (PR #1, `jaringan-bot/binance-future-hunter`).
-> Tip commit `e745f7d`, di-push, sinkron dengan origin.
-> Verifikasi: `tsc` bersih · **849 src test** (`npm test`) · **51 stream-gateway
-> test** (`cd stream-gateway && node --test`).
+> **Live verify [Krakatau]:**
+> - `GET /` → `"name":"binance-future-hunter"` ✅
+> - `cme_get_institutional_positioning_trend` ✅ · `binance_analyze_institutional_flow` ✅
+> - `binance_watch_orderbook_realtime` BTCUSDT: call 1 arm (0 event, WS warming)
+>   → call 2 (+6s) **500 event** (APPEARED 245 · GREW 10 · SHRANK 12 · VANISHED
+>   233 · `wsOk:true` · `degraded:false`) ✅
+> - Krakatau infra: SG 80/443 dibuka; `systemctl restart caddy` + hapus ACME
+>   lock rusak (one-time, setelah SG dibuka cert LE baru bisa issued).
 >
-> | Task | Status | Commit | Deploy footprint |
-> |---|---|---|---|
-> | A0 dynamic MMR buffer | ✅ kode | `5e0790f` | worker deploy |
-> | A migration 0014 + persist 4 sub-skor ranking | ✅ kode | `89e467c` | **`--remote` migrate** + worker deploy |
-> | C notify.ts multi-channel (Telegram/Discord/webhook) | ✅ kode + README ID/EN | `449efae` | worker deploy (secret Discord/webhook opsional, skip) |
-> | D dashboard read-only `/dashboard` + `/api/dashboard/*` | ✅ kode + README ID/EN | `68a3dc0` | worker deploy (butuh `ADMIN_SECRET` biar aktif) |
-> | D2 README proxy-relay rewrite + `.dev.vars.example` + error wording | ✅ | `467a86e`, `4c690cf` | — (docs) |
-> | B on-demand depth watch + `binance_watch_orderbook_realtime` | ✅ kode + docs §3.2b | `2e36543` | **stream-gateway scp+install** + worker deploy |
-> | B-fix degrade tool saat relay non-JSON (bukan crash) + `.gitattributes` eol=lf | ✅ kode | `e745f7d` | worker deploy (WAJIB — live `0d2006a8` masih versi crash) |
-> | service `ExecStart` → `/usr/bin/env node` (blocker bootstrap AWS) | ✅ | `2e36543` (`.service`), `c450ba1` (bootstrap heredoc) | dipakai step 2 install |
-> | E provision D1/KV baru / relay kedua / `ENTRY_WATCHLIST_SIZE` | ⛔ TIDAK dikerjakan | — | user putuskan lanjut instance lama untuk Stage 0-2 |
+> **Follow-up (tuning, BUKAN bug — konsisten dgn flag "belum dikalibrasi"):**
+> 1. Ambang wall `$250k` di BTCUSDT ketang­kap ~245 APPEARED / ~233 VANISHED
+>    dalam ~4-5 detik — churn tinggi, banyak level transient oscillate di
+>    sekitar ambang. Buku BTC jauh lebih dalam dari altcoin → ambang
+>    per-symbol / skala-volume layak dipertimbangkan (`STREAM_DEPTH_*` env
+>    atau param tool). Untuk sekarang: pair likuid = poll sering.
+> 2. `EVENT_BUFFER_PER_SYMBOL = 500` penuh cepat di pair likuid → consumer
+>    yang poll lambat cuma lihat ~detik terakhir. By design (ring buffer),
+>    dokumentasikan di tool description kalau perlu.
 >
-> **HASIL DEPLOY [Krakatau] 2026-09-02** (worker `binance-future-hunter.jaringan.workers.dev`, version `0d2006a8-6724-425c-b7de-091bb6a9ba4a`):
+> ─────────────────────────────────────────────────────────────────────
+>
+> **PROGRES 2026-09-02 — KODE SELESAI, DEPLOYED:**
+>
+> Squash-merged ke `main` @ `a343004` (PR #1). Pre-merge tip `42b9156` di
+> `rinjani/stage-0-2`. Verifikasi: `tsc` bersih · **849 src test** · **51
+> stream-gateway test**.
+>
+> | Task | Status | Commit(s) |
+> |---|---|---|
+> | A0 dynamic MMR buffer | ✅ deployed | `5e0790f` |
+> | A migration 0014 + persist 4 sub-skor ranking | ✅ deployed (0014 `--remote` applied) | `89e467c` |
+> | C notify.ts multi-channel (Telegram/Discord/webhook) | ✅ deployed (Discord/webhook secret opsional, belum di-set) | `449efae` |
+> | D dashboard read-only `/dashboard` + `/api/dashboard/*` | ✅ deployed (butuh `ADMIN_SECRET` biar aktif — belum di-set) | `68a3dc0` |
+> | D2 README proxy-relay rewrite + `.dev.vars.example` + error wording | ✅ | `467a86e`, `4c690cf` |
+> | B on-demand depth watch + `binance_watch_orderbook_realtime` | ✅ deployed + live-verified (§3.2b) | `2e36543` |
+> | B-fix degrade tool saat relay non-JSON + `.gitattributes` eol=lf | ✅ deployed (`e511dcad`) | `e745f7d` |
+> | service `ExecStart` → `/usr/bin/env node` | ✅ | `2e36543` (`.service`), `c450ba1` (bootstrap heredoc) |
+> | E provision D1/KV baru / relay kedua / `ENTRY_WATCHLIST_SIZE` | ⛔ TIDAK dikerjakan (user pilih instance lama) | — |
+>
+> **HASIL DEPLOY [Krakatau] 2026-09-02 — SEMUA STEP ✅** (worker live `e511dcad`, PR #1 squash → `main` `a343004`):
 >
 > | Step | Status | Catatan |
 > |---|---|---|
-> | 1. AWS SG 80/443 | ❌ **BLOCKER** | Inbound TCP 80/443 masih tertutup. `curl` timeout dari luar DAN dari dalam VPS (hairpin) ke `https://13.212.7.132.sslip.io/*`. Caddy `:80/:443` listen OK — blocker murni Security Group. Cursor sudah enable plugin `aws-core` (`.cursor/settings.json`, untuntracked) — coba `authorize-security-group-ingress` sendiri, atau console. |
-> | 2. Stream-gateway scp+install | ✅ | `install.sh` butuh `sed -i 's/\r$//'` (CRLF Windows checkout — di-fix `e745f7d` `.gitattributes` buat pull berikutnya). Service `active`. Local: `curl localhost:8081/stream/health` → `"depthWatch":{"count":0,"maxWatches":8,"activeWatches":[]}` ✅ |
-> | 3. D1 migrate `--remote` | ✅ | Hanya `0014` pending (0011-0013 sudah applied sebelumnya) → applied. **No drift.** |
-> | 4. `wrangler deploy` | ✅ (versi crash) | `npm ci` + typecheck + 841 test hijau. Deployed. TAPI ini SEBELUM `e745f7d` → `binance_watch_orderbook_realtime` masih crash. **Perlu re-deploy `e745f7d`.** |
-> | 5. Verify live | ⚠️ PARSIAL | `GET /` ✅ · `cme_get_institutional_positioning_trend` ✅ (1 laporan, FLAT) · `binance_analyze_institutional_flow` ✅ (align 100, 1/3 komponen — CFTC+HL belum ada data) · `binance_watch_orderbook_realtime` ❌ `Cannot read properties of undefined (reading 'ok')` — root cause: worker gagal reach `PROXY_URL` (SG blocked) + bug degrade (di-fix `e745f7d`) |
-> | 6. Merge PR #1 | ⏸ SKIPPED | Tunggu step 1 + watch tool hijau |
->
-> **Sisa buat lanjut (Krakatau / user):**
-> 1. **AWS SG `13.212.7.132` inbound TCP 80 + 443 dari `0.0.0.0/0`.** Setelah
->    itu: `curl -m 10 https://13.212.7.132.sslip.io/{health,stream/health}`.
-> 2. **Re-deploy worker** buat pick up `e745f7d` (`git pull && npx wrangler
->    deploy`). Live `0d2006a8` masih versi crash.
-> 3. **`install.sh` CRLF (re-deploy).** `.gitattributes` fix cuma kena checkout
->    BARU — `git pull` tidak re-materialize `install.sh` yang tak berubah.
->    Sekali aja: `git rm -r --cached . && git checkout .` (LF-normalize working
->    tree, tanpa ubah konten) ATAU `sed` lagi.
-> 4. Re-verify `binance_watch_orderbook_realtime` round-trip (call 1 arm →
->    tunggu ~5s → call 2 pakai `sinceMs` → `WALL_*` events).
-> 5. Merge PR #1.
->
-> **Semeru (Claude Code) TIDAK jalanin deploy/SG/`--remote`/SSH.** Standby
-> buat debug output (drift, verify gagal, health tak sesuai). Diagnosis +
-> fix `e745f7d` (Semeru) di-commit oleh Cursor dari working tree bersama.
+> | 1. AWS SG 80/443 | ✅ | SG dibuka (2 pass: pertama deploy sebelum SG → Caddy LE cert gagal; setelah SG dibuka → `systemctl restart caddy` + hapus ACME lock rusak → cert issued, HTTPS live). |
+> | 2. Stream-gateway scp+install | ✅ | `install.sh` butuh `sed -i 's/\r$//'` sekali (CRLF — `e745f7d` `.gitattributes` fix buat checkout berikutnya). Service `active`, `/stream/health` punya `depthWatch` + ws connected. |
+> | 3. D1 migrate `--remote` | ✅ | Hanya `0014` pending → applied. **No drift.** |
+> | 4. `wrangler deploy` | ✅ | Deployed 2×: `0d2006a8` (sebelum `e745f7d`, watch tool crash) → re-deploy `e511dcad` (dengan `e745f7d`). |
+> | 5. Verify live | ✅ | `GET /` ✅ · `cme_get_institutional_positioning_trend` ✅ · `binance_analyze_institutional_flow` ✅ · `binance_watch_orderbook_realtime` BTCUSDT: call 1 arm (0 event) → call 2 (+6s) **500 event** (APPEARED 245 · GREW 10 · SHRANK 12 · VANISHED 233 · `wsOk:true` · `degraded:false`) ✅ |
+> | 6. Merge PR #1 | ✅ | Squash → `main` `a343004`. |
 
 ## Goal
 
