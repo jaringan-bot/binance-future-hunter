@@ -1,24 +1,55 @@
 # Stage 3-4 — Real-time Depth Watch + Dashboard/Notify + Ranking Sub-Score Persist
 
 > [Semeru] 2026-09-02: Ditulis setelah Stage 0-2 selesai + committed
-> (`3bb8f0e`, branch `rinjani/stage-0-2`, 808 test pass, typecheck bersih).
-> **VPS produksi = AWS** (`svm-vps`, 13.212.7.132) — Oracle historis.
-> Agent: **Rinjani** untuk semua Task di bawah (koding + test lokal).
-> **Krakatau TIDAK mulai apapun di sini sampai user acc eksplisit** (lihat
-> Task D) -- ini bukan pengecualian, tetap ikuti gating CLAUDE.md.
+> (`3bb8f0e`, branch `rinjani/stage-0-2`). **VPS produksi = AWS**
+> (`svm-vps`, 13.212.7.132) — Oracle historis.
+> Agent: **Rinjani** untuk semua Task koding (selesai). **Krakatau**
+> (Cursor) untuk deploy — **user acc 2026-09-02** (runbook 6 step di
+> status bawah). Semeru (Claude Code) tidak jalanin deploy/`--remote`/SSH.
 >
-> **PROGRES [Rinjani] 2026-09-02:**
-> - A0 SELESAI — `5e0790f` (dynamic MMR buffer)
-> - A  SELESAI — `89e467c` (migration 0014 + persist 4 sub-skor)
-> - C  SELESAI — `449efae` (notify.ts multi-channel) + section README (ID+EN)
-> - D  SELESAI — `68a3dc0` (dashboard read-only) + section README (ID+EN)
-> - D2 SELESAI — README ID+EN proxy-relay rewrite + binanceProxyClient error wording
-> - B  SELESAI (kode) — depthWatch.mjs + endpoints + streamGatewayClient +
->      tool `binance_watch_orderbook_realtime` + docs. Deploy stream-gateway
->      update ke AWS = Krakatau (gated). 51 gateway test / 841 src test.
-> - service `ExecStart` fix (`/usr/bin/env node`) — blocker bootstrap AWS.
-> - E  BELUM (gated, tunggu acc user)
-> 841 src test + 51 gateway test pass, typecheck bersih.
+> **PROGRES 2026-09-02 — KODE SELESAI, DEPLOY-READY, MENUNGGU KRAKATAU:**
+>
+> Branch `rinjani/stage-0-2` (PR #1, `jaringan-bot/binance-future-hunter`).
+> Tip commit `c450ba1`, sudah di-push, sinkron dengan origin.
+> Verifikasi: `tsc` bersih · **841 src test** (`npm test`) · **51 stream-gateway
+> test** (`cd stream-gateway && node --test`).
+>
+> | Task | Status | Commit | Deploy footprint |
+> |---|---|---|---|
+> | A0 dynamic MMR buffer | ✅ kode | `5e0790f` | worker deploy |
+> | A migration 0014 + persist 4 sub-skor ranking | ✅ kode | `89e467c` | **`--remote` migrate** + worker deploy |
+> | C notify.ts multi-channel (Telegram/Discord/webhook) | ✅ kode + README ID/EN | `449efae` | worker deploy (secret Discord/webhook opsional, skip) |
+> | D dashboard read-only `/dashboard` + `/api/dashboard/*` | ✅ kode + README ID/EN | `68a3dc0` | worker deploy (butuh `ADMIN_SECRET` biar aktif) |
+> | D2 README proxy-relay rewrite + `.dev.vars.example` + error wording | ✅ | `467a86e`, `4c690cf` | — (docs) |
+> | B on-demand depth watch + `binance_watch_orderbook_realtime` | ✅ kode + docs §3.2b | `2e36543` | **stream-gateway scp+install** + worker deploy |
+> | service `ExecStart` → `/usr/bin/env node` (blocker bootstrap AWS) | ✅ | `2e36543` (`.service`), `c450ba1` (bootstrap heredoc) | dipakai step 2 install |
+> | E provision D1/KV baru / relay kedua / `ENTRY_WATCHLIST_SIZE` | ⛔ TIDAK dikerjakan | — | user putuskan lanjut instance lama untuk Stage 0-2 |
+>
+> **Sisa = Krakatau (Cursor, acc user 2026-09-02), runbook 6 step:**
+> 1. AWS Security Group `svm-vps` (`13.212.7.132`) — inbound TCP 80 + 443
+>    dari `0.0.0.0/0`. **BLOCKER SEKARANG** — external curl timeout, Cursor
+>    tanpa `aws` CLI. Butuh console AWS / CLI (user atau Cursor).
+> 2. Stream-gateway update: `scp *.mjs package.json whale-stream-gateway.service
+>    install.sh` → `svm-vps:/tmp/gw/` → `ssh svm-vps 'sudo bash /tmp/gw/install.sh'`.
+>    `install.sh` sudah nge-ship `depthWatch.mjs` + node guard. Verify
+>    `/stream/health` punya field `depthWatch: { count, maxWatches: 8, ... }`.
+> 3. `npx wrangler d1 migrations apply binance-future-hunter-db --remote`
+>    (DB existing `database_id 3600a9bb-9261-492a-bf06-3a11b0448f4e`, JANGAN
+>    provision baru). Idempotent — jalanin yang pending (0011/0012/0013/0014).
+>    Error "table already exists" → drift, backfill `d1_migrations` tanpa
+>    re-run DDL (`.cursor/rules/infrastructure.mdc`).
+> 4. `npx wrangler deploy` dari branch. Secret `PROXY_URL`/`PROXY_SECRET`
+>    sudah set. Task B TIDAK butuh secret baru (reuse `PROXY_URL`/`SECRET`).
+> 5. Verify live: `GET /` → `"name":"binance-future-hunter"`; 3 tool via
+>    `POST /mcp` — `cme_get_institutional_positioning_trend`,
+>    `binance_analyze_institutional_flow`, `binance_watch_orderbook_realtime`
+>    ({symbol:"BTCUSDT"} → call 1 arm, tunggu ~5s, call 2 pakai `sinceMs` →
+>    `WALL_*` events). Dashboard butuh `ADMIN_SECRET`.
+> 6. Merge PR #1 setelah 1–5 hijau.
+>
+> **Semeru (Claude Code) TIDAK jalanin step 1–6** — security/system settings
+> + deploy production = Krakatau (Cursor). Semeru standby buat debug output
+> (drift, verify gagal, `depthWatch` health tak sesuai).
 
 ## Goal
 
@@ -45,7 +76,7 @@ lihat komentar `scripts/calibrate-ranking-weights.mjs`).
 
 ---
 
-## Task A0 — Buffer MMR dinamis dari volume (mitigasi Leverage Bracket, kerjakan PALING DULUAN)
+## Task A0 — Buffer MMR dinamis dari volume ✅ SELESAI (`5e0790f`)
 
 > [Semeru] 2026-09-02: dibahas terpisah sama user, keputusan final "Opsi C
 > dulu" (bukan fetch leverageBracket riil yang butuh API key user -- itu
@@ -116,7 +147,7 @@ kena dampak error ini.
 
 ---
 
-## Task A — Migration 0014: persist 4 sub-skor ranking (paling murah, kerjakan duluan)
+## Task A — Migration 0014: persist 4 sub-skor ranking ✅ SELESAI (`89e467c`)
 
 **Kenapa**: `scoreTier1Signals()` (`src/pipelineEngine.ts`) menghasilkan 4
 komponen (`mmComponent` 35%, `smartMoneyComponent` 30%, `regimeComponent`
@@ -229,7 +260,7 @@ nyata buat kalibrasi jalan pakai data production asli.
 
 ---
 
-## Task C — Stage 4a: multi-channel notification
+## Task C — Stage 4a: multi-channel notification ✅ SELESAI (`449efae`)
 
 **Files:**
 - `src/notify.ts` (baru) -- interface `NotificationChannel { send(text):
@@ -263,7 +294,7 @@ nyata buat kalibrasi jalan pakai data production asli.
       `DISCORD_WEBHOOK_URL`/`NOTIFY_WEBHOOK_URL` opsional, Telegram tetap
       default/satu-satunya yang wajib kalau mau notifikasi sama sekali.
 
-## Task D — Stage 4b: dashboard read-only (kerjakan SETELAH Task C)
+## Task D — Stage 4b: dashboard read-only ✅ SELESAI (`68a3dc0`)
 
 **Files:**
 - `src/tools/../dashboardApi.ts` atau langsung di `src/index.ts` --
@@ -294,7 +325,7 @@ nyata buat kalibrasi jalan pakai data production asli.
 
 ---
 
-## Task D2 — README: perbaiki section proxy yang basi (murah, kerjakan kapan saja)
+## Task D2 — README: perbaiki section proxy yang basi ✅ SELESAI (`467a86e`, `4c690cf`)
 
 **Kenapa**: `README.md`/`README.en.md` bagian "Setup Proxy Vercel (wajib,
 sekali saja)" masih instruksikan Vercel sebagai jalur utama/wajib --
