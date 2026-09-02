@@ -19,7 +19,10 @@ User=whaleproxy
 WorkingDirectory=/opt/whale-binance-proxy
 EnvironmentFile=/opt/whale-binance-proxy/.env
 Environment=PORT=8080
-ExecStart=/usr/bin/node server.mjs
+# node lives at /usr/bin/node (Oracle) OR /usr/local/bin/node (AWS nodesource)
+# -- resolve via env + explicit PATH so the unit works on both boxes.
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env node server.mjs
 Restart=always
 RestartSec=3
 NoNewPrivileges=true

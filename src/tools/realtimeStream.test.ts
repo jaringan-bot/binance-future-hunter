@@ -7,6 +7,8 @@ import * as gw from "../streamGatewayClient.js";
 vi.mock("../streamGatewayClient.js", () => ({
   fetchLiquidations: vi.fn(),
   fetchContractEvents: vi.fn(),
+  watchOrderBook: vi.fn(),
+  fetchDepthDiff: vi.fn(),
   StreamGatewayError: class StreamGatewayError extends Error {
     constructor(
       message: string,
@@ -50,6 +52,25 @@ describe("realtime stream tools", () => {
       degraded: false,
       degradedReason: null,
     });
+    vi.mocked(gw.watchOrderBook).mockResolvedValue({
+      ok: true,
+      watching: true,
+      symbol: "BTCUSDT",
+      expiresAt: 1_700_000_300_000,
+      renewed: false,
+    });
+    vi.mocked(gw.fetchDepthDiff).mockResolvedValue({
+      watching: true,
+      symbol: "BTCUSDT",
+      expiresAt: 1_700_000_300_000,
+      events: [
+        { seq: 1, ts: 1_700_000_001_000, side: "bid", price: 100, type: "WALL_APPEARED", qty: 3000, notionalUsd: 300000 },
+        { seq: 2, ts: 1_700_000_002_000, side: "ask", price: 110, type: "WALL_VANISHED", qty: 0, notionalUsd: 280000 },
+      ],
+      meta: { count: 2, wsOk: true },
+      degraded: false,
+      degradedReason: null,
+    });
     vi.mocked(gw.fetchContractEvents).mockResolvedValue({
       events: [
         {
@@ -79,9 +100,72 @@ describe("realtime stream tools", () => {
     return entry.handler(parsed as Record<string, unknown>);
   }
 
-  it("registers both tools", () => {
+  it("registers all three tools", () => {
     expect(handlers.has("binance_get_realtime_liquidations")).toBe(true);
     expect(handlers.has("binance_get_contract_events")).toBe(true);
+    expect(handlers.has("binance_watch_orderbook_realtime")).toBe(true);
+  });
+
+  describe("binance_watch_orderbook_realtime", () => {
+    it("arms/renews the watch then returns wall-lifecycle events", async () => {
+      const r = await call("binance_watch_orderbook_realtime", { symbol: "BTCUSDT", ttlMs: 60000, sinceMs: 1 });
+      expect(gw.watchOrderBook).toHaveBeenCalledWith("BTCUSDT", 60000);
+      expect(gw.fetchDepthDiff).toHaveBeenCalledWith("BTCUSDT", 1);
+      const sc = r.structuredContent!;
+      expect(sc.armed).toBe(true);
+      expect(sc.watching).toBe(true);
+      expect(sc.eventCount).toBe(2);
+      expect((sc.counts as Record<string, number>).WALL_APPEARED).toBe(1);
+      expect((sc.counts as Record<string, number>).WALL_VANISHED).toBe(1);
+      expect(sc.events).toBeUndefined();
+      expect(Array.isArray(sc.recent)).toBe(true);
+    });
+
+    it('detail:"full" includes the whole events array', async () => {
+      const r = await call("binance_watch_orderbook_realtime", { symbol: "BTCUSDT", detail: "full" });
+      expect((r.structuredContent!.events as unknown[]).length).toBe(2);
+    });
+
+    it("a first call that only arms the watch (no events yet) is not an error", async () => {
+      vi.mocked(gw.watchOrderBook).mockResolvedValueOnce({ ok: true, watching: true, symbol: "BTCUSDT", expiresAt: 1, renewed: false });
+      vi.mocked(gw.fetchDepthDiff).mockResolvedValueOnce({
+        watching: true, symbol: "BTCUSDT", events: [], meta: { count: 0 }, degraded: false, degradedReason: null,
+      });
+      const r = await call("binance_watch_orderbook_realtime", { symbol: "BTCUSDT" });
+      expect(r.isError).toBeUndefined();
+      expect(r.structuredContent!.eventCount).toBe(0);
+      expect(r.content[0].text).toMatch(/diaktifkan/i);
+    });
+
+    it("max-watches (ok:false) degrades without isError", async () => {
+      vi.mocked(gw.watchOrderBook).mockResolvedValueOnce({
+        ok: false, error: "batas 8 watch bersamaan tercapai (VPS 1GB)", activeWatches: ["ETHUSDT"],
+      });
+      const r = await call("binance_watch_orderbook_realtime", { symbol: "BTCUSDT" });
+      expect(r.isError).toBeUndefined();
+      expect(r.structuredContent!.degraded).toBe(true);
+      expect(String(r.structuredContent!.degradedReason)).toMatch(/batas/);
+      expect(gw.fetchDepthDiff).not.toHaveBeenCalled();
+    });
+
+    it("a StreamGatewayError (gateway not upgraded) degrades, not isError", async () => {
+      vi.mocked(gw.watchOrderBook).mockRejectedValueOnce(new gw.StreamGatewayError("stream gateway HTTP 404", 404));
+      const r = await call("binance_watch_orderbook_realtime", { symbol: "BTCUSDT" });
+      expect(r.isError).toBeUndefined();
+      expect(r.structuredContent!.degraded).toBe(true);
+      expect(r.structuredContent!.armed).toBe(false);
+    });
+
+    it("surfaces a degraded depth stream but still returns collected events", async () => {
+      vi.mocked(gw.fetchDepthDiff).mockResolvedValueOnce({
+        watching: true, symbol: "BTCUSDT", events: [
+          { seq: 5, ts: 9, side: "bid", price: 1, type: "WALL_GREW", qty: 9, notionalUsd: 999999, changePct: 0.8 },
+        ], meta: { count: 1 }, degraded: true, degradedReason: "tidak ada update depth ~45s",
+      });
+      const r = await call("binance_watch_orderbook_realtime", { symbol: "BTCUSDT" });
+      expect(r.content[0].text.toLowerCase()).toContain("degraded");
+      expect(r.structuredContent!.eventCount).toBe(1);
+    });
   });
 
   it("liquidations: passes filters through to the gateway client", async () => {

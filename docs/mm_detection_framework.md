@@ -2,7 +2,7 @@
 
 🇮🇩 Bahasa Indonesia | [🇬🇧 English](mm_detection_framework.en.md)
 
-> Framework deteksi aktivitas market maker (MM) menggunakan tool WhaleScope MCP (Binance Futures + Spot).
+> Framework deteksi aktivitas market maker (MM) menggunakan tool Binance Future Hunter (Binance Futures + Spot).
 > **Catatan penting:** Tidak ada tool yang bisa melihat identitas atau posisi spesifik MM secara langsung. Framework ini membangun profil aktivitas MM dari jejak yang mereka tinggalkan di pasar.
 
 ---
@@ -109,11 +109,12 @@ Kekhawatiran trade-concentration (top-3 trade dominasi CVD) yang sempat muncul d
 **Tool yang digunakan:**
 - `binance_get_order_book_depth` (snapshot tunggal, manual)
 - `binance_get_orderbook_delta` (2-snapshot, otomatis — lihat di bawah)
+- `binance_watch_orderbook_realtime` (WS `@depth@100ms` sub-detik, on-demand — lihat di bawah)
 
 > ⚠️ **Batasan teknis (tervalidasi):**
 > - **Chain lama (worker→Vercel→Binance)**: latensi per call **298–898ms** (rata-rata ~485ms), spread ~600ms — polling back-to-back tidak reliable.
 > - **Chain baru (worker→VPS relay Singapura→Binance, sejak 2026-08-28)**: diukur 2026-08-28 — leg VPS→Binance **~77ms** (spread 7ms, `curl localhost:8080` 10×); full chain dari luar (my-machine ID → relay publik → Binance) **~150ms rata-rata, spread 18ms** (12×). Deployed worker (edge CF dekat SG → VPS) diperkirakan **~90–150ms, spread <30ms**. Latensi turun ~3×, variance turun ~20–30×.
-> - Konsekuensi: polling sub-detik back-to-back buat refresh-rate spoofing sekarang **feasible** buat kasus terbatas (variance jaringan sudah kecil dibanding jendela deteksi). Deteksi wall lifecycle sub-detik sungguhan tetap butuh WS `@depth@100ms` (mekanisme on-demand watch di stream gateway — spec terpisah, belum dibangun).
+> - Konsekuensi: polling sub-detik back-to-back buat refresh-rate spoofing sekarang **feasible** buat kasus terbatas (variance jaringan sudah kecil dibanding jendela deteksi). Deteksi wall lifecycle sub-detik sungguhan **sekarang tersedia** lewat `binance_watch_orderbook_realtime` (WS `@depth@100ms` on-demand di stream gateway — lihat di bawah).
 
 **Kriteria deteksi (2-snapshot, via `binance_get_orderbook_delta`):**
 
@@ -125,7 +126,33 @@ Kekhawatiran trade-concentration (top-3 trade dominasi CVD) yang sempat muncul d
 
 > 💡 **Jeda eksplisit `binance_get_orderbook_delta` (default 1500ms) tetap default yang aman.** Dengan chain baru (spread ~20ms) jarak antar-snapshot jadi jauh lebih konsisten, tapi 1500ms tetap dipertahankan sebagai default — cukup buat wall spoofing (ditarik dalam hitungan detik) dan tidak ada alasan mengetatkannya tanpa kebutuhan. Untuk kasus yang butuh sub-detik, mekanisme on-demand depth-diff watch di stream gateway (spec terpisah) lebih tepat daripada polling REST.
 
-> ⚠️ **WebSocket: TERBATAS.** Stream gateway VPS pegang `!forceOrder@arr` + `!contractInfo` always-on (→ `binance_get_realtime_liquidations`, `binance_get_contract_events`). TIDAK ada stream depth/aggTrade per-symbol (high-volume, sengaja di luar scope batch ini). Deteksi refresh-rate wall sub-detik butuh tambahan on-demand depth watch — belum dibangun.
+> ⚠️ **WebSocket: PARSIAL.** Stream gateway VPS pegang `!forceOrder@arr` + `!contractInfo` always-on (→ `binance_get_realtime_liquidations`, `binance_get_contract_events`). Stream depth/aggTrade per-symbol yang always-on TETAP di luar scope (high-volume). Yang sekarang ADA: **on-demand per-symbol depth watch** — lihat 3.2b.
+
+### 3.2b Wall Lifecycle Sub-Detik — `binance_watch_orderbook_realtime` (2026-09-02)
+
+WebSocket `wss://fstream.binance.com/ws/<symbol>@depth@100ms` di stream
+gateway AWS (black-hole `fstream` = IP-Oracle-specific, tidak apply ke AWS
+depth — verified Krakatau spike ~588 msg/60s). **On-demand, bukan
+always-on:** tool meng-*arm* watch untuk satu symbol, gateway buka 1 socket,
+maintain book KASAR (cuma level di atas ambang notional — hemat memori VPS
+1GB), emit event lifecycle wall:
+
+| Event | Arti |
+|---|---|
+| `WALL_APPEARED` | Level baru menembus ambang wall notional (default $250k, heuristik BELUM dikalibrasi) |
+| `WALL_GREW` / `WALL_SHRANK` | Wall existing berubah qty ≥40% (masih di atas ambang) |
+| `WALL_VANISHED` | Wall drop di bawah ambang / qty 0 |
+
+- **TTL-bounded** (default 5 menit, maks 15): watch auto-mati tanpa
+  perpanjangan → socket ditutup, slot dibebaskan.
+- **Batas watch bersamaan** (default 8, `STREAM_DEPTH_MAX_WATCHES`) — sama
+  kelas constraint yang motong `WALL_SCAN_WATCHLIST` 50→15.
+- **BUKAN L2 book penuh** — wall yang tidak pernah tick tidak akan muncul;
+  wall pre-existing bisa register 1 `WALL_APPEARED` saat konek (warmup ~1.5s
+  menekan sebagian besar). Ini feed *lifecycle*, bukan snapshot depth.
+- Pola panggil: call pertama meng-arm (0 event), call berikutnya dengan
+  `sinceMs` = ts event terakhir → delta baru. Endpoint gateway:
+  `POST /stream/watch`, `GET /stream/depth-diff?symbol=&sinceMs=`.
 
 ---
 
@@ -135,7 +162,9 @@ Kekhawatiran trade-concentration (top-3 trade dominasi CVD) yang sempat muncul d
 
 > **Sejarah**: `binance_get_liquidation_history` (via Coinalyze) dihapus 2026-08-22 — Binance gak punya REST publik market-wide, dan WebSocket `fstream.binance.com` (`!forceOrder@arr`) kena block dari Cloudflare Workers/DO (3x dikonfirmasi). Solusi butuh relay always-on berbayar, yang saat itu ditolak.
 >
-> **2026-08-28 — infra baru bikin ini possible lagi.** Oracle VPS Singapore (`146.235.17.228`, ~$3.6/bln, bukan Cloudflare) sekarang jalanin `whale-stream-gateway` (`stream-gateway/` di repo): satu WebSocket always-on ke `dstream.binance.com/stream?streams=!forceOrder@arr/!contractInfo` (NB: `fstream.binance.com` di-black-hole dari IP SG — accept upgrade, kirim nol data; `dstream` serve feed `!forceOrder@arr` yang sama termasuk simbol USD-M dan TIDAK di-filter), buffer ke SQLite, expose `GET /stream/liquidations?symbol=&sinceMs=&minNotionalUsd=` di balik Caddy yang sama. Tool baru `binance_get_realtime_liquidations` + `binance_get_contract_events`.
+> **2026-08-28 — infra baru bikin ini possible lagi.** Oracle VPS Singapore (`146.235.17.228`, ~$3.6/bln) menjalankan `whale-stream-gateway` pertama kali: satu WebSocket always-on ke `dstream.binance.com/stream?streams=!forceOrder@arr/!contractInfo` (NB: `fstream.binance.com` di-black-hole dari **IP Oracle** — accept upgrade, kirim nol data; `dstream` serve feed `!forceOrder@arr` yang sama termasuk simbol USD-M dan TIDAK di-filter), buffer ke SQLite, expose `GET /stream/liquidations?symbol=&sinceMs=&minNotionalUsd=` di balik Caddy. Tool baru `binance_get_realtime_liquidations` + `binance_get_contract_events`.
+>
+> **2026-09-02 — produksi pindah AWS.** VPS produksi = AWS ap-southeast-1 (`svm-vps`, `13.212.7.132`). Krakatau spike: `fstream` `@depth@100ms` per-symbol **JALAN** dari IP AWS (~588 msg/60s); `fstream` `@aggTrade` masih silent (0 msg/60s). Black-hole `fstream` = **IP-specific** (Oracle ya, AWS depth tidak). Task B depth watch pakai `wss://fstream.binance.com/ws/<symbol>@depth@100ms` di AWS.
 >
 > **Feed di-SAMPEL Binance** (maks 1 event/symbol/detik) — bukan tiap liquidation. Jadi tetap dipakai sebagai **confidence-boost**, bukan trigger tunggal.
 >
@@ -309,7 +338,7 @@ Framework ini **tidak membuktikan** keberadaan market maker secara definitif, me
 3. **Konteks pasar penting** — sinyal MM lebih valid di volume rendah/area konsolidasi.
 4. **False positive ada** — news event atau whale retail bisa memicu sinyal serupa.
 5. **Kalibrasi per-pair** — threshold top-trader ratio harus dibangun dari data historis pair sendiri (~5-30 hari, tergantung resolusi), bukan angka universal.
-6. **Kenali batasan teknis** — latency 300-900ms/call, tidak ada data liquidation sama sekali (dihapus permanen, lihat Section 4.1; OI-drop + trade-volume-concentration proxy jadi mitigasi terbaik yang tersedia), retensi historis top-trader ratio terbatas, refresh-rate real-time sub-detik tidak feasible, WebSocket tidak tersedia. Spoofing 2-snapshot (`binance_get_orderbook_delta`) SEKARANG tersedia tapi menambah latency ~1-2 detik.
+6. **Kenali batasan teknis** — latency 300-900ms/call, tidak ada data liquidation sama sekali (dihapus permanen, lihat Section 4.1; OI-drop + trade-volume-concentration proxy jadi mitigasi terbaik yang tersedia), retensi historis top-trader ratio terbatas. Spoofing 2-snapshot (`binance_get_orderbook_delta`) menambah latency ~1-2 detik; wall lifecycle sub-detik sekarang ADA via `binance_watch_orderbook_realtime` (WS `@depth@100ms` on-demand, TTL-bounded — lihat Section 3.2b), tapi always-on depth/aggTrade per-symbol tetap di luar scope.
 
 ---
 
@@ -341,7 +370,7 @@ Skor ~1-1.5/6 → tier Weak. **Hasil masuk akal** — BTC tenang, framework tida
 |-----------|--------|---------|
 | Polling <500ms untuk refresh-rate spoofing | ❌ Dihapus | Latency 298-898ms, tidak reliable |
 | Snapshot comparison 1-2 detik | ⚠️ Marginal | 2× call bisa 1.8s+, variasi terlalu besar |
-| WebSocket fallback "jika tersedia" | ❌ Dihapus | Tidak tersedia di WhaleScope MCP (100% REST) |
+| WebSocket fallback "jika tersedia" | ❌ Dihapus | Tidak tersedia di Binance Future Hunter (100% REST) |
 | Threshold divergence >15% flat | ❌ Dihapus | Tidak pernah trigger untuk pair manapun |
 | Tiered threshold 3-15% per liquiditas | ❌ Dihapus | Angka tebakan, semua pair jauh di bawah |
 | "Cluster liquidation di level psikologis" | ⚠️ Direvisi | Tidak ada field harga — cross-check `klines` manual |
@@ -443,6 +472,6 @@ Lihat `src/smartMoneyAnalysis.ts` untuk formula skor lengkap.
 ---
 
 *Dibuat pada: 2026-08-11*
-*Versi 4.0 (final) — semua klaim teknis divalidasi langsung ke data live WhaleScope MCP, termasuk latency, batas historis endpoint, dan realita pergerakan top-trader ratio lintas pair.*
+*Versi 4.0 (final) — semua klaim teknis divalidasi langsung ke data live Binance Future Hunter (dulu whalescope-mcp), termasuk latency, batas historis endpoint, dan realita pergerakan top-trader ratio lintas pair.*
 *Section 11 ditambahkan 2026-08-12: dokumentasi `binance_detect_mm_activity` (automated scoring) + `binance_backtest_signal` (validasi empiris berkelanjutan).*
 *Section 12 ditambahkan 2026-08-15: dokumentasi `binance_analyze_smart_money` (Smart Money Divergence Score).*

@@ -4,7 +4,7 @@ Replacement for the retired Vercel relay (`../proxy/`), which Vercel paused
 for commercial use on a Hobby plan. Same contract, same path whitelist, but
 runs anywhere: **zero dependencies, single file of logic (`handler.mjs`).**
 
-The whalescope-mcp Cloudflare Worker is WAF-blocked by Binance (403 on every
+The binance-future-hunter Cloudflare Worker is WAF-blocked by Binance (403 on every
 endpoint). It needs a relay on a host whose egress IP is:
 
 - **not** Binance-WAF-blocked (Cloudflare Workers IPs are), and
@@ -83,7 +83,7 @@ docker run -p 8080:8080 -e PROXY_SECRET=xxxx whale-binance-proxy
 
 ## Wire it into the Worker
 
-From the `whalescope-mcp` repo root:
+From the `binance-future-hunter` repo root:
 
 ```sh
 # make this relay the primary:

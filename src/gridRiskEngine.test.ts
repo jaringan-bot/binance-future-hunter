@@ -1,13 +1,26 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { calculateGridRisk, type GridInputParams } from "./gridRiskEngine.js";
+import {
+  calculateGridRisk,
+  estimateMaintenanceMarginBufferPct,
+  MMR_BUFFER_HIGH,
+  MMR_BUFFER_MID,
+  MMR_BUFFER_LOW,
+  HIGH_LIQUIDITY_THRESHOLD_USD,
+  MID_LIQUIDITY_THRESHOLD_USD,
+  type GridInputParams,
+} from "./gridRiskEngine.js";
 import { FALLBACK_CONTEXT } from "./marketContext.js";
 import type { BinanceMarketData } from "./binanceFetcher.js";
 import { setProxyConfig } from "./binanceProxyClient.js";
 
+// quoteVolumeUsd tinggi disengaja: golden regression di bawah dihitung
+// dengan asumsi buffer MMR 0.5% (tier top-liquidity). Tanpa field ini,
+// fixture jatuh ke tier konservatif 1.5% dan angka golden bergeser.
 const marketData: BinanceMarketData = {
   predictedFundingRate: 0,
   openInterest: 0,
   orderBookBidDepthSL: 0,
+  quoteVolumeUsd: 800_000_000,
 };
 
 // Trading rules TRBUSDT dipakai sbg golden test -- minQty=0.1, stepSize=0.1,
@@ -70,6 +83,53 @@ const trbBaseParams: GridInputParams = {
   gridType: "ARITHMETIC",
   feeRate: 0.0002,
 };
+
+describe("estimateMaintenanceMarginBufferPct", () => {
+  it("returns the low (0.5%) buffer for top-liquidity volume", () => {
+    expect(estimateMaintenanceMarginBufferPct(HIGH_LIQUIDITY_THRESHOLD_USD)).toBe(MMR_BUFFER_HIGH);
+    expect(estimateMaintenanceMarginBufferPct(2_000_000_000)).toBe(MMR_BUFFER_HIGH);
+  });
+
+  it("returns the mid (0.75%) buffer between the two thresholds", () => {
+    expect(estimateMaintenanceMarginBufferPct(MID_LIQUIDITY_THRESHOLD_USD)).toBe(MMR_BUFFER_MID);
+    expect(estimateMaintenanceMarginBufferPct(120_000_000)).toBe(MMR_BUFFER_MID);
+  });
+
+  it("returns the conservative (1.5%) buffer for thin volume", () => {
+    expect(estimateMaintenanceMarginBufferPct(5_000_000)).toBe(MMR_BUFFER_LOW);
+    expect(estimateMaintenanceMarginBufferPct(MID_LIQUIDITY_THRESHOLD_USD - 1)).toBe(MMR_BUFFER_LOW);
+  });
+
+  it("falls back to the MOST conservative tier when volume is unknown/invalid", () => {
+    expect(estimateMaintenanceMarginBufferPct(undefined)).toBe(MMR_BUFFER_LOW);
+    expect(estimateMaintenanceMarginBufferPct(0)).toBe(MMR_BUFFER_LOW);
+    expect(estimateMaintenanceMarginBufferPct(-1)).toBe(MMR_BUFFER_LOW);
+    expect(estimateMaintenanceMarginBufferPct(Number.NaN)).toBe(MMR_BUFFER_LOW);
+  });
+
+  it("orders the tiers so a thinner pair never gets a smaller buffer", () => {
+    expect(MMR_BUFFER_LOW).toBeGreaterThan(MMR_BUFFER_MID);
+    expect(MMR_BUFFER_MID).toBeGreaterThan(MMR_BUFFER_HIGH);
+  });
+});
+
+describe("calculateGridRisk - MMR buffer wired into liquidationPrice", () => {
+  it("pushes liquidationPrice closer to entry for a low-liquidity (unknown volume) pair", async () => {
+    stubTradingRulesFetch();
+    const highLiq = await calculateGridRisk(
+      { ...trbBaseParams, initialCapital: 101 },
+      { ...marketData, quoteVolumeUsd: 900_000_000 },
+      FALLBACK_CONTEXT,
+    );
+    stubTradingRulesFetch();
+    const unknownLiq = await calculateGridRisk(
+      { ...trbBaseParams, initialCapital: 101 },
+      { ...marketData, quoteVolumeUsd: undefined },
+      FALLBACK_CONTEXT,
+    );
+    expect(unknownLiq.liquidationPrice).toBeGreaterThan(highLiq.liquidationPrice);
+  });
+});
 
 describe("calculateGridRisk - TRBUSDT golden regression (constant base-asset qty)", () => {
   it("rejects $100 initial capital as below the minimum required margin", async () => {

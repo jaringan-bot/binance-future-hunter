@@ -33,13 +33,30 @@ function num(v) {
  * @param {string} pathname
  * @param {Record<string,string>} query
  * @param {Record<string,string>} headers
- * @param {{store:object, health:object, secret:string|undefined}} deps
+ * @param {{store:object, health:object, secret:string|undefined, depthWatch?:object}} deps
+ * @param {object|null} [body]  parsed JSON body (POST only)
  */
-export function route(method, pathname, query, headers, deps) {
+export function route(method, pathname, query, headers, deps, body = null) {
   if (method === "OPTIONS") return { status: 204, json: null };
-  if (method !== "GET") return { status: 405, json: { error: "method not allowed, use GET" } };
 
-  const { store, health, secret } = deps;
+  const { store, health, secret, depthWatch } = deps;
+
+  // POST /stream/watch is the ONLY non-GET route (arm/renew a depth watch).
+  if (method === "POST") {
+    if (pathname !== "/stream/watch") {
+      return { status: 405, json: { error: "method not allowed, use GET" } };
+    }
+    if (!secret) return { status: 500, json: { error: "PROXY_SECRET not set on the gateway host" } };
+    if (!safeEqual(headers["x-proxy-secret"], secret)) {
+      return { status: 401, json: { error: "unauthorized: x-proxy-secret missing or wrong" } };
+    }
+    if (!depthWatch) return { status: 503, json: { error: "depth watch not available on this gateway" } };
+    const b = body && typeof body === "object" ? body : {};
+    const result = depthWatch.watch(b.symbol, b.ttlMs);
+    return { status: result.ok ? 200 : (result.error && /batas/.test(result.error) ? 429 : 400), json: result };
+  }
+
+  if (method !== "GET") return { status: 405, json: { error: "method not allowed, use GET" } };
 
   if (pathname === "/stream/health" || pathname === "/health" || pathname === "/") {
     const st = store.stats();
@@ -56,11 +73,12 @@ export function route(method, pathname, query, headers, deps) {
         contractRowCount: st.contractRowCount,
         oldestLiqTradeTime: st.oldestLiqTradeTime,
         newestLiqTradeTime: st.newestLiqTradeTime,
+        depthWatch: depthWatch ? depthWatch.stats() : null,
       },
     };
   }
 
-  const protectedPaths = new Set(["/stream/liquidations", "/stream/contract-events"]);
+  const protectedPaths = new Set(["/stream/liquidations", "/stream/contract-events", "/stream/depth-diff"]);
   if (!protectedPaths.has(pathname)) return { status: 404, json: { error: "not found" } };
 
   if (!secret) return { status: 500, json: { error: "PROXY_SECRET not set on the gateway host" } };
@@ -97,6 +115,11 @@ export function route(method, pathname, query, headers, deps) {
     };
   }
 
+  if (pathname === "/stream/depth-diff") {
+    if (!depthWatch) return { status: 503, json: { error: "depth watch not available on this gateway" } };
+    return { status: 200, json: depthWatch.queryDepthDiff(query.symbol, num(query.sinceMs)) };
+  }
+
   // /stream/contract-events
   const events = store.queryContractEvents({
     symbol: query.symbol,
@@ -105,6 +128,8 @@ export function route(method, pathname, query, headers, deps) {
   });
   return { status: 200, json: { events, meta: { count: events.length, streamHealth } } };
 }
+
+const MAX_BODY_BYTES = 4096;
 
 export function createServer(deps) {
   return http.createServer((req, res) => {
@@ -120,8 +145,44 @@ export function createServer(deps) {
     const headers = {};
     for (const [k, v] of Object.entries(req.headers)) headers[k.toLowerCase()] = v;
 
-    const { status, json } = route(req.method, u.pathname, query, headers, deps());
-    res.writeHead(status, { "Content-Type": "application/json", ...CORS });
-    res.end(json === null ? "" : JSON.stringify(json));
+    const finish = (body) => {
+      const { status, json } = route(req.method, u.pathname, query, headers, deps(), body);
+      res.writeHead(status, { "Content-Type": "application/json", ...CORS });
+      res.end(json === null ? "" : JSON.stringify(json));
+    };
+
+    if (req.method !== "POST") {
+      finish(null);
+      return;
+    }
+    const chunks = [];
+    let bytes = 0;
+    let aborted = false;
+    req.on("data", (c) => {
+      bytes += c.length;
+      if (bytes > MAX_BODY_BYTES) {
+        aborted = true;
+        res.writeHead(413, { "Content-Type": "application/json", ...CORS });
+        res.end(JSON.stringify({ error: "body too large" }));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on("end", () => {
+      if (aborted) return;
+      let body = {};
+      const text = Buffer.concat(chunks).toString("utf8").trim();
+      if (text) {
+        try {
+          body = JSON.parse(text);
+        } catch {
+          res.writeHead(400, { "Content-Type": "application/json", ...CORS });
+          res.end(JSON.stringify({ error: "invalid JSON body" }));
+          return;
+        }
+      }
+      finish(body);
+    });
   });
 }

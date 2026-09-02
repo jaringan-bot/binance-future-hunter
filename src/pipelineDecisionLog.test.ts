@@ -69,7 +69,29 @@ describe("toPipelineDecisionLogRow", () => {
       lowerPrice: null,
       upperPrice: null,
       stopLoss: null,
+      // hard screen gagal -> rankingComponents undefined -> kolom NULL
+      mmComponent: null,
+      smartMoneyComponent: null,
+      regimeComponent: null,
+      buyPressureComponent: null,
     });
+  });
+
+  it("persists the 4 ranking sub-scores when present (migration 0014)", () => {
+    const row = toPipelineDecisionLogRow(
+      result({
+        symbol: "SOLUSDT",
+        decision: "TRADE",
+        rankingScore: 62.4,
+        rankingComponents: { mm: 70, smartMoney: 55, regime: 60, buyPressure: 50 },
+      }),
+      1,
+      "manual",
+    );
+    expect(row.mmComponent).toBe(70);
+    expect(row.smartMoneyComponent).toBe(55);
+    expect(row.regimeComponent).toBe(60);
+    expect(row.buyPressureComponent).toBe(50);
   });
 
   it("prefers gridBotConfig bounds and keeps dropstab source_ref", () => {

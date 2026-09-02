@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# whale-binance-proxy — Oracle Cloud (OCI) one-shot bootstrap
+# whale-binance-proxy — VPS one-shot bootstrap (Oracle OCI or AWS EC2)
 # =============================================================================
 # Works two ways:
 #   A) Paste into the OCI "Create instance" wizard:
@@ -18,10 +18,8 @@
 #   - Caddy terminates TLS on :443 for  <PUBLIC_IP>.sslip.io  (auto Let's Encrypt)
 #   - opens ports 80 + 443 in the instance's own iptables
 #
-# YOU STILL MUST, in the OCI Console (cannot be scripted from inside the VM):
-#   Networking -> the instance's VCN -> Security Lists -> Default Security List
-#   -> Add Ingress Rules:  Source 0.0.0.0/0  IP Protocol TCP  Dest port 80
-#                          Source 0.0.0.0/0  IP Protocol TCP  Dest port 443
+# Still TODO in cloud console if ports are blocked (OCI Security List / AWS SG):
+#   allow inbound TCP 80 + 443 from 0.0.0.0/0
 #
 # Final relay URL (this is your PROXY_URL for the Cloudflare Worker):
 #   https://<PUBLIC_IP>.sslip.io
@@ -58,6 +56,11 @@ echo "[bootstrap] create service user + app dir"
 id -u "$APP_USER" >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin "$APP_USER"
 mkdir -p "$APP_DIR"
 
+if ! command -v node >/dev/null 2>&1; then
+  echo "[bootstrap] FATAL: node not found in PATH after install step" >&2
+  exit 1
+fi
+
 echo "[bootstrap] write relay files"
 
 cat > "$APP_DIR/package.json" <<'PKGEOF'
@@ -78,7 +81,7 @@ cat > "$APP_DIR/handler.mjs" <<'HANDLEREOF'
 // Web-standard request handler that runs unchanged on Node (node:http),
 // Deno Deploy (Deno.serve), Bun, Fly.io, Render, Koyeb, or a plain VPS.
 //
-// WHY THIS EXISTS: the Cloudflare Worker (whalescope-mcp) is WAF-blocked by
+// WHY THIS EXISTS: the Cloudflare Worker (binance-future-hunter) is WAF-blocked by
 // Binance (HTTP 403 on every fapi.binance.com endpoint, /fapi/v1/ping
 // included). It must call Binance through a relay hosted on an IP pool that
 // is NOT WAF-blocked AND NOT geo-restricted (i.e. non-US region — Singapore
@@ -342,7 +345,8 @@ User=$APP_USER
 WorkingDirectory=$APP_DIR
 EnvironmentFile=$APP_DIR/.env
 Environment=PORT=$PORT
-ExecStart=/usr/bin/node server.mjs
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env node server.mjs
 Restart=always
 RestartSec=3
 NoNewPrivileges=true
@@ -409,6 +413,7 @@ echo " Still TODO in the OCI Console:"
 echo "   VCN -> Security Lists -> Default -> Add Ingress:"
 echo "     0.0.0.0/0  TCP  port 80"
 echo "     0.0.0.0/0  TCP  port 443"
+echo " (AWS: open the same ports in the instance Security Group)"
 echo
 echo " Verify (wait ~30s for the TLS cert first):"
 echo "     curl -s https://${HOSTNAME_TLS}/health"

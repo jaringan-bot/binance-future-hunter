@@ -81,6 +81,39 @@ function reject(
   };
 }
 
+// ── Buffer maintenance-margin-rate (MMR) untuk liquidationPrice ─────────
+// liquidationPrice = avgEntryPrice * (1 - 1/leverage + BUFFER). BUFFER
+// meniru maintenance margin rate: makin tinggi MMR, makin dekat likuidasi
+// ke entry. Dulu flat 0.5% untuk SEMUA pair -- riset (bracket table Binance
+// riil) menunjukkan pair kecil/altcoin MMR bisa 3x lebih tinggi (contoh
+// NOMUSDT tier 21x-50x = 1.50%). Arah error-nya SELALU optimistic-salah
+// buat risk tool (MMR riil > asumsi -> likuidasi riil lebih dekat entry ->
+// tool bisa bilang "SAFE" padahal likuidasi di atas stop-loss).
+//
+// Ini MITIGASI HEURISTIK, BUKAN bracket table riil -- threshold di bawah
+// BELUM dikalibrasi ke /fapi/v1/leverageBracket (endpoint itu SIGNED,
+// butuh API key user, ditunda). Proxy: quote volume 24h sebagai indikator
+// kasar tier likuiditas.
+export const HIGH_LIQUIDITY_THRESHOLD_USD = 500_000_000;
+export const MID_LIQUIDITY_THRESHOLD_USD = 50_000_000;
+export const MMR_BUFFER_HIGH = 0.005; // 0.5% -- BTC/ETH/top pair (default lama)
+export const MMR_BUFFER_MID = 0.0075; // 0.75%
+export const MMR_BUFFER_LOW = 0.015; // 1.5% -- altcoin kecil / data hilang
+
+/**
+ * Estimasi buffer MMR dari quote volume 24h (USDT). `undefined` / non-finite
+ * / <= 0 -> tier PALING KONSERVATIF (1.5%) -- data hilang tidak boleh
+ * diam-diam dianggap likuid.
+ */
+export function estimateMaintenanceMarginBufferPct(quoteVolumeUsd: number | undefined): number {
+  if (quoteVolumeUsd === undefined || !Number.isFinite(quoteVolumeUsd) || quoteVolumeUsd <= 0) {
+    return MMR_BUFFER_LOW;
+  }
+  if (quoteVolumeUsd >= HIGH_LIQUIDITY_THRESHOLD_USD) return MMR_BUFFER_HIGH;
+  if (quoteVolumeUsd >= MID_LIQUIDITY_THRESHOLD_USD) return MMR_BUFFER_MID;
+  return MMR_BUFFER_LOW;
+}
+
 // Binance default adjust coefficient utk grid Futures -- docs menyebut nilai
 // ini "may be adjusted based on market conditions", tapi Binance sendiri gak
 // expose endpoint publik utk baca nilai real-time-nya, jadi dipakai default
@@ -225,8 +258,9 @@ export async function calculateGridRisk(
   const stressMultiplier = contextualRisk.stressMultiplier;
   const slippageStressedLoss = Math.max(maxExposureSL, 0) * stressMultiplier;
 
+  const mmrBufferPct = estimateMaintenanceMarginBufferPct(marketData.quoteVolumeUsd);
   const liquidationPrice =
-    avgEntryPrice * (1 - 1 / params.leverage + 0.005);
+    avgEntryPrice * (1 - 1 / params.leverage + mmrBufferPct);
 
   const fundingRate = Number.isFinite(marketData.predictedFundingRate)
     ? marketData.predictedFundingRate

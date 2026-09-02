@@ -1,4 +1,4 @@
-name = "whalescope-mcp"
+name = "binance-future-hunter"
 main = "src/index.ts"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
@@ -9,6 +9,11 @@ enabled = true
 # Dipakai buat threshold per-pair custom (binance_set/get_pair_threshold) --
 # rare write, cocok di KV. Histori time-series (basis, sinyal MM) sekarang di
 # D1 (lihat [[d1_databases]] di bawah), bukan di sini lagi.
+#
+# REBRAND: id di bawah masih punya akun Cloudflare lama. Fork/deploy baru
+# WAJIB `npx wrangler kv namespace create WHALESCOPE_CONFIG` sendiri lalu
+# ganti id ini (binding-nya biarkan CONFIG_KV) -- lihat README "Setup
+# Workers KV".
 [[kv_namespaces]]
 binding = "CONFIG_KV"
 id = "3acf05a516874b25bef6e8151328c9ac"
@@ -17,9 +22,15 @@ id = "3acf05a516874b25bef6e8151328c9ac"
 # bawah) -- pindah dari Workers KV karena limit 1.000 write/hari KV Free
 # plan cuma cukup buat watchlist 3 pair; D1 (5 juta write/hari) cukup buat
 # 10 pair. Migration: migrations/0001_init.sql.
+#
+# REBRAND (binance-future-hunter): database_id di bawah MASIH nunjuk ke D1
+# lama (whalescope-mcp-db) supaya worker yang sudah live tidak putus data.
+# Kalau fork/deploy ke akun Cloudflare baru, WAJIB `npx wrangler d1 create
+# binance-future-hunter-db` sendiri lalu ganti database_id di bawah --
+# lihat README bagian "Setup Workers D1".
 [[d1_databases]]
 binding = "DB"
-database_name = "whalescope-mcp-db"
+database_name = "binance-future-hunter-db"
 database_id = "3600a9bb-9261-492a-bf06-3a11b0448f4e"
 
 # Lima Cron Trigger -- akun ini sudah di Workers PAID plan, jadi limit slot

@@ -7,7 +7,7 @@
 // entryAlertCron.ts, lihat runEntryAlertCheck).
 import * as d1Client from "../d1Client.js";
 import * as kvConfig from "../kvConfig.js";
-import { sendTelegramAlert, type TelegramEnv } from "../telegram.js";
+import { dispatchNotification, type NotifyEnv } from "../notify.js";
 
 export const HEARTBEAT_LOOKBACK_MS = 8 * 60 * 60 * 1000;
 
@@ -15,7 +15,7 @@ export const HEARTBEAT_LOOKBACK_MS = 8 * 60 * 60 * 1000;
 // dianggap indikasi backend bermasalah, bukan cuma noise kecil.
 export const BACKEND_ISSUE_ERROR_RATE_THRESHOLD = 0.3;
 
-export async function checkHeartbeat(env: TelegramEnv, now: number = Date.now()): Promise<void> {
+export async function checkHeartbeat(env: NotifyEnv, now: number = Date.now()): Promise<void> {
   const cutoff = now - HEARTBEAT_LOOKBACK_MS;
   const alertCount = await d1Client.countEntryAlertsSince(cutoff);
   if (alertCount > 0) return; // sudah ada sinyal asli, gak perlu heartbeat.
@@ -23,7 +23,7 @@ export async function checkHeartbeat(env: TelegramEnv, now: number = Date.now())
   const { total, errors } = await d1Client.getEntryAlertRunLogSummarySince(cutoff);
 
   if (total === 0) {
-    await sendTelegramAlert(
+    await dispatchNotification(
       env,
       "⚠️ *Heartbeat*: tidak ada data entry-alert sama sekali dalam 8 jam terakhir -- entryAlertCron kemungkinan tidak jalan. Cek backend/Cron Trigger.",
     );
@@ -33,14 +33,14 @@ export async function checkHeartbeat(env: TelegramEnv, now: number = Date.now())
   const errorRatePct = (errors / total) * 100;
 
   if (errorRatePct > BACKEND_ISSUE_ERROR_RATE_THRESHOLD * 100) {
-    await sendTelegramAlert(
+    await dispatchNotification(
       env,
       `⚠️ *Heartbeat*: tidak ada sinyal TRADE/WATCH dalam 8 jam terakhir, DAN ${errorRatePct.toFixed(0)}% pair gagal diproses tiap tick -- kemungkinan ada masalah backend, bukan cuma kondisi market.`,
     );
     return;
   }
 
-  await sendTelegramAlert(
+  await dispatchNotification(
     env,
     `ℹ️ *Heartbeat*: tidak ada sinyal TRADE/WATCH dalam 8 jam terakhir. Backend normal (error rate ${errorRatePct.toFixed(0)}%) -- tidak ada pair yang memenuhi kriteria TRADE/WATCH saat ini.`,
   );
@@ -68,7 +68,7 @@ interface StaleNoticeState {
   at: number;
 }
 
-export async function checkEntryAlertCronFreshness(env: TelegramEnv, now: number = Date.now()): Promise<void> {
+export async function checkEntryAlertCronFreshness(env: NotifyEnv, now: number = Date.now()): Promise<void> {
   const latest = await d1Client.getLatestEntryAlertRunLogTimestamp();
   const staleForMs = latest === null ? Infinity : now - latest;
   if (staleForMs <= ENTRY_ALERT_STALE_THRESHOLD_MS) return; // sehat, gak ada yang perlu dilaporkan.
@@ -81,6 +81,6 @@ export async function checkEntryAlertCronFreshness(env: TelegramEnv, now: number
       ? "🚨 *Entry-Alert Cron*: belum PERNAH ada baris entry_alert_run_log tercatat -- entryAlertCron kemungkinan belum pernah selesai jalan sejak deploy terakhir."
       : `🚨 *Entry-Alert Cron*: tidak ada tick yang SELESAI dalam ${Math.round(staleForMs / 60000)} menit terakhir (normalnya tiap ~15 menit). Kemungkinan tick di-cancel platform Cloudflare (cek CPU-time cap) atau backend bermasalah -- cek Workers Logs / \`wrangler tail\` / D1 \`entry_alert_run_log\`.`;
 
-  await sendTelegramAlert(env, message);
+  await dispatchNotification(env, message);
   await kvConfig.putJson(ENTRY_ALERT_STALE_KV_KEY, { at: now } satisfies StaleNoticeState, { expirationTtl: 24 * 60 * 60 });
 }

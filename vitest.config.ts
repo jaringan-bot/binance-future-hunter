@@ -6,6 +6,9 @@ import { defineConfig } from "vitest/config";
 // `include` pattern punya project itu dan nemu 0 test file.
 export default defineConfig({
   test: {
-    include: ["src/**/*.test.ts"],
+    // scripts/**/*.test.mjs: script standalone (scripts/*.mjs) sengaja
+    // TIDAK di-typecheck (di luar tsconfig include) tapi bagian pure-nya
+    // tetap dites -- lihat scripts/calibrate-ranking-weights.test.mjs.
+    include: ["src/**/*.test.ts", "scripts/**/*.test.mjs"],
   },
 });

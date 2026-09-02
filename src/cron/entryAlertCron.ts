@@ -25,7 +25,8 @@ import type { DcaSmartMoneyResult } from "./dcaSmartMoneyAdapter.js";
 import type { TraditionalFuturesResult } from "./traditionalPipelineEngine.js";
 import * as binanceProxy from "../binanceProxyClient.js";
 import * as d1Client from "../d1Client.js";
-import { sendTelegramAlert, escapeMarkdown, formatTraditionalFuturesAlert, type TelegramEnv } from "../telegram.js";
+import { escapeMarkdown, formatTraditionalFuturesAlert } from "../telegram.js";
+import { dispatchNotification, type NotifyEnv } from "../notify.js";
 import { selectUsdtPerpetualWatchlist } from "../entryWatchlist.js";
 import { rankEntryCandidates, DEFAULT_ENTRY_TOP_N, type EntryRankingInput } from "../entryRanking.js";
 import * as kvConfig from "../kvConfig.js";
@@ -285,7 +286,7 @@ export interface AlertCheckOutcome {
 
 export async function checkEntryAlertForSymbol(
   symbol: string,
-  env: TelegramEnv,
+  env: NotifyEnv,
   now: number = Date.now(),
   prefetched?: PrefetchedTickerFunding,
   dcaOpts: DcaOpts = { modalAvailableUsd: DCA_MODAL_DEFAULT_USD },
@@ -324,7 +325,7 @@ export async function checkEntryAlertForSymbol(
   };
 
   if (alertable && (isTransition || cooldownExpired)) {
-    await sendTelegramAlert(env, formatEntryAlert(r, muteTrade));
+    await dispatchNotification(env, formatEntryAlert(r, muteTrade));
     await d1Client.upsertEntryAlertState({ symbol, lastDecision: composite, lastAlertAt: now });
     if (!muteTrade && tradeHeads > 0) {
       await riskCircuit.recordTradeAlert(DEFAULT_PIPELINE_OPTS.riskUsd, tradeHeads, now);
@@ -375,21 +376,21 @@ interface WatchlistBundle {
   tickerBySymbol: Map<string, binanceProxy.Ticker24hr>;
 }
 
-async function maybeNotifyDailyCircuit(env: TelegramEnv, now: number): Promise<void> {
+async function maybeNotifyDailyCircuit(env: NotifyEnv, now: number): Promise<void> {
   const state = await riskCircuit.getDailyLossCircuit();
   if (!riskCircuit.shouldNotifyDailyLoss(state, now)) return;
-  await sendTelegramAlert(
+  await dispatchNotification(
     env,
     `🚨 *Circuit Breaker*: daily loss limit tercapai (count ${state?.count ?? 0} / ${riskCircuit.DAILY_LOSS_COUNT_LIMIT} atau total_loss $${state?.total_loss ?? 0} / $${riskCircuit.DAILY_LOSS_USD_LIMIT}). TRADE alert di-mute sampai window 24 jam roll-off atau \`whalescope_risk_circuit\` reset_daily. High-quality WATCH tetap boleh.`,
   );
   await riskCircuit.markDailyLossNotified(now);
 }
 
-async function maybeNotifyMacroPause(env: TelegramEnv, now: number): Promise<void> {
+async function maybeNotifyMacroPause(env: NotifyEnv, now: number): Promise<void> {
   const state = await riskCircuit.getMacroRiskCircuit();
   if (!riskCircuit.shouldNotifyMacro(state, now)) return;
   const reason = state?.reason ? ` Alasan: ${state.reason}.` : "";
-  await sendTelegramAlert(
+  await dispatchNotification(
     env,
     `⏸️ *Macro Risk Switch*: entry-alert Phase 2 di-pause.${reason} Nyalakan lagi lewat \`whalescope_risk_circuit\` action=set_macro active=false.`,
   );
@@ -478,7 +479,7 @@ async function runPhase1Prefilter(
   return selected;
 }
 
-export async function runEntryAlertCheck(env: TelegramEnv): Promise<void> {
+export async function runEntryAlertCheck(env: NotifyEnv): Promise<void> {
   const now = Date.now();
   if (await riskCircuit.isMacroRiskActive()) {
     await maybeNotifyMacroPause(env, now);

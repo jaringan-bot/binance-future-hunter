@@ -7,7 +7,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerSafeTool } from "../toolWrapper.js";
 import { fmtNum, fmtTime } from "../format.js";
-import { errorResult, SNAPSHOT_WATCHLIST } from "../shared.js";
+import { errorResult, WALL_SCAN_WATCHLIST } from "../shared.js";
 import { queryWallPersistence, type WallPersistencePoint } from "../d1Client.js";
 
 // Wall dianggap hilang kalau row terbaru dalam window lebih tua dari ini --
@@ -51,12 +51,16 @@ export function registerWallPersistenceTools(server: McpServer): void {
       title: "Order Book Wall Persistence",
       description:
         "Cek apakah wall kandidat di harga tertentu masih bertahan dibanding N menit lalu, menggunakan data historis " +
-        "dari wall_tracking (diisi cron tiap 1 menit, watchlist tetap saja). PENTING: hanya tersedia untuk symbol " +
-        "watchlist tetap BTCUSDT/ETHUSDT/SOLUSDT/BNBUSDT/XRPUSDT/DOGEUSDT/ADAUSDT/AVAXUSDT/LINKUSDT/LTCUSDT -- symbol " +
-        "lain tidak punya histori tersimpan. Berguna untuk verifikasi sinyal absorption (wall bertahan saat harga " +
-        "mendekat) dan deteksi spoofing (wall menyusut >40% dalam waktu singkat).",
+        "dari wall_tracking (diisi WALL_SCAN_CRON tiap 1 menit, WALL_SCAN_WATCHLIST saja -- subset 15 pair market-cap " +
+        `tertinggi dari SNAPSHOT_WATCHLIST 50-pair, BUKAN semuanya: ${WALL_SCAN_WATCHLIST.join(", ")}. ` +
+        "Symbol lain (termasuk sisa 35 pair di SNAPSHOT_WATCHLIST) tidak punya histori tersimpan -- dibatasi sengaja " +
+        "buat jaga budget invocation proxy relay, lihat komentar WALL_SCAN_WATCHLIST di src/shared.ts. Berguna untuk " +
+        "verifikasi sinyal absorption (wall bertahan saat harga mendekat) dan deteksi spoofing (wall menyusut >40% " +
+        "dalam waktu singkat).",
       inputSchema: {
-        symbol: z.enum(SNAPSHOT_WATCHLIST).describe(`Symbol dari watchlist tetap: ${SNAPSHOT_WATCHLIST.join(", ")}`),
+        symbol: z
+          .enum(WALL_SCAN_WATCHLIST as [string, ...string[]])
+          .describe(`Symbol dari WALL_SCAN_WATCHLIST (15 pair): ${WALL_SCAN_WATCHLIST.join(", ")}`),
         priceLevel: z.number().positive().describe("Harga wall yang mau dicek persistence-nya"),
         side: z.enum(["bid", "ask"]).describe("Sisi order book tempat wall berada"),
         lookbackMinutes: z

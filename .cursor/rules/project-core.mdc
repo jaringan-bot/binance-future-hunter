@@ -1,0 +1,43 @@
+---
+description: Arsitektur inti, pembagian Claude/Cursor, anti-pola generik
+alwaysApply: true
+---
+
+# binance-future-hunter — Core
+
+Codebase **matang** (~90 src + ~90 test). Jangan buat "struktur folder awal", Docker, Telegraf bot, atau CI GitHub→VPS.
+
+## Stack nyata
+
+| Layer | Lokasi | Deploy |
+|---|---|---|
+| Worker MCP + cron | `src/`, `wrangler.toml` | `npx wrangler deploy` (manual) |
+| D1 | `migrations/` | `wrangler d1 migrations apply … --remote` |
+| KV config | `CONFIG_KV` | jarang write |
+| REST relay | `proxy-standalone/` | AWS VPS systemd (+ Caddy); Vercel = legacy |
+| WS stream | `stream-gateway/` | AWS VPS systemd + Caddy (bukan Docker) |
+
+Telegram = outbound notifier (`src/telegram.ts`). Stage 4 rencana `notify.ts` — belum ada.
+
+## Agen (lihat `agents.mdc`)
+
+| Nama | Peran |
+|---|---|
+| Semeru | Claude Code — architect, spec, verifikasi lokal |
+| **Rinjani** | Cursor default — koding, test, commit/PR |
+| **Krakatau** | Deploy/infra — HANYA setelah user acc eksplisit |
+
+## Semeru vs Rinjani vs Krakatau
+
+- **Semeru:** `typecheck` + `npm test` + `wrangler dev` lokal — tanpa `--remote`, deploy, SSH, secrets
+- **Rinjani:** implementasi, refactor, test, siapkan branch `rinjani/<slug>`, trailer `Agent: Rinjani`
+- **Krakatau:** migrate `--remote`, deploy, secret put, SSH — branch `krakatau/<slug>`, trailer `Agent: Krakatau`; **minta acc dulu**, jangan gabung dengan diff Rinjani
+
+## Larangan umum
+
+- No new npm deps (runtime: `@modelcontextprotocol/sdk` + `zod` saja)
+- Jangan rename tool `whalescope_*` (backward compat MCP)
+- Jangan hardcode secret/token
+- Jangan commit/deploy tanpa user minta
+
+Dokumen: `README.md`, `docs/full_pipeline_framework.md`, `CLAUDE.md`

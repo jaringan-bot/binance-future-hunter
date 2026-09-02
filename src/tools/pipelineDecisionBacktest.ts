@@ -13,6 +13,7 @@ import { PIPELINE_DECISION_LOG_SOURCES, didStopLossTouch, scoreBucket, type Scor
 import { registerSafeTool } from "../toolWrapper.js";
 import { ToolResponseBuilder } from "../responseBuilder.js";
 import { fmtTime } from "../format.js";
+import { applyExecutionCost, DEFAULT_FEE_BPS, DEFAULT_SLIPPAGE_BPS } from "./backtest.js";
 
 const FORWARD_WINDOW_MS: Record<string, number> = {
   "1h": 3_600_000,
@@ -122,6 +123,9 @@ export function registerPipelineDecisionBacktestTools(server: McpServer): void {
         "Hitung forward return harga (close 1h) dan apakah low menyentuh stop-loss dalam jendela 1h/4h/24h. " +
         "Agregat per keputusan (TRADE/WATCH/NO_TRADE) dan bucket skor (lt_40 / 40_55 / gte_55). " +
         `Forward return ON-DEMAND dari klines, bukan kolom precompute. Default ${DEFAULT_ROWS} row terbaru, maks ${MAX_ROWS}. ` +
+        `Forward return dikurangi biaya eksekusi flat: fee_bps (default ${DEFAULT_FEE_BPS}) + slippage_bps (default ${DEFAULT_SLIPPAGE_BPS}), ` +
+        "dikali 2 (entry+exit), sebelum win rate/avg return dihitung. Ini BUKAN replay order-book historis penuh -- market impact " +
+        "per ukuran order & kedalaman book tidak dimodelkan (butuh depth snapshot historis, di luar scope). " +
         "Ini uji formula terpasang -- TIDAK mengubah bobot ranking atau threshold 55.",
       inputSchema: {
         startTime: z.string().describe('Waktu mulai, ISO 8601 (contoh "2026-08-01T00:00:00Z")'),
@@ -143,10 +147,22 @@ export function registerPipelineDecisionBacktestTools(server: McpServer): void {
           .max(80)
           .default(DEFAULT_ROWS)
           .describe(`Jumlah row terbaru yang diuji (default ${DEFAULT_ROWS}, maks ${MAX_ROWS}). Tiap row 1 kline lookup.`),
+        fee_bps: z
+          .number()
+          .min(0)
+          .max(100)
+          .default(DEFAULT_FEE_BPS)
+          .describe(`Taker fee per sisi (bps). Default ${DEFAULT_FEE_BPS} (~0.04% Binance Futures). Dikurangi 2x dari tiap forward return (entry+exit).`),
+        slippage_bps: z
+          .number()
+          .min(0)
+          .max(500)
+          .default(DEFAULT_SLIPPAGE_BPS)
+          .describe(`Estimasi slippage/spread per sisi (bps). Default ${DEFAULT_SLIPPAGE_BPS}. Dikurangi 2x (entry+exit). Bukan hasil replay order-book historis.`),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ startTime, endTime, symbol, source, source_ref, forwardWindow, limit }) => {
+    async ({ startTime, endTime, symbol, source, source_ref, forwardWindow, limit, fee_bps, slippage_bps }) => {
       try {
         const startMs = parseTimeParam(startTime, "startTime");
         const endMs = parseTimeParam(endTime, "endTime");
@@ -178,7 +194,9 @@ export function registerPipelineDecisionBacktestTools(server: McpServer): void {
 
         const windowMs = FORWARD_WINDOW_MS[forwardWindow];
         const klineLimit = KLINE_LIMIT[forwardWindow];
-        const evaluated: (PipelineDecisionLogRow & PipelineForwardResult & { scoreBucket: ScoreBucket })[] = [];
+        const execCostRoundTrip = 2 * (fee_bps + slippage_bps) / 10_000;
+        const evaluated: (PipelineDecisionLogRow &
+          PipelineForwardResult & { grossReturn: number; scoreBucket: ScoreBucket })[] = [];
 
         for (const row of rows) {
           let candles: KlineTuple[] = [];
@@ -189,7 +207,17 @@ export function registerPipelineDecisionBacktestTools(server: McpServer): void {
           }
           const fwd = evaluateDecisionForward(candles, row.stopLoss);
           if (!fwd) continue;
-          evaluated.push({ ...row, ...fwd, scoreBucket: scoreBucket(row.rankingScore) });
+          // evaluateDecisionForward TETAP mengembalikan gross (dipakai juga
+          // oleh cron backfill yang mempersist angka mentah) -- biaya
+          // eksekusi diterapkan di sini, di layer analisis, bukan di
+          // fungsi/kolom yang dishare.
+          evaluated.push({
+            ...row,
+            ...fwd,
+            grossReturn: fwd.forwardReturn,
+            forwardReturn: applyExecutionCost(fwd.forwardReturn, fee_bps, slippage_bps),
+            scoreBucket: scoreBucket(row.rankingScore),
+          });
         }
 
         const byDecision = aggregateKeyedRows(evaluated.map((r) => ({ key: String(r.decision), forwardReturn: r.forwardReturn, slTouch: r.slTouch })));
@@ -201,12 +229,13 @@ export function registerPipelineDecisionBacktestTools(server: McpServer): void {
           .row("Forward Window", forwardWindow)
           .row("Rows in range", String(rows.length))
           .row("Evaluated (punya klines)", `${evaluated.length}`)
-          .row("Overall win rate", overall.sampleSize ? `${(overall.winRate * 100).toFixed(1)}%` : "-")
-          .row("Overall avg return", overall.sampleSize ? fmtPct(overall.avgReturn) : "-")
+          .row("Overall win rate (net)", overall.sampleSize ? `${(overall.winRate * 100).toFixed(1)}%` : "-")
+          .row("Overall avg return (net)", overall.sampleSize ? fmtPct(overall.avgReturn) : "-")
           .row(
             "Overall SL-touch",
             overall.slTouchRate == null ? "-" : `${(overall.slTouchRate * 100).toFixed(1)}% (${overall.slTouchSample})`,
           )
+          .row("Biaya eksekusi", `fee ${fee_bps}bps + slippage ${slippage_bps}bps per sisi -> ${(execCostRoundTrip * 100).toFixed(3)}% round-trip`)
           .subheader("Per keputusan")
           .table(
             ["Keputusan", "N", "Win rate", "Avg return", "SL-touch"],
@@ -220,12 +249,13 @@ export function registerPipelineDecisionBacktestTools(server: McpServer): void {
 
         if (evaluated.length > 0) {
           builder.table(
-            ["Waktu", "Symbol", "Keputusan", "Skor", `Return ${forwardWindow}`, "SL"],
+            ["Waktu", "Symbol", "Keputusan", "Skor", `Gross ${forwardWindow}`, `Net ${forwardWindow}`, "SL"],
             evaluated.slice(0, 15).map((r) => [
               fmtTime(r.runAt),
               r.symbol,
               String(r.decision),
               r.rankingScore.toFixed(1),
+              fmtPct(r.grossReturn),
               fmtPct(r.forwardReturn),
               r.slTouch == null ? "-" : r.slTouch ? "yes" : "no",
             ]),
@@ -233,13 +263,17 @@ export function registerPipelineDecisionBacktestTools(server: McpServer): void {
         }
 
         builder.note(
-          "Forward return = (close akhir jendela − close candle pertama) / close pertama. Bukan PnL grid, " +
-            "bukan eksekusi order (slippage/fee tidak dihitung). Sample <20 = confidence rendah. " +
+          "Forward return = (close akhir jendela − close candle pertama) / close pertama. Bukan PnL grid. " +
+            `"Net" = sesudah dikurangi fee_bps+slippage_bps di entry & exit (flat ${(execCostRoundTrip * 100).toFixed(3)}% round-trip), ` +
+            "BUKAN replay order-book historis -- market impact per ukuran order tidak dimodelkan. Sample <20 = confidence rendah. " +
             "Hasil ini TIDAK menulis ulang bobot ranking atau threshold 55.",
         );
 
         return builder
           .struct("forwardWindow", forwardWindow)
+          .struct("feeBps", fee_bps)
+          .struct("slippageBps", slippage_bps)
+          .struct("execCostRoundTrip", execCostRoundTrip)
           .struct("rowCount", rows.length)
           .struct("evaluatedCount", evaluated.length)
           .struct("overall", overall)
@@ -255,6 +289,7 @@ export function registerPipelineDecisionBacktestTools(server: McpServer): void {
               decision: r.decision,
               rankingScore: r.rankingScore,
               scoreBucket: r.scoreBucket,
+              grossReturn: r.grossReturn,
               forwardReturn: r.forwardReturn,
               slTouch: r.slTouch,
               stopLoss: r.stopLoss,

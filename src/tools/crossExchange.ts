@@ -44,7 +44,10 @@ export function computeFundingDivergence(entries: FundingRateEntry[]): Divergenc
   return { maxDivergence: highest.fundingRate - lowest.fundingRate, highest, lowest };
 }
 
-async function getBinanceMarketData(symbol: string): Promise<CrossExchangeMarketData> {
+// Exported buat di-reuse LANGSUNG (bukan panggil MCP tool) oleh
+// binance_analyze_institutional_flow (src/tools/institutionalFlow.ts) --
+// pola sama seperti fullPipeline.ts reuse fungsi murni tool lain.
+export async function getBinanceMarketData(symbol: string): Promise<CrossExchangeMarketData> {
   const [funding, oi, ticker24hr] = await Promise.all([
     binanceProxy.getCurrentFundingRateNative(symbol),
     binanceProxy.getOpenInterestNative(symbol),

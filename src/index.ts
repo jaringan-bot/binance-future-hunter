@@ -7,9 +7,12 @@ import * as d1Client from "./d1Client.js";
 import { SNAPSHOT_WATCHLIST, WALL_SCAN_WATCHLIST, HYPERLIQUID_WHALE_WATCHLIST } from "./shared.js";
 import { computeMmSignals } from "./tools/detectMmActivity.js";
 import { isAuthorized } from "./adminUsage.js";
+import { handleDashboardRequest } from "./dashboardApi.js";
 import { scanWallCandidates } from "./cron/wallTrackingCron.js";
 import { snapshotBasisForSymbol, snapshotNonWatchlistBasis } from "./cron/marketSnapshotCron.js";
 import { snapshotWhaleWallet } from "./cron/hyperliquidWhaleCron.js";
+import { snapshotCftcPositioning } from "./cron/cftcPositioningCron.js";
+import { backfillPipelineDecisionOutcomes } from "./cron/pipelineDecisionOutcomeCron.js";
 import { runEntryAlertCheck } from "./cron/entryAlertCron.js";
 import { checkHeartbeat, checkEntryAlertCronFreshness } from "./cron/heartbeatCron.js";
 import {
@@ -45,6 +48,11 @@ interface Env {
   // di-skip + di-log (lihat src/telegram.ts), TIDAK menggagalkan cron.
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_CHAT_ID?: string;
+  // OPSIONAL -- channel notifikasi tambahan (src/notify.ts). Kosong =
+  // channel itu di-skip, Telegram tetap default. DISCORD_WEBHOOK_URL:
+  // webhook Discord. NOTIFY_WEBHOOK_URL: endpoint generic (POST JSON {text}).
+  DISCORD_WEBHOOK_URL?: string;
+  NOTIFY_WEBHOOK_URL?: string;
 }
 
 const REQUEST_LOG_RETENTION_MS = 30 * 24 * 3600 * 1000; // 30 hari
@@ -153,7 +161,7 @@ export default {
       return withCors(
         new Response(
           JSON.stringify({
-            name: "whalescope-mcp",
+            name: "binance-future-hunter",
             status: "ok",
             endpoint: "/mcp",
             note: "Daftarkan URL <this-worker-url>/mcp sebagai custom MCP connector.",
@@ -182,6 +190,14 @@ export default {
           new Response(`Gagal query usage log: ${(err as Error)?.message ?? String(err)}`, { status: 500 }),
         );
       }
+    }
+
+    // Dashboard read-only (GET /dashboard + /api/dashboard/*), gated
+    // ?key=<ADMIN_SECRET> sama seperti /admin/usage. Return null kalau
+    // path bukan urusan dashboard.
+    if (request.method === "GET") {
+      const dashboardResponse = await handleDashboardRequest(url, env);
+      if (dashboardResponse) return withCors(dashboardResponse);
     }
 
     if (url.pathname !== "/mcp") {
@@ -317,7 +333,12 @@ export default {
 
     if (event.cron === ENTRY_ALERT_CRON) {
       ctx.waitUntil(
-        runEntryAlertCheck({ TELEGRAM_BOT_TOKEN: env.TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID: env.TELEGRAM_CHAT_ID }),
+        runEntryAlertCheck({
+          TELEGRAM_BOT_TOKEN: env.TELEGRAM_BOT_TOKEN,
+          TELEGRAM_CHAT_ID: env.TELEGRAM_CHAT_ID,
+          DISCORD_WEBHOOK_URL: env.DISCORD_WEBHOOK_URL,
+          NOTIFY_WEBHOOK_URL: env.NOTIFY_WEBHOOK_URL,
+        }),
       );
       // Prune entry_alert_run_log di sini (bukan cron ke-6 sendiri) -- retensi
       // 2 hari gak butuh presisi tiap tick, sama alasan seperti prune lain.
@@ -340,7 +361,12 @@ export default {
     }
 
     if (event.cron === HEARTBEAT_CRON) {
-      const telegramEnv = { TELEGRAM_BOT_TOKEN: env.TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID: env.TELEGRAM_CHAT_ID };
+      const telegramEnv = {
+        TELEGRAM_BOT_TOKEN: env.TELEGRAM_BOT_TOKEN,
+        TELEGRAM_CHAT_ID: env.TELEGRAM_CHAT_ID,
+        DISCORD_WEBHOOK_URL: env.DISCORD_WEBHOOK_URL,
+        NOTIFY_WEBHOOK_URL: env.NOTIFY_WEBHOOK_URL,
+      };
       ctx.waitUntil(checkHeartbeat(telegramEnv));
       // D1 capacity check di sini (3x/hari, bukan tiap */5) -- COUNT(*) di
       // tabel jutaan baris gak murah, dan runway dari alert ke "harus prune"
@@ -350,6 +376,17 @@ export default {
           console.error("[cron] gagal checkD1Capacity:", (err as Error)?.message ?? String(err)),
         ),
       );
+      // Snapshot CFTC COT ke D1 di sini (3x/hari) -- data sumbernya cuma
+      // update mingguan (Jumat), jadi TIDAK butuh Cron Trigger sendiri;
+      // INSERT OR IGNORE (unique index coin+report_date, lihat d1Client.ts)
+      // bikin ngecek lebih sering dari update-rate asli aman/no-op.
+      for (const coin of ["BTC", "ETH"] as const) {
+        ctx.waitUntil(
+          snapshotCftcPositioning(coin).catch((err) =>
+            console.error(`[cron] gagal snapshot CFTC ${coin}:`, (err as Error)?.message ?? String(err)),
+          ),
+        );
+      }
       return;
     }
 
@@ -384,6 +421,8 @@ export default {
     const defaultTickTelegramEnv = {
       TELEGRAM_BOT_TOKEN: env.TELEGRAM_BOT_TOKEN,
       TELEGRAM_CHAT_ID: env.TELEGRAM_CHAT_ID,
+      DISCORD_WEBHOOK_URL: env.DISCORD_WEBHOOK_URL,
+      NOTIFY_WEBHOOK_URL: env.NOTIFY_WEBHOOK_URL,
     };
     ctx.waitUntil(
       checkEntryAlertCronFreshness(defaultTickTelegramEnv).catch((err) =>
@@ -441,6 +480,15 @@ export default {
     ctx.waitUntil(
       snapshotNonWatchlistBasis().catch((err) =>
         console.error("[cron] gagal snapshot non-watchlist:", (err as Error)?.message ?? String(err)),
+      ),
+    );
+
+    // Backfill forward_return_1h/4h/24h + sl_touched_24h ke
+    // pipeline_decision_log (migration 0013) -- max 30 row/tick, row yang
+    // window 24h-nya sudah lewat. Lihat src/cron/pipelineDecisionOutcomeCron.ts.
+    ctx.waitUntil(
+      backfillPipelineDecisionOutcomes().catch((err) =>
+        console.error("[cron] gagal backfill pipeline_decision_log outcomes:", (err as Error)?.message ?? String(err)),
       ),
     );
 

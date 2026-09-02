@@ -1,0 +1,38 @@
+---
+description: Pola TS Worker, cron, D1, test coverage
+globs: src/**/*.ts,migrations/**/*.sql
+alwaysApply: false
+---
+
+# TypeScript Worker Patterns
+
+## Pure engine + thin wrapper
+
+```text
+src/fooEngine.ts     ← logika murni, testable tanpa network
+src/tools/foo.ts     ← fetch + panggil engine + ToolResponseBuilder
+```
+
+Reuse via `import` langsung — bukan MCP roundtrip antar tool.
+
+## Test
+
+- Ratio test : source ~1:1 untuk modul non-trivial
+- Vitest + fake env; jangan andalkan live Binance di test
+- Selesai task: `npm run typecheck && npm test`
+
+## Cron
+
+- Piggyback tick existing (`*/5`, `HEARTBEAT_CRON`) — jangan nambah cron slot tanpa alasan
+- Batch ringan (~30 row/tick untuk backfill)
+- `telegram.ts` tidak throw — failure isolation per symbol/tick
+
+## D1
+
+- Schema baru → file baru `migrations/` (additive `ALTER TABLE` preferred)
+- Jangan edit migration yang sudah applied remote
+- Drift `d1_migrations`: cek `PRAGMA table_info` remote dulu
+
+## Dokumentasi
+
+Threshold/heuristik wajib ditandai **belum dikalibrasi** kalau belum ada backtest data.

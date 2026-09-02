@@ -27,6 +27,10 @@ interface FakeRow {
   lower_price: number | null;
   upper_price: number | null;
   stop_loss: number | null;
+  mm_component: number | null;
+  smart_money_component: number | null;
+  regime_component: number | null;
+  buy_pressure_component: number | null;
 }
 
 class FakeStatement {
@@ -61,6 +65,10 @@ class FakeStatement {
         lower_price,
         upper_price,
         stop_loss,
+        mm_component,
+        smart_money_component,
+        regime_component,
+        buy_pressure_component,
       ] = this.args as [
         number,
         string,
@@ -75,6 +83,10 @@ class FakeStatement {
         string | null,
         string | null,
         string | null,
+        number | null,
+        number | null,
+        number | null,
+        number | null,
         number | null,
         number | null,
         number | null,
@@ -96,6 +108,10 @@ class FakeStatement {
         lower_price,
         upper_price,
         stop_loss,
+        mm_component,
+        smart_money_component,
+        regime_component,
+        buy_pressure_component,
       });
       return { success: true };
     }
@@ -159,6 +175,10 @@ function sample(partial: Partial<PipelineDecisionLogRow> = {}): PipelineDecision
     lowerPrice: 100,
     upperPrice: 110,
     stopLoss: 95,
+    mmComponent: 55,
+    smartMoneyComponent: 50,
+    regimeComponent: 60,
+    buyPressureComponent: 45,
     ...partial,
   };
 }
@@ -210,6 +230,13 @@ describe("pipeline_decision_log D1 read/write path", () => {
     expect(atom[0].hardScreenPassed).toBe(false);
     expect(atom[0].hardScreenReasons).toEqual(["funding"]);
     expect(atom[0].stopLoss).toBeNull();
+
+    // migration 0014 ranking sub-scores round-trip
+    const btc = await queryPipelineDecisionLog({ startTime: 500, endTime: 3000, symbol: "btcusdt" });
+    expect(btc[0].mmComponent).toBe(55);
+    expect(btc[0].smartMoneyComponent).toBe(50);
+    expect(btc[0].regimeComponent).toBe(60);
+    expect(btc[0].buyPressureComponent).toBe(45);
 
     const dropstab = await queryPipelineDecisionLog({
       startTime: 500,

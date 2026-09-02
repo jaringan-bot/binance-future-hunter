@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Idempotent install / update for whale-stream-gateway on the Oracle VPS.
+# Idempotent install / update for whale-stream-gateway on the production AWS VPS.
+# SSH: Host svm-vps (13.212.7.132, ap-southeast-1) — see ~/.ssh/config.
 # ASCII-only on purpose (the OCI console cloud-init textarea runs btoa()).
 #
 # Usage, from the repo's stream-gateway/ dir:
@@ -14,6 +15,11 @@ PORT=8081
 SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
 CADDYFILE=/etc/caddy/Caddyfile
 
+if ! command -v node >/dev/null 2>&1; then
+  echo "ERROR: node not found in PATH (need Node 22+ with node:sqlite)" >&2
+  exit 1
+fi
+
 id -u "$APP_USER" >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin "$APP_USER"
 
 mkdir -p "$APP_DIR"
@@ -21,7 +27,8 @@ chown "$APP_USER:$APP_USER" "$APP_DIR"
 chmod 750 "$APP_DIR"
 install -m 644 -o "$APP_USER" -g "$APP_USER" \
   "$SRC_DIR/index.mjs" "$SRC_DIR/ws-client.mjs" "$SRC_DIR/store.mjs" \
-  "$SRC_DIR/server.mjs" "$SRC_DIR/parse.mjs" "$SRC_DIR/package.json" "$APP_DIR/"
+  "$SRC_DIR/server.mjs" "$SRC_DIR/parse.mjs" "$SRC_DIR/depthWatch.mjs" \
+  "$SRC_DIR/package.json" "$APP_DIR/"
 
 # Reuse the relay's PROXY_SECRET so the Worker needs no new credential.
 if [ ! -f "$APP_DIR/.env" ]; then

@@ -148,7 +148,8 @@ User=$APP_USER
 WorkingDirectory=$APP_DIR
 EnvironmentFile=$APP_DIR/.env
 Environment=PORT=$PORT
-ExecStart=/usr/bin/node server.mjs
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env node server.mjs
 Restart=always
 RestartSec=3
 NoNewPrivileges=true

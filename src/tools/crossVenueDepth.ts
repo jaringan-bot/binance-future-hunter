@@ -53,6 +53,51 @@ export function findCrossVenueWalls(candidates: VenueWallCandidate[]): CrossVenu
   });
 }
 
+// Exported buat di-reuse LANGSUNG oleh binance_analyze_institutional_flow
+// (src/tools/institutionalFlow.ts) -- fetch+compute orchestration yang
+// sebelumnya cuma inline di handler tool ini, diekstrak supaya gak
+// diduplikasi (pola sama seperti fullPipeline.ts reuse fungsi tool lain).
+export async function fetchCrossVenueWalls(
+  symbol: string,
+): Promise<{ walls: CrossVenueWall[]; statusRows: string[][] }> {
+  const bybitSymbol = toExchangeSymbol(symbol, "bybit");
+  const okxSymbol = toExchangeSymbol(symbol, "okx");
+
+  const [binanceRes, bybitRes, okxRes] = await Promise.allSettled([
+    binanceProxy.getOrderBookDepth(symbol, DEPTH_LIMIT),
+    bybitSymbol
+      ? getBybitOrderBookDepth(bybitSymbol, DEPTH_LIMIT)
+      : Promise.reject(new Error("Gagal di-mapping ke format symbol Bybit.")),
+    okxSymbol
+      ? getOkxOrderBookDepth(okxSymbol, DEPTH_LIMIT)
+      : Promise.reject(new Error("Symbol tidak berakhiran USDT -- gak bisa di-mapping ke format OKX.")),
+  ]);
+
+  const venues: { venue: string; result: PromiseSettledResult<{ bids: [string, string][]; asks: [string, string][] }> }[] = [
+    { venue: "Binance", result: binanceRes },
+    { venue: "Bybit", result: bybitRes },
+    { venue: "OKX", result: okxRes },
+  ];
+
+  const candidates: VenueWallCandidate[] = [];
+  const statusRows: string[][] = [];
+
+  for (const { venue, result } of venues) {
+    if (result.status === "fulfilled") {
+      const { bids, asks } = result.value;
+      const bidWalls = findWallCandidates(bids).map((w) => ({ venue, side: "bid" as const, ...w }));
+      const askWalls = findWallCandidates(asks).map((w) => ({ venue, side: "ask" as const, ...w }));
+      candidates.push(...bidWalls, ...askWalls);
+      statusRows.push([venue, "ok", fmtNum(bidWalls.length + askWalls.length, 0)]);
+    } else {
+      const message = result.reason instanceof Error ? result.reason.message : String(result.reason);
+      statusRows.push([venue, `gagal: ${message}`, "-"]);
+    }
+  }
+
+  return { walls: findCrossVenueWalls(candidates), statusRows };
+}
+
 export function registerCrossVenueDepthTools(server: McpServer): void {
   registerSafeTool(
     server,
@@ -68,42 +113,7 @@ export function registerCrossVenueDepthTools(server: McpServer): void {
     },
     async ({ symbol, detail }) => {
       try {
-        const bybitSymbol = toExchangeSymbol(symbol, "bybit");
-        const okxSymbol = toExchangeSymbol(symbol, "okx");
-
-        const [binanceRes, bybitRes, okxRes] = await Promise.allSettled([
-          binanceProxy.getOrderBookDepth(symbol, DEPTH_LIMIT),
-          bybitSymbol
-            ? getBybitOrderBookDepth(bybitSymbol, DEPTH_LIMIT)
-            : Promise.reject(new Error("Gagal di-mapping ke format symbol Bybit.")),
-          okxSymbol
-            ? getOkxOrderBookDepth(okxSymbol, DEPTH_LIMIT)
-            : Promise.reject(new Error("Symbol tidak berakhiran USDT -- gak bisa di-mapping ke format OKX.")),
-        ]);
-
-        const venues: { venue: string; result: PromiseSettledResult<{ bids: [string, string][]; asks: [string, string][] }> }[] = [
-          { venue: "Binance", result: binanceRes },
-          { venue: "Bybit", result: bybitRes },
-          { venue: "OKX", result: okxRes },
-        ];
-
-        const candidates: VenueWallCandidate[] = [];
-        const statusRows: string[][] = [];
-
-        for (const { venue, result } of venues) {
-          if (result.status === "fulfilled") {
-            const { bids, asks } = result.value;
-            const bidWalls = findWallCandidates(bids).map((w) => ({ venue, side: "bid" as const, ...w }));
-            const askWalls = findWallCandidates(asks).map((w) => ({ venue, side: "ask" as const, ...w }));
-            candidates.push(...bidWalls, ...askWalls);
-            statusRows.push([venue, "ok", fmtNum(bidWalls.length + askWalls.length, 0)]);
-          } else {
-            const message = result.reason instanceof Error ? result.reason.message : String(result.reason);
-            statusRows.push([venue, `gagal: ${message}`, "-"]);
-          }
-        }
-
-        const walls = findCrossVenueWalls(candidates);
+        const { walls, statusRows } = await fetchCrossVenueWalls(symbol);
         const corroborated = walls.filter((w) => w.corroboratedBy.length > 0);
         const singleVenueOnly = walls.filter((w) => w.corroboratedBy.length === 0);
 

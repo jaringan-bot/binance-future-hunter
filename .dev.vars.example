@@ -3,8 +3,10 @@
 # value asli. Buat production, pakai `wrangler secret put <NAME>`, BUKAN
 # file ini.
 
-# WAJIB -- tanpa ini, 34 dari 35 tool (semua "Binance native") gagal.
-# Lihat README.md bagian "Setup Proxy Vercel".
+# WAJIB -- tanpa ini, semua tool "Binance native" gagal.
+# Lihat README.md bagian "Setup Proxy Relay" (proxy-standalone/).
+# Depth watch Task B (binance_watch_orderbook_realtime) pakai host +
+# secret yang SAMA -- stream gateway ada di balik Caddy /stream/* yang sama.
 PROXY_URL=
 PROXY_SECRET=
 
@@ -33,3 +35,10 @@ ALLOWED_ORIGINS=
 # di-skip + di-log doang (lihat src/telegram.ts), cron TETAP jalan normal.
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
+
+# OPSIONAL -- channel notifikasi tambahan (src/notify.ts). Kosong = channel
+# itu di-skip; Telegram tetap default. Lihat README.md "Notifikasi
+# Multi-Channel". DISCORD_WEBHOOK_URL = webhook Discord; NOTIFY_WEBHOOK_URL
+# = endpoint generic yang nerima POST JSON {text}.
+DISCORD_WEBHOOK_URL=
+NOTIFY_WEBHOOK_URL=

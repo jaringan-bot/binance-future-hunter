@@ -243,7 +243,7 @@ async function callProxyEndpoint<T>(
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined) url.searchParams.set(key, String(value));
   }
-  const authErrorHint = "Cek PROXY_SECRET cocok antara worker dan Vercel (primary maupun secondary).";
+  const authErrorHint = "Cek PROXY_SECRET cocok antara worker dan host proxy relay (primary maupun secondary).";
   const doFetch = () => fetchWithRetry(url.toString(), { headers: { "x-proxy-secret": endpoint.secret, Accept: "application/json" } });
 
   let response: Response;
@@ -251,7 +251,7 @@ async function callProxyEndpoint<T>(
     response = await withCache(buildCacheKeyUrl(path, params, market), cacheTtlForPath(path), doFetch);
   } catch (err) {
     throw new BinanceProxyError(
-      `Gagal menghubungi proxy Vercel: ${(err as Error).message}. Cek apakah PROXY_URL benar dan proxy sedang aktif.`,
+      `Gagal menghubungi proxy relay: ${(err as Error).message}. Cek apakah PROXY_URL benar dan proxy sedang aktif.`,
       undefined,
       path,
     );
@@ -270,7 +270,7 @@ async function callProxyEndpoint<T>(
       freshResponse = await doFetch();
     } catch (fetchErr) {
       throw new BinanceProxyError(
-        `Gagal menghubungi proxy Vercel: ${(fetchErr as Error).message}. Cek apakah PROXY_URL benar dan proxy sedang aktif.`,
+        `Gagal menghubungi proxy relay: ${(fetchErr as Error).message}. Cek apakah PROXY_URL benar dan proxy sedang aktif.`,
         undefined,
         path,
       );

@@ -1,4 +1,9 @@
-# WhaleScope MCP — Binance Futures Market Intelligence
+# Binance Future Hunter — Binance Futures Market Intelligence
+
+> Rebranded from `whalescope-mcp` (former internal name) to
+> `binance-future-hunter`, matching the repo name. The tested codebase/logic
+> wasn't thrown away — only the deployment identity (worker name, D1, title)
+> changed. See the rebrand commit for the full list of changes.
 
 [🇮🇩 Bahasa Indonesia](README.md) | 🇬🇧 English
 
@@ -11,7 +16,7 @@ account data.
 
 ## Quick Deploy
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/osindo-dev/whalescope-mcp)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/jaringan-bot/binance-future-hunter)
 
 This button clones the repo and creates a Worker in your own Cloudflare
 account, including **auto-provisioning a new KV namespace & D1 database**
@@ -20,7 +25,7 @@ manual creation needed). **Not fully zero-touch** — to be honest about
 what's still manual: you STILL need to set secrets afterward (Cloudflare
 can't guess values from external services) — see `.dev.vars.example` in
 this repo for the full list, or
-[Vercel Proxy setup](#setup-vercel-proxy-required-one-time) below.
+[Proxy Relay setup](#setup-proxy-relay-required-one-time) below.
 `PROXY_URL`/`PROXY_SECRET` are REQUIRED (all 46 tools need them).
 
 ## Purpose
@@ -59,9 +64,9 @@ conversation with Claude, without needing a separate exchange dashboard.
   touches a Binance account or any third-party data.
 - Transparent about each tool's limitations (see the section below), not
   glossed over as if all data were perfect.
-- Infrastructure fits comfortably in free tiers (Cloudflare Workers +
-  Vercel Hobby) for personal use — 100% Binance-native, no third-party
-  aggregator dependency anymore.
+- Infrastructure fits comfortably in free tiers (Cloudflare Workers + a
+  free relay host like Fly.io / Deno Deploy, or a ~$5/mo VPS) for personal
+  use — 100% Binance-native, no third-party aggregator dependency anymore.
 
 ## Weaknesses
 
@@ -71,35 +76,35 @@ conversation with Claude, without needing a separate exchange dashboard.
   VPS stream gateway, below) — no tick-by-tick push for price / order book.
 - **Liquidations: SAMPLED, not exhaustive.** Since 2026-08-28,
   `binance_get_realtime_liquidations` reads a 24h buffer from an always-on
-  WebSocket (`!forceOrder@arr` via `dstream.binance.com`) held on an Oracle
-  Singapore VPS (`stream-gateway/`, outside Cloudflare — the Worker itself is
-  still WAF-blocked from Binance; `fstream.binance.com` is silently
-  black-holed from the VPS IP, `dstream` carries the same feed). Binance
-  throttles the stream to 1 event/symbol/second, so this is a sample. Still
+  WebSocket (`!forceOrder@arr` via `dstream.binance.com`) held on the
+  **AWS Singapore VPS** (`svm-vps`, `13.212.7.132`, `stream-gateway/` —
+  outside Cloudflare). Production moved from Oracle (2026-09-02); `fstream`
+  black-hole was IP-specific to Oracle. Binance throttles the stream to 1 event/symbol/second, so this is a sample. Still
   enough to confirm stop-hunt liquidation clusters in
   `binance_detect_mm_activity` (a 3rd, price-anchored, hunt-side proxy). No
   long liquidation history (24h buffer).
-- **Initial setup needs a Vercel proxy** (required) — not plug-and-play,
-  there's a one-time manual configuration step.
+- **Initial setup needs a proxy relay** (required, `proxy-standalone/`) —
+  not plug-and-play, there's a one-time manual configuration step.
 - No on-chain wallet data, and no data from exchanges other than Binance
   Futures USDS-M.
 
 **Data sources: one path, 100% Binance native.**
 
-- **Native Binance, via a Vercel relay proxy.** Binance's domain
+- **Native Binance, via a relay proxy.** Binance's domain
   (`fapi.binance.com`) blocks traffic from Cloudflare Workers at the WAF
   level (403, company-wide — tested directly from this worker, not an
-  assumption). Vercel uses a different IP pool, so it doesn't hit the same
-  block. The Cloudflare Worker relays through a small proxy in `proxy/`
-  (a separate Vercel project, see `proxy/README.md`). This path serves
-  funding rate (current & history), klines/OHLCV, multi-timeframe bias,
-  realized volatility, 24h stats, order book depth, aggregate trades, open
-  interest (current & history), long/short ratio (blended & top-trader),
-  taker buy/sell volume ratio, and spot price (the proxy also relays to the
-  Binance Spot API `api.binance.com` via the `market=spot` parameter, see
-  `proxy/README.md`).
+  assumption). A relay host (VPS/Fly.io/Deno in a Singapore/Tokyo region)
+  uses an IP that isn't blocked. The Cloudflare Worker relays through a
+  small proxy in `proxy-standalone/` (`handler.mjs`, see
+  [`proxy-standalone/README.md`](proxy-standalone/README.md); the earlier
+  Vercel-based `proxy/` is retired). This path serves funding rate (current
+  & history), klines/OHLCV, multi-timeframe bias, realized volatility, 24h
+  stats, order book depth, aggregate trades, open interest (current &
+  history), long/short ratio (blended & top-trader), taker buy/sell volume
+  ratio, and spot price (the proxy also relays to the Binance Spot API
+  `api.binance.com` via the `market=spot` parameter).
 
-As a consequence, this worker needs `PROXY_URL`/`PROXY_SECRET` (Vercel
+As a consequence, this worker needs `PROXY_URL`/`PROXY_SECRET` (relay
 proxy, required for all 46 tools) — see the Setup section below.
 
 **Caching & state, no extra credentials needed.** Upstream responses
@@ -302,8 +307,9 @@ Full detail (including raw test data per claim): Section 10,
 - No on-chain wallet data.
 - **Liquidations are near-real-time + SAMPLED, with no long history.**
   `binance_get_realtime_liquidations` reads a 24h buffer from the VPS stream
-  gateway (`!forceOrder@arr` via `dstream.binance.com` — `fstream.binance.com`
-  is black-holed from the VPS IP). Binance throttles to 1 event/symbol/second
+  gateway (AWS VPS — `!forceOrder@arr` via `dstream.binance.com`; `fstream`
+  black-hole was Oracle-IP-specific, production = AWS ap-southeast-1).
+  Binance throttles to 1 event/symbol/second
   → a sample, not every liquidation. No public market-wide REST endpoint for
   a historical backfill. The Cloudflare Worker itself still can't open a WS
   to Binance directly (WAF).
@@ -379,23 +385,34 @@ Full detail (including raw test data per claim): Section 10,
   top-trader ratio need to be used carefully. Its `confidenceScore` output
   measures margin past threshold, NOT a calibrated statistical probability.
 
-## Setup: Vercel Proxy (required, one-time)
+## Setup: Proxy Relay (required, one-time)
 
-Tools labeled "Binance native" in the table above need a relay proxy on
-Vercel, because the Cloudflare Worker is blocked directly by Binance's WAF.
-Full deployment details are in `proxy/README.md` — in short:
+Tools labeled "Binance native" in the table above need a relay proxy,
+because the Cloudflare Worker is blocked directly by Binance's WAF. The
+current path is **`proxy-standalone/`** (deploy to a VPS / Fly.io / Deno
+Deploy / Render — zero-dependency, one file `handler.mjs`). Full details +
+hosting options are in
+[`proxy-standalone/README.md`](proxy-standalone/README.md).
 
-1. Deploy the `proxy/` folder as a separate Vercel project (Root Directory =
-   `proxy`), and set the env var `PROXY_SECRET` on Vercel (a random string
-   you generate yourself, e.g. `openssl rand -hex 32`).
+> **Historical note:** this project's original relay was a Vercel project in
+> `proxy/`. Vercel paused it for commercial use on the Hobby plan, so
+> `proxy/` is **retired** — do not use it for a new setup. `proxy/` and a
+> `PROXY_URL` still pointing at Vercel keep working code-wise if you already
+> have them, but it is not the supported path.
+
+In short:
+
+1. Deploy `proxy-standalone/` to one of the hosts in
+   [`proxy-standalone/README.md`](proxy-standalone/README.md) (pick a
+   Singapore/Tokyo region — avoid `us-*`). Set `PROXY_SECRET` on that host
+   (a random string, e.g. `openssl rand -hex 32`).
 2. Set these two secrets on the Cloudflare worker:
    ```bash
    npx wrangler secret put PROXY_URL
    npx wrangler secret put PROXY_SECRET
    ```
-   `PROXY_URL` = the Vercel project's URL (example:
-   `https://whale-pearl.vercel.app`), `PROXY_SECRET` = the exact same
-   string set on Vercel.
+   `PROXY_URL` = the relay URL you just deployed, `PROXY_SECRET` = the exact
+   same string set on the relay host.
 
 Without these two secrets, tools labeled "Binance native" will fail with a
 clear error message ("PROXY_URL atau PROXY_SECRET belum diset di worker").
@@ -413,9 +430,12 @@ automatically tries a secondary proxy — but only if one is configured.
 Without it, behavior is identical to before (single proxy, error thrown
 immediately on failure).
 
-1. Deploy a SECOND Vercel instance from the same `proxy/` folder (a
-   different region if you like, e.g. Hong Kong vs Singapore) with its own
-   `PROXY_SECRET` (can differ from the primary).
+This also mitigates single-IP weight bans: if ALL Binance traffic egresses
+one relay IP, a single `-1003` (HTTP 418) takes every tool down with it.
+
+1. Deploy a SECOND `proxy-standalone/` instance on a DIFFERENT host (a
+   different IP — another Fly.io region, Deno Deploy, or a second VPS; **not**
+   Vercel) with its own `PROXY_SECRET` (can differ from the primary).
 2. Set two additional secrets:
    ```bash
    npx wrangler secret put PROXY_URL_2
@@ -466,14 +486,14 @@ tied to the Cloudflare account that created it. If you fork/deploy to your
 own account:
 
 ```bash
-npx wrangler d1 create whalescope-mcp-db
+npx wrangler d1 create binance-future-hunter-db
 ```
 
 Copy the resulting `database_id` into `[[d1_databases]]` in
 `wrangler.toml` (leave the binding as `DB`), then run the migration:
 
 ```bash
-npx wrangler d1 migrations apply whalescope-mcp-db --remote
+npx wrangler d1 migrations apply binance-future-hunter-db --remote
 ```
 
 Without this, `binance_get_basis_history` and `binance_backtest_signal`
@@ -510,7 +530,7 @@ real outside traffic).
 
 ## Monitoring & Alerting
 
-This backend has several silent failure points (Vercel/VPS proxy down, stream
+This backend has several silent failure points (relay proxy down, stream
 gateway WS dropped, Cron Trigger Cancel'd platform-side). What exists today
 all goes through **Telegram** (needs `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`
 set — otherwise alerts only reach Workers Logs):
@@ -526,6 +546,26 @@ set — otherwise alerts only reach Workers Logs):
 All checks are KV-gated (at most one alert per cooldown while the condition
 persists), safe to run every 5 minutes.
 
+### Multi-channel notifications (OPTIONAL)
+
+`src/notify.ts` fans every alert out to ALL configured channels
+(`Promise.allSettled` — one channel failing never fails the others or the
+cron). Telegram stays the default; the rest are opt-in via secrets:
+
+| Secret | Channel | If unset |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | Telegram (`sendMessage`, Markdown) | skipped |
+| `DISCORD_WEBHOOK_URL` | Discord webhook (`{content}`, 2000-char cap) | skipped |
+| `NOTIFY_WEBHOOK_URL` | Generic — POST JSON `{text}` to any endpoint | skipped |
+
+```bash
+npx wrangler secret put DISCORD_WEBHOOK_URL   # optional
+npx wrangler secret put NOTIFY_WEBHOOK_URL     # optional
+```
+
+Message content/format is identical across channels. With no channel set,
+alerts go to Workers Logs only (the cron never fails).
+
 **Still missing** (dashboard work, not code):
 
 - **External uptime monitor** on the worker `/` + relay `https://<vps>/health`
@@ -535,6 +575,22 @@ persists), safe to run every 5 minutes.
 - **Cloudflare notification** for Workers error-rate spikes / CPU-limit hits —
   observability (`[observability] enabled = true`) only collects data, no
   alerting rule.
+
+## Read-only dashboard (OPTIONAL)
+
+A simple dashboard served from the SAME worker (no separate Cloudflare
+Pages project). Gated `?key=<ADMIN_SECRET>` exactly like `/admin/usage` —
+yours, not public. Without `ADMIN_SECRET` set it is always 403.
+
+- **Page:** `https://<worker-url>/dashboard?key=<ADMIN_SECRET>` — one inline
+  HTML+JS file (vanilla `fetch`, no build step), auto-refreshes every 60s.
+- **API (JSON, same gate):**
+  - `GET /api/dashboard/pipeline-decisions?hours=24&limit=100&symbol=<opt>`
+  - `GET /api/dashboard/signals?symbol=BTCUSDT&hours=24&type=<opt>`
+  - `GET /api/dashboard/whales?coin=BTC`
+  - `GET /api/dashboard/circuit-breaker` — daily-loss + macro-risk KV state
+
+Everything reuses existing `d1Client` queries (no new D1 queries).
 
 ## Security: DNS Rebinding Protection (OPTIONAL)
 
@@ -592,21 +648,21 @@ GitHub repo → select the "Deploy to Cloudflare Workers" workflow →
 Once the workflow finishes (check the Actions tab), the worker will be
 live at:
 ```
-https://whalescope-mcp.<your-cloudflare-subdomain>.workers.dev
+https://binance-future-hunter.<your-cloudflare-subdomain>.workers.dev
 ```
 
 Open that URL — it should show a JSON status of `"ok"`.
 
-## Setup: Custom Domain (whalescope-mcp.jaringan.dev)
+## Setup: Custom Domain (binance-future-hunter.jaringan.dev)
 
 This **cannot** be done via GitHub Actions — it needs a one-time manual
 step in the Cloudflare dashboard:
 
 1. Open https://dash.cloudflare.com → select your account
-2. Open **Workers & Pages** → select the `whalescope-mcp` worker
+2. Open **Workers & Pages** → select the `binance-future-hunter` worker
 3. Open the **Settings** tab → **Domains & Routes**
 4. Click **Add** → **Custom Domain**
-5. Enter `whalescope-mcp.jaringan.dev`
+5. Enter `binance-future-hunter.jaringan.dev`
 6. Cloudflare will automatically create the needed DNS record **if** the
    `jaringan.dev` domain is already in the same account's Cloudflare zone.
    If that domain is registered under a different account/registrar,
@@ -614,15 +670,15 @@ step in the Cloudflare dashboard:
    Cloudflare shows you.
 
 Once the custom domain is active, the worker is reachable at
-`https://whalescope-mcp.jaringan.dev` (no longer the `.workers.dev`
+`https://binance-future-hunter.jaringan.dev` (no longer the `.workers.dev`
 domain).
 
 ## Register as a Custom Connector in Claude
 
 1. Open Claude (claude.ai) → **Settings** → **Connectors**
 2. Choose **Add custom connector**
-3. Enter the URL: `https://whalescope-mcp.jaringan.dev/mcp`
-   (or `https://whalescope-mcp.<subdomain>.workers.dev/mcp` if you haven't
+3. Enter the URL: `https://binance-future-hunter.jaringan.dev/mcp`
+   (or `https://binance-future-hunter.<subdomain>.workers.dev/mcp` if you haven't
    set up the custom domain yet — note the `/mcp` path at the end, it's
    required)
 4. Save, then enable the connector for whichever conversations you want
@@ -685,7 +741,7 @@ curl -X POST http://localhost:8787/mcp \
   }'
 ```
 
-If this returns valid funding rate + basis data for BTCUSDT, the Vercel
+If this returns valid funding rate + basis data for BTCUSDT, the relay
 proxy path works.
 
 ## Audit & Results
@@ -738,7 +794,7 @@ so the numbers are approximate — useful for relative comparison
   worker's own Workers KV.
 - **Credentials always go through Wrangler secrets**, never hardcoded or
   committed to `wrangler.toml`/git — see the explicit warning in the
-  [Vercel Proxy setup](#setup-vercel-proxy-required-one-time) section about
+  [Proxy Relay setup](#setup-proxy-relay-required-one-time) section about
   setting secrets safely.
 - This repo was manually scanned to confirm no real API key, secret, or
   credential is committed anywhere — only placeholders/examples (e.g. the
@@ -749,10 +805,12 @@ so the numbers are approximate — useful for relative comparison
 
 - Cloudflare Workers: free tier of 100,000 requests/day — far more than
   enough for personal trading-analysis use.
-- Vercel (proxy relay): the Hobby free tier covers millions of serverless
-  function invocations/month — won't incur cost for personal use. Note:
-  `PROXY_SECRET` must be kept confidential, since anyone who knows the URL
-  + secret can use this proxy's quota on your behalf.
+- Proxy relay (`proxy-standalone/`): free hosts (Fly.io free tier, Deno
+  Deploy) are enough for personal use; a small ~$5/mo VPS if you want full
+  control or a second relay. The old Vercel Hobby deploy is no longer used
+  (paused for commercial use). Note: `PROXY_SECRET` must be kept
+  confidential, since anyone who knows the URL + secret can use this
+  proxy's quota on your behalf.
 
 You will most likely never be charged on either platform for personal use.
 

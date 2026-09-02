@@ -12,20 +12,25 @@ import { createStore } from "./store.mjs";
 import { createWsClient } from "./ws-client.mjs";
 import { createServer } from "./server.mjs";
 import { parseEnvelope } from "./parse.mjs";
+import { createDepthWatcher } from "./depthWatch.mjs";
 
 const PORT = Number(process.env.STREAM_GATEWAY_PORT) || 8081;
 const DB_PATH = process.env.STREAM_DB_PATH || "./data.db";
-// NOTE: fstream.binance.com (the documented USD-M stream host) accepts the
-// WS upgrade from the Oracle Singapore IP but then black-holes all market
-// data — no 403, just silence (verified 2026-08-28; spot stream.binance.com
-// and dstream.binance.com both work fine from the same box, so it is an
-// fstream-specific IP/geo filter, not a network problem). dstream.binance.com
-// serves the same aggregated !forceOrder@arr feed *including USD-M symbols*
-// and is not filtered, so we use it. Overridable via STREAM_WS_URL if that
-// ever changes.
+// NOTE: fstream black-hole is IP-specific, NOT global:
+// - Oracle SG (146.235.17.228, 2026-08-28): fstream upgrade OK, then silence.
+// - AWS ap-southeast-1 (13.212.7.132, 2026-09-02 Krakatau spike): fstream
+//   @depth@100ms per-symbol WORKS (~588 msg/60s); fstream @aggTrade still silent.
+// Production VPS = AWS (svm-vps). Default below stays dstream for always-on
+// !forceOrder@arr + !contractInfo (works from both IPs). Task B depthWatch
+// should use fstream @depth@100ms on AWS. Overridable via STREAM_WS_URL.
 const WS_URL =
   process.env.STREAM_WS_URL ||
   "wss://dstream.binance.com/stream?streams=!forceOrder@arr/!contractInfo";
+// Per-symbol depth watch (Task B) uses fstream directly — the black-hole
+// that forces dstream for the always-on feed is Oracle-IP-specific and does
+// NOT apply to AWS @depth@100ms (Krakatau spike 2026-09-02).
+const DEPTH_WS_BASE = process.env.STREAM_DEPTH_WS_BASE || "wss://fstream.binance.com/ws";
+const DEPTH_MAX_WATCHES = Number(process.env.STREAM_DEPTH_MAX_WATCHES) || 8;
 const SECRET = process.env.PROXY_SECRET;
 
 const PRUNE_INTERVAL_MS = 10 * 60 * 1000;
@@ -71,7 +76,12 @@ function health() {
   return { ...ws.getHealth(), malformedCount: stats.malformedCount };
 }
 
-const httpServer = createServer(() => ({ store, health: health(), secret: SECRET }));
+const depthWatch = createDepthWatcher({
+  wsUrlBase: DEPTH_WS_BASE,
+  maxWatches: DEPTH_MAX_WATCHES,
+});
+
+const httpServer = createServer(() => ({ store, health: health(), secret: SECRET, depthWatch }));
 
 const pruneTimer = setInterval(() => {
   try {
@@ -100,6 +110,7 @@ function shutdown(sig) {
   log(`${sig} — shutting down`);
   clearInterval(pruneTimer);
   ws.stop();
+  depthWatch.stopAll();
   httpServer.close(() => {
     store.close();
     process.exit(0);

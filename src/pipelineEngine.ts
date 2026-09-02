@@ -171,8 +171,22 @@ export interface Tier1ScoreInput {
   cvdBuyPct: number;
 }
 
+/** 4 sub-skor komponen (0-100 masing-masing) SEBELUM dibobot & dijumlah
+ *  jadi rankingScore. Bobot terpasang: mm 35% / smartMoney 30% / regime
+ *  20% / buyPressure 15%. Dipersist ke pipeline_decision_log (migration
+ *  0014) supaya scripts/calibrate-ranking-weights.mjs bisa fit ulang bobot
+ *  dari data historis. SATU sumber kebenaran -- jangan hitung ulang di
+ *  layer lain. */
+export interface Tier1ScoreComponents {
+  mm: number;
+  smartMoney: number;
+  regime: number;
+  buyPressure: number;
+}
+
 export interface Tier1ScoreResult {
   rankingScore: number; // 0-100
+  components: Tier1ScoreComponents;
   notes: string[];
 }
 
@@ -253,7 +267,16 @@ export function scoreTier1Signals(input: Tier1ScoreInput): Tier1ScoreResult {
 
   const rankingScore = mmComponent * 0.35 + smartMoneyComponent * 0.3 + regimeComponent * 0.2 + buyPressureComponent * 0.15;
 
-  return { rankingScore: clampPct(rankingScore), notes };
+  return {
+    rankingScore: clampPct(rankingScore),
+    components: {
+      mm: mmComponent,
+      smartMoney: smartMoneyComponent,
+      regime: regimeComponent,
+      buyPressure: buyPressureComponent,
+    },
+    notes,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────

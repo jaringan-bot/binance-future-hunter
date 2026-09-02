@@ -10,7 +10,10 @@ WorkingDirectory=/opt/whale-stream-gateway
 EnvironmentFile=/opt/whale-stream-gateway/.env
 Environment=STREAM_GATEWAY_PORT=8081
 Environment=STREAM_DB_PATH=/opt/whale-stream-gateway/data.db
-ExecStart=/usr/bin/node --experimental-sqlite --disable-warning=ExperimentalWarning index.mjs
+# node lives at /usr/bin/node (Oracle) OR /usr/local/bin/node (AWS nodesource)
+# -- resolve via env + explicit PATH so the unit works on both boxes.
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env node --experimental-sqlite --disable-warning=ExperimentalWarning index.mjs
 Restart=always
 RestartSec=2
 MemoryMax=256M

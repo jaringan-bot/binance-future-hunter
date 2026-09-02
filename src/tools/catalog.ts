@@ -92,6 +92,7 @@ const CATALOG_METADATA: Record<string, CatalogMetadata> = {
   whalescope_compare_funding_across_exchanges: { category: "cross-exchange", tokenCost: "medium", useCase: "Bandingkan funding rate, price, OI, 24h change 1 pair across Binance/Bybit/OKX/Hyperliquid, deteksi divergensi", dependencies: ["funding"] },
   binance_get_realtime_liquidations: { category: "realtime", tokenCost: "medium", useCase: "Likuidasi paksa terbaru market-wide dari WS stream (di-buffer di gateway VPS, feed di-sampel Binance)", dependencies: [] },
   binance_get_contract_events: { category: "realtime", tokenCost: "low", useCase: "Event listing/delisting/settlement kontrak futures dari WS !contractInfo (buffer 30 hari)", dependencies: [] },
+  binance_watch_orderbook_realtime: { category: "realtime", tokenCost: "medium", useCase: "Arm watch sub-detik order book satu pair (@depth@100ms), balik event lifecycle wall (APPEARED/GREW/SHRANK/VANISHED). TTL-bounded, on-demand", dependencies: [] },
   binance_get_tool_catalog: { category: "meta", tokenCost: "low", useCase: "Daftar semua tool + kategori/use-case (tool ini sendiri)", dependencies: [] },
   binance_get_adl_risk: { category: "risk", tokenCost: "low", useCase: "Quantile risk rating ADL per pair (update tiap 30 menit)", dependencies: [] },
   binance_get_insurance_fund_balance: { category: "risk", tokenCost: "low", useCase: "Snapshot historis saldo insurance fund per asset margin", dependencies: [] },
@@ -156,8 +157,14 @@ const CATALOG_METADATA: Record<string, CatalogMetadata> = {
   cme_get_institutional_positioning: {
     category: "history",
     tokenCost: "medium",
-    useCase: "CFTC COT positioning institusi (CME)",
+    useCase: "CFTC COT positioning institusi (CME), snapshot mingguan terkini",
     dependencies: [],
+  },
+  cme_get_institutional_positioning_trend: {
+    category: "history",
+    tokenCost: "medium",
+    useCase: "Trend CFTC COT multi-minggu dari histori lokal D1 (rate-of-change, bukan cuma WoW)",
+    dependencies: ["history"],
   },
   whalescope_get_stablecoin_supply: {
     category: "composite",
@@ -219,6 +226,12 @@ const CATALOG_METADATA: Record<string, CatalogMetadata> = {
     useCase: "Bound grid di wall bid/ask tebal; GRID_NO_TRADE kalau wall tidak ada",
     dependencies: ["orderbook", "technical"],
   },
+  binance_analyze_institutional_flow: {
+    category: "composite",
+    tokenCost: "high",
+    useCase: "Skor alignment institusional: whale Hyperliquid + trend CFTC + wall cross-venue corroborated",
+    dependencies: ["cross-exchange", "orderbook", "history"],
+  },
 };
 
 export { CATALOG_METADATA, FALLBACK_CATEGORY };
@@ -237,7 +250,7 @@ export function registerCatalogTools(server: McpServer): void {
     {
       title: "Tool Catalog & Usage Guide",
       description:
-        "Daftar semua tool WhaleScope MCP dengan kategori, estimasi token cost, use-case, dan dependency-nya. " +
+        "Daftar semua tool Binance Future Hunter dengan kategori, estimasi token cost, use-case, dan dependency-nya. " +
         "Berguna sebelum manggil banyak tool individual -- cek dulu kategori/use-case yang relevan biar gak salah " +
         "pilih tool atau kelewat tool composite yang bisa gantikan beberapa tool sekaligus. Nama+description " +
         "SELALU akurat (auto dari tool registry); kategori 'uncategorized' berarti tool itu belum di-curated " +
