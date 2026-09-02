@@ -1,4 +1,9 @@
-# WhaleScope MCP — Binance Futures Market Intelligence
+# Binance Future Hunter — Binance Futures Market Intelligence
+
+> Rebranded from `whalescope-mcp` (former internal name) to
+> `binance-future-hunter`, matching the repo name. The tested codebase/logic
+> wasn't thrown away — only the deployment identity (worker name, D1, title)
+> changed. See the rebrand commit for the full list of changes.
 
 [🇮🇩 Bahasa Indonesia](README.md) | 🇬🇧 English
 
@@ -11,7 +16,7 @@ account data.
 
 ## Quick Deploy
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/osindo-dev/whalescope-mcp)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/jaringan-bot/binance-future-hunter)
 
 This button clones the repo and creates a Worker in your own Cloudflare
 account, including **auto-provisioning a new KV namespace & D1 database**
@@ -466,14 +471,14 @@ tied to the Cloudflare account that created it. If you fork/deploy to your
 own account:
 
 ```bash
-npx wrangler d1 create whalescope-mcp-db
+npx wrangler d1 create binance-future-hunter-db
 ```
 
 Copy the resulting `database_id` into `[[d1_databases]]` in
 `wrangler.toml` (leave the binding as `DB`), then run the migration:
 
 ```bash
-npx wrangler d1 migrations apply whalescope-mcp-db --remote
+npx wrangler d1 migrations apply binance-future-hunter-db --remote
 ```
 
 Without this, `binance_get_basis_history` and `binance_backtest_signal`
@@ -592,21 +597,21 @@ GitHub repo → select the "Deploy to Cloudflare Workers" workflow →
 Once the workflow finishes (check the Actions tab), the worker will be
 live at:
 ```
-https://whalescope-mcp.<your-cloudflare-subdomain>.workers.dev
+https://binance-future-hunter.<your-cloudflare-subdomain>.workers.dev
 ```
 
 Open that URL — it should show a JSON status of `"ok"`.
 
-## Setup: Custom Domain (whalescope-mcp.jaringan.dev)
+## Setup: Custom Domain (binance-future-hunter.jaringan.dev)
 
 This **cannot** be done via GitHub Actions — it needs a one-time manual
 step in the Cloudflare dashboard:
 
 1. Open https://dash.cloudflare.com → select your account
-2. Open **Workers & Pages** → select the `whalescope-mcp` worker
+2. Open **Workers & Pages** → select the `binance-future-hunter` worker
 3. Open the **Settings** tab → **Domains & Routes**
 4. Click **Add** → **Custom Domain**
-5. Enter `whalescope-mcp.jaringan.dev`
+5. Enter `binance-future-hunter.jaringan.dev`
 6. Cloudflare will automatically create the needed DNS record **if** the
    `jaringan.dev` domain is already in the same account's Cloudflare zone.
    If that domain is registered under a different account/registrar,
@@ -614,15 +619,15 @@ step in the Cloudflare dashboard:
    Cloudflare shows you.
 
 Once the custom domain is active, the worker is reachable at
-`https://whalescope-mcp.jaringan.dev` (no longer the `.workers.dev`
+`https://binance-future-hunter.jaringan.dev` (no longer the `.workers.dev`
 domain).
 
 ## Register as a Custom Connector in Claude
 
 1. Open Claude (claude.ai) → **Settings** → **Connectors**
 2. Choose **Add custom connector**
-3. Enter the URL: `https://whalescope-mcp.jaringan.dev/mcp`
-   (or `https://whalescope-mcp.<subdomain>.workers.dev/mcp` if you haven't
+3. Enter the URL: `https://binance-future-hunter.jaringan.dev/mcp`
+   (or `https://binance-future-hunter.<subdomain>.workers.dev/mcp` if you haven't
    set up the custom domain yet — note the `/mcp` path at the end, it's
    required)
 4. Save, then enable the connector for whichever conversations you want

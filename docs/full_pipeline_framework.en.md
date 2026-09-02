@@ -2,7 +2,7 @@
 
 [🇮🇩 Bahasa Indonesia](full_pipeline_framework.md) | 🇬🇧 English
 
-> Full documentation for WhaleScope MCP's highest-level composite tool: a
+> Full documentation for Binance Future Hunter's highest-level composite tool: a
 > single tool call that runs the entire Binance Futures Grid Bot decision
 > chain -- hard screen, Tier-1 intelligence, grid bound calculation, risk
 > sizing, and the final decision -- for one or many symbols at once.

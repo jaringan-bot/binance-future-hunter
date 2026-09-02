@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Token-efficiency audit script for whalescope-mcp.
+// Token-efficiency audit script for binance-future-hunter.
 //
 // Measures three things against the LIVE deployed worker (not a mock):
 //   1. Tool DEFINITION size (schema cost) -- paid once per Claude session
@@ -25,7 +25,7 @@
 // Binance/Coinalyze through it), same "manual verification" convention
 // documented in README.md for this repo.
 
-const WORKER_URL = "https://whalescope-mcp.jaringan.dev/mcp";
+const WORKER_URL = "https://binance-future-hunter.jaringan.dev/mcp";
 const CHARS_PER_TOKEN = 4; // documented approximation, see header comment
 
 function estimateTokens(str) {
@@ -214,7 +214,7 @@ async function simulateConversation(schemaTokens) {
 
 // ── Main ───────────────────────────────────────────────────────────────────
 async function main() {
-  console.log(`whalescope-mcp token audit -- ${new Date().toISOString()}`);
+  console.log(`binance-future-hunter token audit -- ${new Date().toISOString()}`);
   console.log(`Worker: ${WORKER_URL}`);
   console.log(`Token estimation: chars/${CHARS_PER_TOKEN} approximation (no public Claude tokenizer exists -- see script header)`);
 

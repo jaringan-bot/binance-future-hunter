@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Always-on Binance !forceOrder@arr + !contractInfo consumer for whalescope-mcp",
+  "description": "Always-on Binance !forceOrder@arr + !contractInfo consumer for binance-future-hunter",
   "scripts": {
     "start": "node --experimental-sqlite --disable-warning=ExperimentalWarning index.mjs",
     "test": "node --experimental-sqlite --disable-warning=ExperimentalWarning --test"

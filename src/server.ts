@@ -38,10 +38,11 @@ import { registerRealtimeStreamTools } from "./tools/realtimeStream.js";
 import { registerLiquiditySweepTools } from "./tools/liquiditySweep.js";
 import { registerRiskCircuitTools } from "./tools/riskCircuit.js";
 import { registerGridWallFinderTools } from "./tools/gridWallFinder.js";
+import { registerInstitutionalFlowTools } from "./tools/institutionalFlow.js";
 import { resetToolRegistry } from "./toolWrapper.js";
 
 export function createServer(): McpServer {
-  const server = new McpServer({ name: "whalescope-mcp", version: "1.0.0" });
+  const server = new McpServer({ name: "binance-future-hunter", version: "1.0.0" });
   resetToolRegistry();
   registerFundingTools(server);
   registerOpenInterestTools(server);
@@ -82,5 +83,6 @@ export function createServer(): McpServer {
   registerLiquiditySweepTools(server);
   registerRiskCircuitTools(server);
   registerGridWallFinderTools(server);
+  registerInstitutionalFlowTools(server);
   return server;
 }

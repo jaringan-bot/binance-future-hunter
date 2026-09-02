@@ -2,7 +2,7 @@
   "name": "whale-binance-proxy-standalone",
   "version": "1.0.0",
   "private": true,
-  "description": "Platform-agnostic Binance Futures/Spot proxy relay for the whalescope-mcp Cloudflare Worker. Zero dependencies. Deploy on any non-US, non-WAF-blocked host.",
+  "description": "Platform-agnostic Binance Futures/Spot proxy relay for the binance-future-hunter Cloudflare Worker. Zero dependencies. Deploy on any non-US, non-WAF-blocked host.",
   "type": "module",
   "engines": {
     "node": ">=18.17"

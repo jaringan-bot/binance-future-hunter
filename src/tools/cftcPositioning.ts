@@ -8,12 +8,15 @@
 // diakses institusi/trader teregulasi, beda dari OI Binance yang campur
 // retail+institusi.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { getCftcPositioning, type CftcPositioningReport } from "../cftcClient.js";
+import { getCftcPositioning, computeCftcTrend, type CftcPositioningReport } from "../cftcClient.js";
+import { queryCftcPositioningHistory } from "../d1Client.js";
 import { errorResult } from "../shared.js";
 import { registerSafeTool } from "../toolWrapper.js";
 import { ToolResponseBuilder } from "../responseBuilder.js";
 import { fmtNum, fmtPct } from "../format.js";
 import { z } from "zod";
+
+const MAX_TREND_WEEKS = 26;
 
 export function registerCftcPositioningTools(server: McpServer): void {
   registerSafeTool(
@@ -53,6 +56,71 @@ export function registerCftcPositioningTools(server: McpServer): void {
               "laporan Disaggregated komoditas fisik, dataset beda).",
           )
           .struct("report", report);
+
+        return builder.build();
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  registerSafeTool(
+    server,
+    "cme_get_institutional_positioning_trend",
+    {
+      title: "Trend Positioning Institusional CME (Multi-Minggu, dari Histori Lokal)",
+      description:
+        "Rate-of-change Leveraged Funds/Asset Managers CME (BTC/ETH) lintas beberapa minggu, dihitung dari histori " +
+        "lokal yang disimpan cron (cftc_positioning_history, D1) -- BEDA dari `cme_get_institutional_positioning` " +
+        "yang cuma kasih WoW dari API CFTC langsung (1 minggu). PENTING: data baru mulai terkumpul sejak fitur ini " +
+        "dirilis (BUKAN backfill retroaktif) -- window awal bakal pendek (sedikit minggu) sampai histori terkumpul " +
+        "cukup. Direction (RISING/FALLING/FLAT) pakai deadband 2 poin persentase, HEURISTIK belum dikalibrasi " +
+        "statistik -- sama seperti threshold lain di repo ini.",
+      inputSchema: {
+        coin: z.enum(["BTC", "ETH"]).describe("Coin CME yang didukung saat ini: BTC atau ETH."),
+        weeks: z
+          .number()
+          .int()
+          .min(2)
+          .max(MAX_TREND_WEEKS)
+          .default(8)
+          .describe(`Jumlah laporan mingguan terbaru yang dipakai buat window trend (2-${MAX_TREND_WEEKS}, default 8).`),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ coin, weeks }) => {
+      try {
+        const history = await queryCftcPositioningHistory(coin, weeks);
+        const trend = computeCftcTrend(history.map((h) => ({ reportDate: h.reportDate, openInterest: h.openInterest, levNetPct: h.levNetPct, amNetPct: h.amNetPct })));
+
+        if (trend.weeksAvailable === 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text:
+                  "Belum ada histori CFTC tersimpan untuk coin ini -- cron snapshot (piggyback HEARTBEAT_CRON, 3x/hari) " +
+                  "baru mulai ngisi cftc_positioning_history sejak fitur ini di-deploy. Coba lagi setelah minimal 1 " +
+                  "laporan mingguan CFTC baru terlewat, atau pakai `cme_get_institutional_positioning` untuk snapshot terkini.",
+              },
+            ],
+          };
+        }
+
+        const builder = new ToolResponseBuilder()
+          .header(`CME Institutional Positioning Trend -- ${coin}`)
+          .row("Laporan Tersedia", `${trend.weeksAvailable} minggu`)
+          .row("Periode", `${trend.oldest?.reportDate} → ${trend.latest?.reportDate}`)
+          .row("Leveraged Funds Net % OI (terkini)", fmtPct(trend.latest?.levNetPct ?? 0, 2))
+          .row("Perubahan Net % (window)", `${(trend.levNetPctChange ?? 0).toFixed(2)} poin`)
+          .row("Asset Managers Perubahan Net % (window)", `${(trend.amNetPctChange ?? 0).toFixed(2)} poin`)
+          .row("Direction (Leveraged Funds)", trend.direction)
+          .note(
+            "Direction dari deadband 2 poin persentase (heuristik, belum dikalibrasi). Histori baru mulai terkumpul " +
+              "sejak fitur ini dirilis -- window pendek berarti confidence rendah, jangan simpulkan trend jangka " +
+              "panjang dari sedikit minggu data.",
+          )
+          .struct("trend", trend);
 
         return builder.build();
       } catch (err) {

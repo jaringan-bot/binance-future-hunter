@@ -2,7 +2,7 @@
 
 🇮🇩 Bahasa Indonesia | [🇬🇧 English](full_pipeline_framework.en.md)
 
-> Dokumentasi lengkap tool composite tertinggi di WhaleScope MCP: satu tool
+> Dokumentasi lengkap tool composite tertinggi di Binance Future Hunter: satu tool
 > call yang menjalankan seluruh decision chain Grid Bot Binance Futures --
 > hard screen, Tier-1 intelligence, kalkulasi bound grid, risk sizing, dan
 > keputusan akhir -- untuk satu atau banyak symbol sekaligus.

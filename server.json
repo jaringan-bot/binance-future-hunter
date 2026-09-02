@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.osindo-dev/whalescope-mcp",
-  "title": "WhaleScope MCP",
+  "name": "io.github.jaringan-bot/binance-future-hunter",
+  "title": "Binance Future Hunter",
   "description": "Binance Futures market intelligence: funding, OI, order book, klines, cross-exchange comparison.",
   "repository": {
-    "url": "https://github.com/osindo-dev/whalescope-mcp",
+    "url": "https://github.com/jaringan-bot/binance-future-hunter",
     "source": "github"
   },
   "version": "1.0.0",
   "remotes": [
     {
       "type": "streamable-http",
-      "url": "https://whalescope-mcp.jaringan.dev/mcp"
+      "url": "https://binance-future-hunter.jaringan.dev/mcp"
     }
   ]
 }

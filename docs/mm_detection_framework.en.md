@@ -2,7 +2,7 @@
 
 [🇮🇩 Bahasa Indonesia](mm_detection_framework.md) | 🇬🇧 English
 
-> A framework for detecting market maker (MM) activity using WhaleScope MCP tools (Binance Futures + Spot).
+> A framework for detecting market maker (MM) activity using Binance Future Hunter tools (Binance Futures + Spot).
 > **Important note:** No tool can directly see an MM's identity or specific positions. This framework builds an activity profile from the footprints MMs leave in the market.
 
 ---
@@ -124,7 +124,7 @@ The trade-concentration concern raised during this probe series' diagnosis turne
 
 > 💡 **Why an EXPLICIT gap (default 1500ms) solves the latency-variance problem:** the earlier recommendation ("don't build detection on sequential snapshot comparison") assumed 2 calls made back-to-back with NO gap, where the 298-898ms latency variance made the actual time between snapshots unpredictable (could be 300ms, could be 900ms — a large relative difference). With an explicit 1500ms gap deliberately awaited BETWEEN the 2 fetches, the per-call latency variance (~600ms max) becomes small relative to the gap itself (~1500ms) — the time between snapshots stays consistently ~1.5-2 seconds, long enough to catch typical wall-pulling (usually seconds) but not just network noise. **Trade-off**: this tool is automatically ~1-2 seconds slower than the single-snapshot tools.
 
-> ❌ **WebSocket: NOT AVAILABLE** in WhaleScope MCP. All tools are discrete REST request/response. Sub-second real-time detection would require a separate stack outside this project.
+> ❌ **WebSocket: NOT AVAILABLE** in Binance Future Hunter. All tools are discrete REST request/response. Sub-second real-time detection would require a separate stack outside this project.
 
 ---
 
@@ -334,7 +334,7 @@ Score ~1-1.5/6 → Weak tier. **A sensible result** — BTC was calm, the framew
 |-----------|--------|---------|
 | Polling <500ms for refresh-rate spoofing | ❌ Removed | Latency 298-898ms, not reliable |
 | Snapshot comparison every 1-2 seconds | ⚠️ Marginal | 2 sequential calls can hit 1.8s+, too much variance |
-| WebSocket fallback "if available" | ❌ Removed | Not available in WhaleScope MCP (100% REST) |
+| WebSocket fallback "if available" | ❌ Removed | Not available in Binance Future Hunter (100% REST) |
 | Divergence threshold >15% flat | ❌ Removed | Never triggers for any pair |
 | Tiered threshold 3-15% by liquidity | ❌ Removed | Guessed numbers, every pair far below them |
 | "Liquidation cluster at a psychological level" | ⚠️ Revised | No price field — needs manual `klines` cross-check |
@@ -439,6 +439,6 @@ See `src/smartMoneyAnalysis.ts` for the full scoring formula.
 ---
 
 *Created: 2026-08-11*
-*Version 4.0 (final) — every technical claim validated directly against live WhaleScope MCP data, including latency, endpoint historical limits, and the real-world movement of the top-trader ratio across pairs.*
+*Version 4.0 (final) — every technical claim validated directly against live Binance Future Hunter (formerly whalescope-mcp) data, including latency, endpoint historical limits, and the real-world movement of the top-trader ratio across pairs.*
 *Section 11 added 2026-08-12: documents `binance_detect_mm_activity` (automated scoring) + `binance_backtest_signal` (continuous empirical validation).*
 *Section 12 added 2026-08-15: documents `binance_analyze_smart_money` (Smart Money Divergence Score).*

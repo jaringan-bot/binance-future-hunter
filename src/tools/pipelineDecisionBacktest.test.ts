@@ -155,4 +155,56 @@ describe("whalescope_backtest_pipeline_decisions tool handler", () => {
     expect(structured.byScoreBucket["40_55"].sampleSize).toBe(1);
     expect(binanceProxy.getKlinesNative).toHaveBeenCalledTimes(2);
   });
+
+  it("applies fee_bps + slippage_bps to forward returns before aggregating", async () => {
+    vi.mocked(d1Client.queryPipelineDecisionLog).mockResolvedValue([
+      logRow({ symbol: "BTCUSDT", decision: "TRADE", rankingScore: 60, stopLoss: 95 }),
+    ]);
+    // gross forward return = (100.3 - 100) / 100 = +0.003 (+30 bps)
+    vi.mocked(binanceProxy.getKlinesNative).mockResolvedValue([candle(100, 99), candle(100.3, 99)]);
+
+    const args = z.object(inputSchema).parse({
+      startTime: "2026-08-01T00:00:00Z",
+      endTime: "2026-08-31T00:00:00Z",
+      forwardWindow: "4h",
+      fee_bps: 20,
+      slippage_bps: 5,
+    });
+    const result = await handler(args);
+    const structured = result.structuredContent as {
+      feeBps: number;
+      slippageBps: number;
+      execCostRoundTrip: number;
+      overall: { winRate: number; avgReturn: number };
+      byDecision: Record<string, { winRate: number }>;
+      rows: { grossReturn: number; forwardReturn: number }[];
+    };
+
+    // round-trip cost = 2 * (20 + 5) / 10000 = 0.005 (50 bps) > 30 bps gross
+    expect(structured.feeBps).toBe(20);
+    expect(structured.slippageBps).toBe(5);
+    expect(structured.execCostRoundTrip).toBeCloseTo(0.005, 10);
+    expect(structured.rows[0].grossReturn).toBeCloseTo(0.003, 10);
+    expect(structured.rows[0].forwardReturn).toBeCloseTo(0.003 - 0.005, 10);
+    // gross win flips to a net loss
+    expect(structured.overall.winRate).toBe(0);
+    expect(structured.byDecision.TRADE.winRate).toBe(0);
+  });
+
+  it("defaults fee/slippage to the Binance-taker approximation", async () => {
+    vi.mocked(d1Client.queryPipelineDecisionLog).mockResolvedValue([
+      logRow({ symbol: "BTCUSDT", decision: "TRADE", rankingScore: 60, stopLoss: 95 }),
+    ]);
+    vi.mocked(binanceProxy.getKlinesNative).mockResolvedValue([candle(100, 99), candle(105, 99)]);
+
+    const args = z.object(inputSchema).parse({
+      startTime: "2026-08-01T00:00:00Z",
+      endTime: "2026-08-31T00:00:00Z",
+    });
+    const result = await handler(args);
+    const structured = result.structuredContent as { execCostRoundTrip: number; rows: { forwardReturn: number }[] };
+    // default = 2 * (4 + 2) / 10000 = 0.0012
+    expect(structured.execCostRoundTrip).toBeCloseTo(0.0012, 10);
+    expect(structured.rows[0].forwardReturn).toBeCloseTo(0.05 - 0.0012, 10);
+  });
 });

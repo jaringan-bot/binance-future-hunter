@@ -52,6 +52,27 @@ export interface BacktestAggregate {
   sampleSize: number;
 }
 
+// Default biaya eksekusi per SISI (entry / exit), basis points.
+//  - taker fee Binance USDⓈ-M Futures ~0.04% = 4 bps (tier retail, tanpa
+//    diskon BNB). Maker fee lebih murah tapi grid entry alert ini
+//    diasumsikan taker (masuk market saat sinyal).
+//  - slippage/spread: estimasi konservatif 2 bps buat pair likuid
+//    watchlist. BUKAN hasil replay order-book historis.
+export const DEFAULT_FEE_BPS = 4;
+export const DEFAULT_SLIPPAGE_BPS = 2;
+
+/**
+ * Kurangi gross forward return dengan biaya eksekusi (fee + slippage) di
+ * KEDUA sisi (entry + exit): net = gross - 2 * (feeBps + slippageBps)/10000.
+ * Ini pendekatan flat -- TIDAK memodelkan market impact yang tergantung
+ * ukuran order atau kedalaman book saat itu (butuh depth snapshot
+ * historis, di luar scope tool ini).
+ */
+export function applyExecutionCost(grossReturn: number, feeBps: number, slippageBps: number): number {
+  const perSide = (feeBps + slippageBps) / 10_000;
+  return grossReturn - 2 * perSide;
+}
+
 export function aggregateBacktestResults(rows: { forwardReturn: number }[]): BacktestAggregate {
   if (rows.length === 0) return { winRate: 0, avgReturn: 0, maxDrawdown: 0, sampleSize: 0 };
 
@@ -86,7 +107,10 @@ export function registerBacktestTools(server: McpServer): void {
         "forward return (harga N jam setelah sinyal vs saat sinyal) per baris, lalu agregat win rate/avg " +
         "return/max drawdown. Forward return dihitung ON-DEMAND dari klines historis saat tool dipanggil (bukan " +
         `data pre-computed). Dibatasi maksimal ${MAX_ROWS} baris paling baru dalam range per panggilan (tiap baris ` +
-        "butuh 2 kline lookup). HANYA symbol watchlist tetap yang punya histori sinyal tersimpan.",
+        "butuh 2 kline lookup). HANYA symbol watchlist tetap yang punya histori sinyal tersimpan. " +
+        `Forward return sudah dikurangi biaya eksekusi flat: fee_bps (default ${DEFAULT_FEE_BPS}) + slippage_bps ` +
+        `(default ${DEFAULT_SLIPPAGE_BPS}), dikali 2 (entry+exit). Ini BUKAN replay order-book historis penuh -- ` +
+        "market impact tergantung ukuran order & kedalaman book tidak dimodelkan (butuh depth snapshot historis, di luar scope).",
       inputSchema: {
         symbol: z.enum(SNAPSHOT_WATCHLIST).describe(`Symbol dari watchlist tetap: ${SNAPSHOT_WATCHLIST.join(", ")}`),
         signalType: z.enum(SIGNAL_TYPE_ENUM).default("all").describe("Filter jenis sinyal, atau 'all' untuk semua"),
@@ -96,10 +120,22 @@ export function registerBacktestTools(server: McpServer): void {
           .enum(["1h", "4h", "24h"])
           .default("4h")
           .describe("Jendela forward return yang dihitung setelah tiap sinyal trigger"),
+        fee_bps: z
+          .number()
+          .min(0)
+          .max(100)
+          .default(DEFAULT_FEE_BPS)
+          .describe(`Taker fee per sisi (bps). Default ${DEFAULT_FEE_BPS} (~0.04% Binance Futures). Dikurangi 2x dari tiap forward return (entry+exit).`),
+        slippage_bps: z
+          .number()
+          .min(0)
+          .max(500)
+          .default(DEFAULT_SLIPPAGE_BPS)
+          .describe(`Estimasi slippage/spread per sisi (bps). Default ${DEFAULT_SLIPPAGE_BPS}. Dikurangi 2x (entry+exit). Bukan hasil replay order-book historis.`),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ symbol, signalType, startTime, endTime, forwardWindow }) => {
+    async ({ symbol, signalType, startTime, endTime, forwardWindow, fee_bps, slippage_bps }) => {
       try {
         const startMs = parseTimeParam(startTime, "startTime");
         const endMs = parseTimeParam(endTime, "endTime");
@@ -122,7 +158,13 @@ export function registerBacktestTools(server: McpServer): void {
         }
 
         const windowMs = FORWARD_WINDOW_MS[forwardWindow];
-        const withReturns: (SignalHistoryRow & { forwardReturn: number; entryPrice: number; exitPrice: number })[] = [];
+        const execCostRoundTrip = 2 * (fee_bps + slippage_bps) / 10_000;
+        const withReturns: (SignalHistoryRow & {
+          forwardReturn: number;
+          grossReturn: number;
+          entryPrice: number;
+          exitPrice: number;
+        })[] = [];
 
         for (const row of activeRows) {
           const [entryPrice, exitPrice] = await Promise.all([
@@ -130,7 +172,15 @@ export function registerBacktestTools(server: McpServer): void {
             priceNear(symbol, row.timestamp + windowMs),
           ]);
           if (entryPrice === null || exitPrice === null || entryPrice === 0) continue;
-          withReturns.push({ ...row, entryPrice, exitPrice, forwardReturn: (exitPrice - entryPrice) / entryPrice });
+          const grossReturn = (exitPrice - entryPrice) / entryPrice;
+          withReturns.push({
+            ...row,
+            entryPrice,
+            exitPrice,
+            grossReturn,
+            // net = sesudah fee+slippage kedua sisi; ini yang dipakai agregat.
+            forwardReturn: applyExecutionCost(grossReturn, fee_bps, slippage_bps),
+          });
         }
 
         const aggregate = aggregateBacktestResults(withReturns);
@@ -139,25 +189,35 @@ export function registerBacktestTools(server: McpServer): void {
           .header(`Backtest Sinyal — ${symbol}${signalType !== "all" ? ` (${signalType})` : ""}`)
           .row("Forward Window", forwardWindow)
           .row("Sample Size", `${aggregate.sampleSize} sinyal aktif (dari ${activeRows.length} kandidat, ${allRows.length} total snapshot dalam range)`)
-          .row("Win Rate", `${(aggregate.winRate * 100).toFixed(1)}%`)
-          .row("Avg Forward Return", `${(aggregate.avgReturn * 100).toFixed(2)}%`)
-          .row("Max Drawdown", `${(aggregate.maxDrawdown * 100).toFixed(2)}%`);
+          .row("Win Rate (net)", `${(aggregate.winRate * 100).toFixed(1)}%`)
+          .row("Avg Forward Return (net)", `${(aggregate.avgReturn * 100).toFixed(2)}%`)
+          .row("Max Drawdown (net)", `${(aggregate.maxDrawdown * 100).toFixed(2)}%`)
+          .row("Biaya eksekusi", `fee ${fee_bps}bps + slippage ${slippage_bps}bps per sisi -> ${(execCostRoundTrip * 100).toFixed(3)}% round-trip`);
 
         if (withReturns.length > 0) {
           builder.table(
-            ["Waktu", "Tipe", "Skor", `Return ${forwardWindow}`],
+            ["Waktu", "Tipe", "Skor", `Gross ${forwardWindow}`, `Net ${forwardWindow}`],
             withReturns
               .slice(-15)
-              .map((r) => [fmtTime(r.timestamp), r.signalType, r.score.toFixed(2), `${(r.forwardReturn * 100).toFixed(2)}%`]),
+              .map((r) => [
+                fmtTime(r.timestamp),
+                r.signalType,
+                r.score.toFixed(2),
+                `${(r.grossReturn * 100).toFixed(2)}%`,
+                `${(r.forwardReturn * 100).toFixed(2)}%`,
+              ]),
           );
         }
 
         builder
           .note(
-            `Sample size kecil (<20) berarti confidence rendah -- jangan simpulkan "sinyal ini reliable" dari sedikit data. Forward return dihitung dari close candle 1h terdekat ke waktu target, BUKAN eksekusi order riil (slippage/fee tidak dihitung).`,
+            `Sample size kecil (<20) berarti confidence rendah -- jangan simpulkan "sinyal ini reliable" dari sedikit data. Forward return dihitung dari close candle 1h terdekat ke waktu target. "Net" = sesudah dikurangi fee_bps+slippage_bps di entry & exit (flat ${(execCostRoundTrip * 100).toFixed(3)}% round-trip), BUKAN replay order-book historis -- market impact per ukuran order tidak dimodelkan.`,
           )
           .struct("symbol", symbol)
           .struct("signalType", signalType)
+          .struct("feeBps", fee_bps)
+          .struct("slippageBps", slippage_bps)
+          .struct("execCostRoundTrip", execCostRoundTrip)
           .struct("forwardWindow", forwardWindow)
           .struct("aggregate", aggregate)
           .struct("candidateCount", activeRows.length)

@@ -10,6 +10,8 @@ import { isAuthorized } from "./adminUsage.js";
 import { scanWallCandidates } from "./cron/wallTrackingCron.js";
 import { snapshotBasisForSymbol, snapshotNonWatchlistBasis } from "./cron/marketSnapshotCron.js";
 import { snapshotWhaleWallet } from "./cron/hyperliquidWhaleCron.js";
+import { snapshotCftcPositioning } from "./cron/cftcPositioningCron.js";
+import { backfillPipelineDecisionOutcomes } from "./cron/pipelineDecisionOutcomeCron.js";
 import { runEntryAlertCheck } from "./cron/entryAlertCron.js";
 import { checkHeartbeat, checkEntryAlertCronFreshness } from "./cron/heartbeatCron.js";
 import {
@@ -153,7 +155,7 @@ export default {
       return withCors(
         new Response(
           JSON.stringify({
-            name: "whalescope-mcp",
+            name: "binance-future-hunter",
             status: "ok",
             endpoint: "/mcp",
             note: "Daftarkan URL <this-worker-url>/mcp sebagai custom MCP connector.",
@@ -350,6 +352,17 @@ export default {
           console.error("[cron] gagal checkD1Capacity:", (err as Error)?.message ?? String(err)),
         ),
       );
+      // Snapshot CFTC COT ke D1 di sini (3x/hari) -- data sumbernya cuma
+      // update mingguan (Jumat), jadi TIDAK butuh Cron Trigger sendiri;
+      // INSERT OR IGNORE (unique index coin+report_date, lihat d1Client.ts)
+      // bikin ngecek lebih sering dari update-rate asli aman/no-op.
+      for (const coin of ["BTC", "ETH"] as const) {
+        ctx.waitUntil(
+          snapshotCftcPositioning(coin).catch((err) =>
+            console.error(`[cron] gagal snapshot CFTC ${coin}:`, (err as Error)?.message ?? String(err)),
+          ),
+        );
+      }
       return;
     }
 
@@ -441,6 +454,15 @@ export default {
     ctx.waitUntil(
       snapshotNonWatchlistBasis().catch((err) =>
         console.error("[cron] gagal snapshot non-watchlist:", (err as Error)?.message ?? String(err)),
+      ),
+    );
+
+    // Backfill forward_return_1h/4h/24h + sl_touched_24h ke
+    // pipeline_decision_log (migration 0013) -- max 30 row/tick, row yang
+    // window 24h-nya sudah lewat. Lihat src/cron/pipelineDecisionOutcomeCron.ts.
+    ctx.waitUntil(
+      backfillPipelineDecisionOutcomes().catch((err) =>
+        console.error("[cron] gagal backfill pipeline_decision_log outcomes:", (err as Error)?.message ?? String(err)),
       ),
     );
 

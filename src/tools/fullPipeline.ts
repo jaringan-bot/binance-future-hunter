@@ -1,4 +1,4 @@
-// whalescope_full_pipeline -- tool composite tertinggi di WhaleScope MCP:
+// whalescope_full_pipeline -- tool composite tertinggi di Binance Future Hunter:
 // gantikan ~8 tool call manual (regime, funding, smart money, MM detection,
 // order book, grid risk, dst.) + kalkulasi manual bound grid, jadi SATU tool
 // call yang menjalankan seluruh decision chain per symbol (bisa banyak

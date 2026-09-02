@@ -78,7 +78,7 @@ cat > "$APP_DIR/handler.mjs" <<'HANDLEREOF'
 // Web-standard request handler that runs unchanged on Node (node:http),
 // Deno Deploy (Deno.serve), Bun, Fly.io, Render, Koyeb, or a plain VPS.
 //
-// WHY THIS EXISTS: the Cloudflare Worker (whalescope-mcp) is WAF-blocked by
+// WHY THIS EXISTS: the Cloudflare Worker (binance-future-hunter) is WAF-blocked by
 // Binance (HTTP 403 on every fapi.binance.com endpoint, /fapi/v1/ping
 // included). It must call Binance through a relay hosted on an IP pool that
 // is NOT WAF-blocked AND NOT geo-restricted (i.e. non-US region — Singapore

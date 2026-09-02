@@ -1,7 +1,7 @@
 # whale-stream-gateway
 
 Always-on consumer of two low-volume Binance USD-M Futures WebSocket
-streams, buffering them into SQLite so the WAF-blocked `whalescope-mcp`
+streams, buffering them into SQLite so the WAF-blocked `binance-future-hunter`
 Cloudflare Worker can read near-real-time data over plain HTTP.
 
 - `!forceOrder@arr` — market-wide forced liquidations (Binance throttles

@@ -9,7 +9,12 @@
 import * as binanceProxy from "../binanceProxyClient.js";
 import { insertWallCandidates, type WallCandidateRow } from "../d1Client.js";
 
-const WALL_MEDIAN_MULTIPLIER = 2;
+// Nama eksplisit "STORAGE" (bukan cuma WALL_MEDIAN_MULTIPLIER) supaya tidak
+// tertukar dengan DEFAULT_MIN_WALL_MULTIPLE (3.0) di gridWallFinder.ts --
+// keduanya BUKAN varian dari formula yang sama (2x median-qty-per-sisi di
+// sini vs 3x mean-notional-in-price-band di sana), jadi tidak "diselaraskan"
+// jadi satu angka, cuma diberi nama yang tidak ambigu.
+const WALL_STORAGE_MEDIAN_MULTIPLIER = 2;
 const ORDER_BOOK_DEPTH_LIMIT = 20;
 
 function median(values: number[]): number {
@@ -29,7 +34,7 @@ export function findWallCandidates(
 
   return levels
     .map(([p, q]) => ({ price: parseFloat(p), qty: parseFloat(q) }))
-    .filter((l) => l.qty >= WALL_MEDIAN_MULTIPLIER * med)
+    .filter((l) => l.qty >= WALL_STORAGE_MEDIAN_MULTIPLIER * med)
     .map((l) => ({ ...l, medianRatio: l.qty / med }));
 }
 

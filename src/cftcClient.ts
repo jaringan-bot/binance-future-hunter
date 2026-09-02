@@ -107,3 +107,63 @@ export async function getCftcPositioning(coin: "BTC" | "ETH"): Promise<CftcPosit
     ),
   };
 }
+
+// computeCftcTrend -- fungsi MURNI (tanpa fetch), dipakai
+// cme_get_institutional_positioning_trend (src/tools/cftcPositioning.ts).
+// Input: histori lokal dari D1 (cftc_positioning_history, diisi
+// src/cron/cftcPositioningCron.ts), ASCENDING (oldest -> newest) --
+// queryCftcPositioningHistory (d1Client.ts) sudah mengembalikan urutan ini.
+//
+// Ini rate-of-change MULTI-MINGGU dari histori yang KITA simpan sendiri,
+// beda dari `changeLong`/`changeShort` di CftcPositioningGroup di atas yang
+// cuma WoW dari API CFTC langsung (1 minggu, dihitung CFTC sendiri).
+//
+// DIRECTION_DEADBAND_PCT (2 poin persentase net-OI) adalah HEURISTIK
+// eksplisit (bukan kalibrasi statistik) -- konsisten dengan budaya threshold
+// di seluruh repo ini (smartMoneyAnalysis.ts, detectMmActivity.ts, dst):
+// belum ada data cukup panjang buat tahu berapa besar pergerakan levNetPct
+// yang "signifikan" vs noise laporan-ke-laporan, karena table ini baru mulai
+// ngumpulin data dari commit ini -- BUKAN backfill retroaktif.
+const DIRECTION_DEADBAND_PCT = 2;
+
+export interface CftcHistoryPoint {
+  reportDate: string;
+  openInterest: number;
+  levNetPct: number;
+  amNetPct: number;
+}
+
+export type CftcTrendDirection = "RISING" | "FALLING" | "FLAT";
+
+export interface CftcTrend {
+  weeksAvailable: number;
+  oldest: CftcHistoryPoint | null;
+  latest: CftcHistoryPoint | null;
+  levNetPctChange: number | null; // percentage points, latest - oldest dalam window
+  amNetPctChange: number | null;
+  direction: CftcTrendDirection; // dari levNetPctChange (Leveraged Funds = "smart money spekulatif")
+}
+
+export function computeCftcTrend(history: CftcHistoryPoint[]): CftcTrend {
+  if (history.length === 0) {
+    return { weeksAvailable: 0, oldest: null, latest: null, levNetPctChange: null, amNetPctChange: null, direction: "FLAT" };
+  }
+
+  const oldest = history[0];
+  const latest = history[history.length - 1];
+  const levNetPctChange = (latest.levNetPct - oldest.levNetPct) * 100; // fraction -> percentage points
+  const amNetPctChange = (latest.amNetPct - oldest.amNetPct) * 100;
+
+  let direction: CftcTrendDirection = "FLAT";
+  if (levNetPctChange > DIRECTION_DEADBAND_PCT) direction = "RISING";
+  else if (levNetPctChange < -DIRECTION_DEADBAND_PCT) direction = "FALLING";
+
+  return {
+    weeksAvailable: history.length,
+    oldest,
+    latest,
+    levNetPctChange,
+    amNetPctChange,
+    direction,
+  };
+}

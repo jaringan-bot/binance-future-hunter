@@ -1,4 +1,9 @@
-# WhaleScope MCP — Binance Futures Market Intelligence
+# Binance Future Hunter — Binance Futures Market Intelligence
+
+> Rebrand dari `whalescope-mcp` (nama internal lama) ke `binance-future-hunter`,
+> mengikuti nama repo. Codebase/logic yang sudah teruji tidak dibuang — cuma
+> identitas deployment (nama worker, D1, judul) yang berganti. Lihat commit
+> rebrand untuk daftar lengkap perubahan.
 
 🇮🇩 Bahasa Indonesia | [🇬🇧 English](README.en.md)
 
@@ -11,7 +16,7 @@ data akun pribadi.
 
 ## Quick Deploy
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/osindo-dev/whalescope-mcp)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/jaringan-bot/binance-future-hunter)
 
 Tombol ini clone repo + bikin Worker di akun Cloudflare kamu sendiri,
 termasuk **provision KV namespace & D1 database baru otomatis** (Cloudflare
@@ -455,14 +460,14 @@ Sama seperti KV di atas, `database_id` D1 di `wrangler.toml` repo ini
 terikat ke akun Cloudflare yang bikin. Kalau fork/deploy ke akun sendiri:
 
 ```bash
-npx wrangler d1 create whalescope-mcp-db
+npx wrangler d1 create binance-future-hunter-db
 ```
 
 Copy `database_id` yang muncul ke `[[d1_databases]]` di `wrangler.toml`
 (binding biarkan tetap `DB`), lalu jalankan migration:
 
 ```bash
-npx wrangler d1 migrations apply whalescope-mcp-db --remote
+npx wrangler d1 migrations apply binance-future-hunter-db --remote
 ```
 
 Tanpa ini, `binance_get_basis_history` dan `binance_backtest_signal` akan
@@ -578,35 +583,35 @@ manual tanpa push baru, buka tab **Actions** di GitHub repo → pilih workflow
 
 Setelah workflow selesai (cek tab Actions), worker akan live di:
 ```
-https://whalescope-mcp.<subdomain-cloudflare-kamu>.workers.dev
+https://binance-future-hunter.<subdomain-cloudflare-kamu>.workers.dev
 ```
 
 Buka URL tersebut — harus muncul JSON status `"ok"`.
 
-## Setup Custom Domain (whalescope-mcp.jaringan.dev)
+## Setup Custom Domain (binance-future-hunter.jaringan.dev)
 
 Ini **tidak** bisa dilakukan lewat GitHub Actions — perlu langkah manual satu
 kali di dashboard Cloudflare:
 
 1. Buka https://dash.cloudflare.com → pilih akun kamu
-2. Buka **Workers & Pages** → pilih worker `whalescope-mcp`
+2. Buka **Workers & Pages** → pilih worker `binance-future-hunter`
 3. Buka tab **Settings** → **Domains & Routes**
 4. Klik **Add** → **Custom Domain**
-5. Masukkan `whalescope-mcp.jaringan.dev`
+5. Masukkan `binance-future-hunter.jaringan.dev`
 6. Cloudflare akan otomatis membuat DNS record yang diperlukan **jika**
    domain `jaringan.dev` sudah berada di zona Cloudflare akun yang sama.
    Kalau domain itu terdaftar di akun/registrar lain, kamu perlu tambahkan
    CNAME record secara manual mengarah ke target yang ditampilkan Cloudflare.
 
 Setelah custom domain aktif, worker bisa diakses di
-`https://whalescope-mcp.jaringan.dev` (bukan lagi domain `.workers.dev`).
+`https://binance-future-hunter.jaringan.dev` (bukan lagi domain `.workers.dev`).
 
 ## Daftarkan sebagai Custom Connector di Claude
 
 1. Buka Claude (claude.ai) → **Settings** → **Connectors**
 2. Pilih **Add custom connector**
-3. Masukkan URL: `https://whalescope-mcp.jaringan.dev/mcp`
-   (atau `https://whalescope-mcp.<subdomain>.workers.dev/mcp` jika belum
+3. Masukkan URL: `https://binance-future-hunter.jaringan.dev/mcp`
+   (atau `https://binance-future-hunter.<subdomain>.workers.dev/mcp` jika belum
    setup custom domain — perhatikan path `/mcp` di akhir, wajib)
 4. Simpan, lalu aktifkan connector tersebut untuk percakapan yang kamu mau
 

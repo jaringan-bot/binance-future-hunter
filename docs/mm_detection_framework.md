@@ -2,7 +2,7 @@
 
 🇮🇩 Bahasa Indonesia | [🇬🇧 English](mm_detection_framework.en.md)
 
-> Framework deteksi aktivitas market maker (MM) menggunakan tool WhaleScope MCP (Binance Futures + Spot).
+> Framework deteksi aktivitas market maker (MM) menggunakan tool Binance Future Hunter (Binance Futures + Spot).
 > **Catatan penting:** Tidak ada tool yang bisa melihat identitas atau posisi spesifik MM secara langsung. Framework ini membangun profil aktivitas MM dari jejak yang mereka tinggalkan di pasar.
 
 ---
@@ -341,7 +341,7 @@ Skor ~1-1.5/6 → tier Weak. **Hasil masuk akal** — BTC tenang, framework tida
 |-----------|--------|---------|
 | Polling <500ms untuk refresh-rate spoofing | ❌ Dihapus | Latency 298-898ms, tidak reliable |
 | Snapshot comparison 1-2 detik | ⚠️ Marginal | 2× call bisa 1.8s+, variasi terlalu besar |
-| WebSocket fallback "jika tersedia" | ❌ Dihapus | Tidak tersedia di WhaleScope MCP (100% REST) |
+| WebSocket fallback "jika tersedia" | ❌ Dihapus | Tidak tersedia di Binance Future Hunter (100% REST) |
 | Threshold divergence >15% flat | ❌ Dihapus | Tidak pernah trigger untuk pair manapun |
 | Tiered threshold 3-15% per liquiditas | ❌ Dihapus | Angka tebakan, semua pair jauh di bawah |
 | "Cluster liquidation di level psikologis" | ⚠️ Direvisi | Tidak ada field harga — cross-check `klines` manual |
@@ -443,6 +443,6 @@ Lihat `src/smartMoneyAnalysis.ts` untuk formula skor lengkap.
 ---
 
 *Dibuat pada: 2026-08-11*
-*Versi 4.0 (final) — semua klaim teknis divalidasi langsung ke data live WhaleScope MCP, termasuk latency, batas historis endpoint, dan realita pergerakan top-trader ratio lintas pair.*
+*Versi 4.0 (final) — semua klaim teknis divalidasi langsung ke data live Binance Future Hunter (dulu whalescope-mcp), termasuk latency, batas historis endpoint, dan realita pergerakan top-trader ratio lintas pair.*
 *Section 11 ditambahkan 2026-08-12: dokumentasi `binance_detect_mm_activity` (automated scoring) + `binance_backtest_signal` (validasi empiris berkelanjutan).*
 *Section 12 ditambahkan 2026-08-15: dokumentasi `binance_analyze_smart_money` (Smart Money Divergence Score).*

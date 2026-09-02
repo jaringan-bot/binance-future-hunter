@@ -397,6 +397,88 @@ export async function pruneOldHyperliquidWhaleSnapshots(cutoffMs: number): Promi
   await requireDb().prepare("DELETE FROM hyperliquid_whale_snapshots WHERE captured_at < ?").bind(cutoffMs).run();
 }
 
+// Satu row per (coin, report_date) -- histori lokal laporan CFTC COT
+// (src/cftcClient.ts getCftcPositioning cuma ambil row TERBARU, table ini
+// nyimpennya biar computeCftcTrend() bisa hitung rate-of-change multi-minggu
+// tanpa query range CFTC berulang). Migration: migrations/0012_cftc_positioning_history.sql.
+export interface CftcPositioningHistoryRow {
+  coin: string;
+  reportDate: string;
+  openInterest: number;
+  levLong: number;
+  levShort: number;
+  levNetPct: number;
+  amLong: number;
+  amShort: number;
+  amNetPct: number;
+  capturedAt: number;
+}
+
+interface RawCftcPositioningHistoryRow {
+  coin: string;
+  report_date: string;
+  open_interest: number;
+  lev_long: number;
+  lev_short: number;
+  lev_net_pct: number;
+  am_long: number;
+  am_short: number;
+  am_net_pct: number;
+  captured_at: number;
+}
+
+// INSERT OR IGNORE + unique index (coin, report_date) -- idempotent by
+// design, cron boleh dipanggil berkali-kali sebelum report_date CFTC
+// berikutnya rilis tanpa membuat row duplikat atau perlu SELECT dulu.
+export async function insertCftcPositioningSnapshot(row: CftcPositioningHistoryRow): Promise<void> {
+  await requireDb()
+    .prepare(
+      "INSERT OR IGNORE INTO cftc_positioning_history (coin, report_date, open_interest, lev_long, lev_short, lev_net_pct, am_long, am_short, am_net_pct, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(
+      row.coin,
+      row.reportDate,
+      row.openInterest,
+      row.levLong,
+      row.levShort,
+      row.levNetPct,
+      row.amLong,
+      row.amShort,
+      row.amNetPct,
+      row.capturedAt,
+    )
+    .run();
+}
+
+// N laporan terbaru untuk satu coin, ASCENDING (oldest -> newest) --
+// computeCftcTrend() (cftcClient.ts) butuh urutan ini buat baca titik
+// pertama/terakhir window langsung tanpa reverse di caller.
+export async function queryCftcPositioningHistory(coin: string, limit: number): Promise<CftcPositioningHistoryRow[]> {
+  const result = await requireDb()
+    .prepare(
+      `SELECT coin, report_date, open_interest, lev_long, lev_short, lev_net_pct, am_long, am_short, am_net_pct, captured_at
+       FROM (
+         SELECT * FROM cftc_positioning_history WHERE coin = ? ORDER BY report_date DESC LIMIT ?
+       )
+       ORDER BY report_date ASC`,
+    )
+    .bind(coin.toUpperCase(), limit)
+    .all<RawCftcPositioningHistoryRow>();
+
+  return result.results.map((r) => ({
+    coin: r.coin,
+    reportDate: r.report_date,
+    openInterest: r.open_interest,
+    levLong: r.lev_long,
+    levShort: r.lev_short,
+    levNetPct: r.lev_net_pct,
+    amLong: r.am_long,
+    amShort: r.am_short,
+    amNetPct: r.am_net_pct,
+    capturedAt: r.captured_at,
+  }));
+}
+
 // Satu row per symbol (entryAlertCron.ts) -- lacak decision TRADE/WATCH/
 // NO_TRADE terakhir + kapan terakhir kirim alert, buat deteksi transisi dan
 // cooldown re-alert (lihat komentar entryAlertCron.ts).
@@ -763,6 +845,64 @@ export async function queryPipelineDecisionLog(opts: {
 
 export async function pruneOldPipelineDecisionLog(cutoffMs: number): Promise<void> {
   await requireDb().prepare("DELETE FROM pipeline_decision_log WHERE run_at < ?").bind(cutoffMs).run();
+}
+
+// Baca src/cron/pipelineDecisionOutcomeCron.ts untuk alur lengkap. Row
+// "pending" = forward_return_24h masih NULL DAN run_at sudah cukup lama
+// (window 24h forward sudah lewat) DAN belum melewati batas retry (lihat
+// olderThanMs di caller -- symbol delisted/gagal terus-menerus akhirnya
+// berhenti di-retry, bukan makan budget cron selamanya).
+export interface PendingPipelineDecisionOutcomeRow {
+  id: number;
+  runAt: number;
+  symbol: string;
+  stopLoss: number | null;
+}
+
+interface RawPendingPipelineDecisionOutcomeRow {
+  id: number;
+  run_at: number;
+  symbol: string;
+  stop_loss: number | null;
+}
+
+export async function queryPendingPipelineDecisionOutcomes(
+  readyBeforeMs: number,
+  notOlderThanMs: number,
+  limit: number,
+): Promise<PendingPipelineDecisionOutcomeRow[]> {
+  const result = await requireDb()
+    .prepare(
+      "SELECT id, run_at, symbol, stop_loss FROM pipeline_decision_log " +
+        "WHERE forward_return_24h IS NULL AND run_at < ? AND run_at > ? " +
+        "ORDER BY run_at ASC LIMIT ?",
+    )
+    .bind(readyBeforeMs, notOlderThanMs, limit)
+    .all<RawPendingPipelineDecisionOutcomeRow>();
+
+  return result.results.map((r) => ({ id: r.id, runAt: r.run_at, symbol: r.symbol, stopLoss: r.stop_loss }));
+}
+
+export interface PipelineDecisionOutcomeUpdate {
+  forwardReturn1h: number | null;
+  forwardReturn4h: number | null;
+  forwardReturn24h: number | null;
+  slTouched24h: boolean | null;
+}
+
+export async function updatePipelineDecisionOutcome(id: number, outcome: PipelineDecisionOutcomeUpdate): Promise<void> {
+  await requireDb()
+    .prepare(
+      "UPDATE pipeline_decision_log SET forward_return_1h = ?, forward_return_4h = ?, forward_return_24h = ?, sl_touched_24h = ? WHERE id = ?",
+    )
+    .bind(
+      outcome.forwardReturn1h,
+      outcome.forwardReturn4h,
+      outcome.forwardReturn24h,
+      outcome.slTouched24h === null ? null : outcome.slTouched24h ? 1 : 0,
+      id,
+    )
+    .run();
 }
 
 // Dipakai heartbeatCron.ts -- kalau ada minimal 1 alert TRADE/WATCH beneran
