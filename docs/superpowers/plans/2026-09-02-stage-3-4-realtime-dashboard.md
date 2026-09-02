@@ -4,14 +4,15 @@
 > (`3bb8f0e`, branch `rinjani/stage-0-2`). **VPS produksi = AWS**
 > (`svm-vps`, 13.212.7.132) — Oracle historis.
 > Agent: **Rinjani** untuk semua Task koding (selesai). **Krakatau**
-> (Cursor) untuk deploy — **user acc 2026-09-02** (runbook 6 step di
-> status bawah). Semeru (Claude Code) tidak jalanin deploy/`--remote`/SSH.
+> (Cursor) untuk deploy — **user acc 2026-09-02**. Deploy PARSIAL (step 2-4
+> ok, step 1 AWS SG blocker) — hasil di status bawah. Semeru (Claude Code)
+> tidak jalanin deploy/`--remote`/SSH/SG.
 >
-> **PROGRES 2026-09-02 — KODE SELESAI, DEPLOY-READY, MENUNGGU KRAKATAU:**
+> **PROGRES 2026-09-02 — KODE SELESAI, DEPLOY PARSIAL (blocker AWS SG):**
 >
 > Branch `rinjani/stage-0-2` (PR #1, `jaringan-bot/binance-future-hunter`).
-> Tip commit `c450ba1`, sudah di-push, sinkron dengan origin.
-> Verifikasi: `tsc` bersih · **841 src test** (`npm test`) · **51 stream-gateway
+> Tip commit `e745f7d`, di-push, sinkron dengan origin.
+> Verifikasi: `tsc` bersih · **849 src test** (`npm test`) · **51 stream-gateway
 > test** (`cd stream-gateway && node --test`).
 >
 > | Task | Status | Commit | Deploy footprint |
@@ -22,34 +23,37 @@
 > | D dashboard read-only `/dashboard` + `/api/dashboard/*` | ✅ kode + README ID/EN | `68a3dc0` | worker deploy (butuh `ADMIN_SECRET` biar aktif) |
 > | D2 README proxy-relay rewrite + `.dev.vars.example` + error wording | ✅ | `467a86e`, `4c690cf` | — (docs) |
 > | B on-demand depth watch + `binance_watch_orderbook_realtime` | ✅ kode + docs §3.2b | `2e36543` | **stream-gateway scp+install** + worker deploy |
+> | B-fix degrade tool saat relay non-JSON (bukan crash) + `.gitattributes` eol=lf | ✅ kode | `e745f7d` | worker deploy (WAJIB — live `0d2006a8` masih versi crash) |
 > | service `ExecStart` → `/usr/bin/env node` (blocker bootstrap AWS) | ✅ | `2e36543` (`.service`), `c450ba1` (bootstrap heredoc) | dipakai step 2 install |
 > | E provision D1/KV baru / relay kedua / `ENTRY_WATCHLIST_SIZE` | ⛔ TIDAK dikerjakan | — | user putuskan lanjut instance lama untuk Stage 0-2 |
 >
-> **Sisa = Krakatau (Cursor, acc user 2026-09-02), runbook 6 step:**
-> 1. AWS Security Group `svm-vps` (`13.212.7.132`) — inbound TCP 80 + 443
->    dari `0.0.0.0/0`. **BLOCKER SEKARANG** — external curl timeout, Cursor
->    tanpa `aws` CLI. Butuh console AWS / CLI (user atau Cursor).
-> 2. Stream-gateway update: `scp *.mjs package.json whale-stream-gateway.service
->    install.sh` → `svm-vps:/tmp/gw/` → `ssh svm-vps 'sudo bash /tmp/gw/install.sh'`.
->    `install.sh` sudah nge-ship `depthWatch.mjs` + node guard. Verify
->    `/stream/health` punya field `depthWatch: { count, maxWatches: 8, ... }`.
-> 3. `npx wrangler d1 migrations apply binance-future-hunter-db --remote`
->    (DB existing `database_id 3600a9bb-9261-492a-bf06-3a11b0448f4e`, JANGAN
->    provision baru). Idempotent — jalanin yang pending (0011/0012/0013/0014).
->    Error "table already exists" → drift, backfill `d1_migrations` tanpa
->    re-run DDL (`.cursor/rules/infrastructure.mdc`).
-> 4. `npx wrangler deploy` dari branch. Secret `PROXY_URL`/`PROXY_SECRET`
->    sudah set. Task B TIDAK butuh secret baru (reuse `PROXY_URL`/`SECRET`).
-> 5. Verify live: `GET /` → `"name":"binance-future-hunter"`; 3 tool via
->    `POST /mcp` — `cme_get_institutional_positioning_trend`,
->    `binance_analyze_institutional_flow`, `binance_watch_orderbook_realtime`
->    ({symbol:"BTCUSDT"} → call 1 arm, tunggu ~5s, call 2 pakai `sinceMs` →
->    `WALL_*` events). Dashboard butuh `ADMIN_SECRET`.
-> 6. Merge PR #1 setelah 1–5 hijau.
+> **HASIL DEPLOY [Krakatau] 2026-09-02** (worker `binance-future-hunter.jaringan.workers.dev`, version `0d2006a8-6724-425c-b7de-091bb6a9ba4a`):
 >
-> **Semeru (Claude Code) TIDAK jalanin step 1–6** — security/system settings
-> + deploy production = Krakatau (Cursor). Semeru standby buat debug output
-> (drift, verify gagal, `depthWatch` health tak sesuai).
+> | Step | Status | Catatan |
+> |---|---|---|
+> | 1. AWS SG 80/443 | ❌ **BLOCKER** | Inbound TCP 80/443 masih tertutup. `curl` timeout dari luar DAN dari dalam VPS (hairpin) ke `https://13.212.7.132.sslip.io/*`. Caddy `:80/:443` listen OK — blocker murni Security Group. Cursor sudah enable plugin `aws-core` (`.cursor/settings.json`, untuntracked) — coba `authorize-security-group-ingress` sendiri, atau console. |
+> | 2. Stream-gateway scp+install | ✅ | `install.sh` butuh `sed -i 's/\r$//'` (CRLF Windows checkout — di-fix `e745f7d` `.gitattributes` buat pull berikutnya). Service `active`. Local: `curl localhost:8081/stream/health` → `"depthWatch":{"count":0,"maxWatches":8,"activeWatches":[]}` ✅ |
+> | 3. D1 migrate `--remote` | ✅ | Hanya `0014` pending (0011-0013 sudah applied sebelumnya) → applied. **No drift.** |
+> | 4. `wrangler deploy` | ✅ (versi crash) | `npm ci` + typecheck + 841 test hijau. Deployed. TAPI ini SEBELUM `e745f7d` → `binance_watch_orderbook_realtime` masih crash. **Perlu re-deploy `e745f7d`.** |
+> | 5. Verify live | ⚠️ PARSIAL | `GET /` ✅ · `cme_get_institutional_positioning_trend` ✅ (1 laporan, FLAT) · `binance_analyze_institutional_flow` ✅ (align 100, 1/3 komponen — CFTC+HL belum ada data) · `binance_watch_orderbook_realtime` ❌ `Cannot read properties of undefined (reading 'ok')` — root cause: worker gagal reach `PROXY_URL` (SG blocked) + bug degrade (di-fix `e745f7d`) |
+> | 6. Merge PR #1 | ⏸ SKIPPED | Tunggu step 1 + watch tool hijau |
+>
+> **Sisa buat lanjut (Krakatau / user):**
+> 1. **AWS SG `13.212.7.132` inbound TCP 80 + 443 dari `0.0.0.0/0`.** Setelah
+>    itu: `curl -m 10 https://13.212.7.132.sslip.io/{health,stream/health}`.
+> 2. **Re-deploy worker** buat pick up `e745f7d` (`git pull && npx wrangler
+>    deploy`). Live `0d2006a8` masih versi crash.
+> 3. **`install.sh` CRLF (re-deploy).** `.gitattributes` fix cuma kena checkout
+>    BARU — `git pull` tidak re-materialize `install.sh` yang tak berubah.
+>    Sekali aja: `git rm -r --cached . && git checkout .` (LF-normalize working
+>    tree, tanpa ubah konten) ATAU `sed` lagi.
+> 4. Re-verify `binance_watch_orderbook_realtime` round-trip (call 1 arm →
+>    tunggu ~5s → call 2 pakai `sinceMs` → `WALL_*` events).
+> 5. Merge PR #1.
+>
+> **Semeru (Claude Code) TIDAK jalanin deploy/SG/`--remote`/SSH.** Standby
+> buat debug output (drift, verify gagal, health tak sesuai). Diagnosis +
+> fix `e745f7d` (Semeru) di-commit oleh Cursor dari working tree bersama.
 
 ## Goal
 
