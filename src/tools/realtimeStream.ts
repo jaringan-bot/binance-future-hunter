@@ -6,6 +6,7 @@ import { fmtNum, fmtPrice, fmtTime } from "../format.js";
 import * as gw from "../streamGatewayClient.js";
 
 const RECENT_LIMIT = 15;
+const DEPTH_EVENT_LIMIT = 40;
 
 // Binance throttles !forceOrder@arr to at most one event per symbol per
 // second — this feed is a SAMPLE of liquidations, not every one. Said in
@@ -152,6 +153,143 @@ export function registerRealtimeStreamTools(server: McpServer): void {
               biggest: null,
               recent: [],
               streamHealth: undefined,
+            },
+          };
+        }
+        return errorResult(err);
+      }
+    },
+  );
+
+  registerSafeTool(
+    server,
+    "binance_watch_orderbook_realtime",
+    {
+      title: "Watch Order Book Real-Time (wall lifecycle, on-demand)",
+      description:
+        "Aktifkan/perpanjang watch sub-detik order book satu symbol lewat WebSocket Binance @depth@100ms di gateway " +
+        "VPS, lalu kembalikan event LIFECYCLE WALL (WALL_APPEARED / GREW / SHRANK / VANISHED) yang terkumpul. " +
+        "Panggilan PERTAMA biasanya cuma mengarmkan watch (0 event) — panggil lagi beberapa detik kemudian pakai " +
+        "`sinceMs` = ts event terakhir untuk lihat perubahan baru. Watch auto-mati setelah `ttlMs` (default 5 menit) " +
+        "tanpa perpanjangan. BUKAN L2 book penuh: cuma level di atas ambang notional yang dilacak (hemat memori VPS " +
+        "1GB, ada batas jumlah watch bersamaan). Wall pre-existing bisa muncul sebagai 1 WALL_APPEARED saat konek " +
+        "(warmup ~1.5s menekan sebagian besar). Ambang wall heuristik, BELUM dikalibrasi. Kalau gateway belum " +
+        "di-upgrade / watch penuh / stream putus: balik `degraded: true` + alasan, bukan diam-diam kosong.",
+      inputSchema: {
+        symbol: symbolSchema,
+        ttlMs: z
+          .number()
+          .int()
+          .min(30_000)
+          .max(15 * 60_000)
+          .optional()
+          .describe("Umur watch tanpa perpanjangan (ms). Default 5 menit, maks 15 menit."),
+        sinceMs: z
+          .number()
+          .int()
+          .nonnegative()
+          .optional()
+          .describe("Hanya event dengan ts > nilai ini. Pakai ts event terakhir dari panggilan sebelumnya."),
+        detail: detailParam,
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ symbol, ttlMs, sinceMs, detail }) => {
+      const header = `# Watch Order Book Real-Time — ${symbol}`;
+      try {
+        const armed = await gw.watchOrderBook(symbol, ttlMs);
+        if (!armed.ok) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: [header, "", `⚠️ **TIDAK BISA ARM WATCH**: ${armed.error ?? "gagal"}`, armed.activeWatches?.length ? `Watch aktif sekarang: ${armed.activeWatches.join(", ")}` : ""].filter(Boolean).join("\n"),
+              },
+            ],
+            structuredContent: {
+              symbol,
+              watching: false,
+              degraded: true,
+              degradedReason: armed.error ?? "gagal arm watch",
+              armed: false,
+              events: [],
+              eventCount: 0,
+            },
+          };
+        }
+
+        const diff = await gw.fetchDepthDiff(symbol, sinceMs);
+        const evs = diff.events;
+        const counts = { WALL_APPEARED: 0, WALL_GREW: 0, WALL_SHRANK: 0, WALL_VANISHED: 0 } as Record<string, number>;
+        for (const e of evs) counts[e.type] = (counts[e.type] ?? 0) + 1;
+        const bidEvents = evs.filter((e) => e.side === "bid").length;
+        const askEvents = evs.filter((e) => e.side === "ask").length;
+        const latestTs = evs.length ? evs[evs.length - 1].ts : (sinceMs ?? 0);
+
+        const lines = [header, ""];
+        if (armed.renewed) lines.push(`Watch diperpanjang — kedaluwarsa ~${fmtTime(armed.expiresAt ?? 0)}.`);
+        else lines.push(`Watch BARU diaktifkan — kedaluwarsa ~${fmtTime(armed.expiresAt ?? 0)}. Panggil lagi beberapa detik lagi dengan sinceMs=${latestTs} untuk lihat perubahan.`);
+        lines.push("");
+        if (diff.degraded) {
+          lines.push(`⚠️ **STREAM DEGRADED**: ${diff.degradedReason}. Data di bawah mungkin belum lengkap.`, "");
+        }
+        if (evs.length === 0) {
+          lines.push("Belum ada event lifecycle wall di window (watch baru, atau order book stabil).");
+        } else {
+          lines.push(
+            `- Event: ${evs.length} (bid ${bidEvents} / ask ${askEvents})`,
+            `- Jenis: APPEARED ${counts.WALL_APPEARED} · GREW ${counts.WALL_GREW} · SHRANK ${counts.WALL_SHRANK} · VANISHED ${counts.WALL_VANISHED}`,
+            "",
+            `## ${Math.min(DEPTH_EVENT_LIMIT, evs.length)} event terbaru`,
+            "| Waktu | Sisi | Jenis | Harga | Qty | Notional |",
+            "|---|---|---|---|---|---|",
+            ...evs
+              .slice(-DEPTH_EVENT_LIMIT)
+              .map(
+                (e) =>
+                  `| ${fmtTime(e.ts)} | ${e.side} | ${e.type.replace("WALL_", "")} | ${fmtPrice(e.price)} | ${fmtNum(e.qty, 3)} | $${fmtNum(e.notionalUsd, 0)} |`,
+              ),
+          );
+        }
+
+        return {
+          content: [{ type: "text", text: lines.filter((l) => l !== "").join("\n") }],
+          structuredContent: {
+            symbol,
+            watching: diff.watching,
+            armed: true,
+            renewed: armed.renewed ?? false,
+            expiresAt: armed.expiresAt ?? null,
+            degraded: diff.degraded,
+            degradedReason: diff.degradedReason,
+            eventCount: evs.length,
+            counts,
+            bidEvents,
+            askEvents,
+            latestTs,
+            meta: diff.meta,
+            recent: evs.slice(-DEPTH_EVENT_LIMIT),
+            ...(detail === "full" ? { events: evs } : {}),
+          },
+        };
+      } catch (err) {
+        if (err instanceof gw.StreamGatewayError) {
+          const reason = gatewayDegradedReason(err);
+          return {
+            content: [
+              {
+                type: "text",
+                text: [header, "", `⚠️ **STREAM DEGRADED**: ${reason}.`, "", "Gateway belum di-upgrade untuk depth watch, atau tidak bisa dihubungi."].join("\n"),
+              },
+            ],
+            structuredContent: {
+              symbol,
+              watching: false,
+              armed: false,
+              degraded: true,
+              degradedReason: reason,
+              eventCount: 0,
+              recent: [],
             },
           };
         }

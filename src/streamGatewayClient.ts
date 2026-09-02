@@ -109,6 +109,33 @@ async function getJson<T>(path: string, params: Record<string, string | number |
   return (await res.json()) as T;
 }
 
+// POST — never cached (it mutates watch state on the gateway). A non-2xx
+// still carries a JSON body (e.g. 429 "batas ... watch") that callers want,
+// so parse the body before deciding to throw.
+async function postJson<T>(path: string, body: Record<string, unknown>): Promise<T> {
+  const url = buildUrl(path, {});
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: { "x-proxy-secret": secret as string, "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    throw new StreamGatewayError(`stream gateway tidak bisa dihubungi: ${(err as Error)?.message ?? String(err)}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = await res.json();
+  } catch {
+    parsed = undefined;
+  }
+  if (res.status === 401 || res.status === 403 || res.status === 500 || res.status === 503) {
+    throw new StreamGatewayError(`stream gateway HTTP ${res.status}`, res.status);
+  }
+  return parsed as T;
+}
+
 export async function fetchLiquidations(opts: {
   symbol?: string;
   sinceMs?: number;
@@ -145,4 +172,77 @@ export async function fetchContractEvents(opts: {
 
 export async function fetchStreamHealth(): Promise<StreamHealth & Record<string, unknown>> {
   return getJson<StreamHealth & Record<string, unknown>>("/stream/health", {}, 0);
+}
+
+// ── Task B: on-demand per-symbol order-book depth watch ─────────────────
+
+export interface WatchResult {
+  ok: boolean;
+  watching?: boolean;
+  symbol?: string;
+  expiresAt?: number;
+  renewed?: boolean;
+  error?: string;
+  activeWatches?: string[];
+}
+
+export interface DepthDiffEvent {
+  seq: number;
+  ts: number;
+  side: "bid" | "ask";
+  price: number;
+  type: "WALL_APPEARED" | "WALL_GREW" | "WALL_SHRANK" | "WALL_VANISHED";
+  qty: number;
+  notionalUsd: number;
+  changePct?: number;
+}
+
+export interface DepthDiffResult {
+  watching: boolean;
+  symbol: string;
+  expiresAt?: number;
+  events: DepthDiffEvent[];
+  meta: Record<string, unknown> & { count: number };
+  degraded: boolean;
+  degradedReason: string | null;
+}
+
+/** Arm or renew a depth watch for `symbol`. TTL clamped gateway-side. */
+export async function watchOrderBook(symbol: string, ttlMs?: number): Promise<WatchResult> {
+  const body: Record<string, unknown> = { symbol: symbol.toUpperCase() };
+  if (ttlMs != null) body.ttlMs = ttlMs;
+  return postJson<WatchResult>("/stream/watch", body);
+}
+
+/** Wall-lifecycle events since `sinceMs`. `watching:false` => call watchOrderBook first. */
+export async function fetchDepthDiff(symbol: string, sinceMs?: number): Promise<DepthDiffResult> {
+  const body = await getJson<{
+    watching: boolean;
+    symbol: string;
+    expiresAt?: number;
+    events?: DepthDiffEvent[];
+    meta?: Record<string, unknown> & { count: number; wsOk?: boolean; lastMessageAgeMs?: number | null };
+  }>("/stream/depth-diff", { symbol: symbol.toUpperCase(), sinceMs }, 0);
+
+  let degradedReason: string | null = null;
+  if (!body.watching) {
+    degradedReason = "tidak ada watch aktif untuk symbol ini — panggil watchOrderBook dulu";
+  } else if (body.meta?.wsOk === false) {
+    degradedReason = "gateway WebSocket ke Binance untuk symbol ini belum/tidak konek";
+  } else if (
+    typeof body.meta?.lastMessageAgeMs === "number" &&
+    (body.meta.lastMessageAgeMs as number) > 30_000
+  ) {
+    degradedReason = `tidak ada update depth ~${Math.round((body.meta.lastMessageAgeMs as number) / 1000)}s`;
+  }
+
+  return {
+    watching: body.watching,
+    symbol: body.symbol,
+    expiresAt: body.expiresAt,
+    events: body.events ?? [],
+    meta: body.meta ?? { count: 0 },
+    degraded: degradedReason != null,
+    degradedReason,
+  };
 }

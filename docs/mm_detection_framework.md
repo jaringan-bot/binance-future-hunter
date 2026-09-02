@@ -109,11 +109,12 @@ Kekhawatiran trade-concentration (top-3 trade dominasi CVD) yang sempat muncul d
 **Tool yang digunakan:**
 - `binance_get_order_book_depth` (snapshot tunggal, manual)
 - `binance_get_orderbook_delta` (2-snapshot, otomatis — lihat di bawah)
+- `binance_watch_orderbook_realtime` (WS `@depth@100ms` sub-detik, on-demand — lihat di bawah)
 
 > ⚠️ **Batasan teknis (tervalidasi):**
 > - **Chain lama (worker→Vercel→Binance)**: latensi per call **298–898ms** (rata-rata ~485ms), spread ~600ms — polling back-to-back tidak reliable.
 > - **Chain baru (worker→VPS relay Singapura→Binance, sejak 2026-08-28)**: diukur 2026-08-28 — leg VPS→Binance **~77ms** (spread 7ms, `curl localhost:8080` 10×); full chain dari luar (my-machine ID → relay publik → Binance) **~150ms rata-rata, spread 18ms** (12×). Deployed worker (edge CF dekat SG → VPS) diperkirakan **~90–150ms, spread <30ms**. Latensi turun ~3×, variance turun ~20–30×.
-> - Konsekuensi: polling sub-detik back-to-back buat refresh-rate spoofing sekarang **feasible** buat kasus terbatas (variance jaringan sudah kecil dibanding jendela deteksi). Deteksi wall lifecycle sub-detik sungguhan tetap butuh WS `@depth@100ms` (mekanisme on-demand watch di stream gateway — spec terpisah, belum dibangun).
+> - Konsekuensi: polling sub-detik back-to-back buat refresh-rate spoofing sekarang **feasible** buat kasus terbatas (variance jaringan sudah kecil dibanding jendela deteksi). Deteksi wall lifecycle sub-detik sungguhan **sekarang tersedia** lewat `binance_watch_orderbook_realtime` (WS `@depth@100ms` on-demand di stream gateway — lihat di bawah).
 
 **Kriteria deteksi (2-snapshot, via `binance_get_orderbook_delta`):**
 
@@ -125,7 +126,33 @@ Kekhawatiran trade-concentration (top-3 trade dominasi CVD) yang sempat muncul d
 
 > 💡 **Jeda eksplisit `binance_get_orderbook_delta` (default 1500ms) tetap default yang aman.** Dengan chain baru (spread ~20ms) jarak antar-snapshot jadi jauh lebih konsisten, tapi 1500ms tetap dipertahankan sebagai default — cukup buat wall spoofing (ditarik dalam hitungan detik) dan tidak ada alasan mengetatkannya tanpa kebutuhan. Untuk kasus yang butuh sub-detik, mekanisme on-demand depth-diff watch di stream gateway (spec terpisah) lebih tepat daripada polling REST.
 
-> ⚠️ **WebSocket: TERBATAS.** Stream gateway VPS pegang `!forceOrder@arr` + `!contractInfo` always-on (→ `binance_get_realtime_liquidations`, `binance_get_contract_events`). TIDAK ada stream depth/aggTrade per-symbol (high-volume, sengaja di luar scope batch ini). Deteksi refresh-rate wall sub-detik butuh tambahan on-demand depth watch — belum dibangun.
+> ⚠️ **WebSocket: PARSIAL.** Stream gateway VPS pegang `!forceOrder@arr` + `!contractInfo` always-on (→ `binance_get_realtime_liquidations`, `binance_get_contract_events`). Stream depth/aggTrade per-symbol yang always-on TETAP di luar scope (high-volume). Yang sekarang ADA: **on-demand per-symbol depth watch** — lihat 3.2b.
+
+### 3.2b Wall Lifecycle Sub-Detik — `binance_watch_orderbook_realtime` (2026-09-02)
+
+WebSocket `wss://fstream.binance.com/ws/<symbol>@depth@100ms` di stream
+gateway AWS (black-hole `fstream` = IP-Oracle-specific, tidak apply ke AWS
+depth — verified Krakatau spike ~588 msg/60s). **On-demand, bukan
+always-on:** tool meng-*arm* watch untuk satu symbol, gateway buka 1 socket,
+maintain book KASAR (cuma level di atas ambang notional — hemat memori VPS
+1GB), emit event lifecycle wall:
+
+| Event | Arti |
+|---|---|
+| `WALL_APPEARED` | Level baru menembus ambang wall notional (default $250k, heuristik BELUM dikalibrasi) |
+| `WALL_GREW` / `WALL_SHRANK` | Wall existing berubah qty ≥40% (masih di atas ambang) |
+| `WALL_VANISHED` | Wall drop di bawah ambang / qty 0 |
+
+- **TTL-bounded** (default 5 menit, maks 15): watch auto-mati tanpa
+  perpanjangan → socket ditutup, slot dibebaskan.
+- **Batas watch bersamaan** (default 8, `STREAM_DEPTH_MAX_WATCHES`) — sama
+  kelas constraint yang motong `WALL_SCAN_WATCHLIST` 50→15.
+- **BUKAN L2 book penuh** — wall yang tidak pernah tick tidak akan muncul;
+  wall pre-existing bisa register 1 `WALL_APPEARED` saat konek (warmup ~1.5s
+  menekan sebagian besar). Ini feed *lifecycle*, bukan snapshot depth.
+- Pola panggil: call pertama meng-arm (0 event), call berikutnya dengan
+  `sinceMs` = ts event terakhir → delta baru. Endpoint gateway:
+  `POST /stream/watch`, `GET /stream/depth-diff?symbol=&sinceMs=`.
 
 ---
 
@@ -311,7 +338,7 @@ Framework ini **tidak membuktikan** keberadaan market maker secara definitif, me
 3. **Konteks pasar penting** — sinyal MM lebih valid di volume rendah/area konsolidasi.
 4. **False positive ada** — news event atau whale retail bisa memicu sinyal serupa.
 5. **Kalibrasi per-pair** — threshold top-trader ratio harus dibangun dari data historis pair sendiri (~5-30 hari, tergantung resolusi), bukan angka universal.
-6. **Kenali batasan teknis** — latency 300-900ms/call, tidak ada data liquidation sama sekali (dihapus permanen, lihat Section 4.1; OI-drop + trade-volume-concentration proxy jadi mitigasi terbaik yang tersedia), retensi historis top-trader ratio terbatas, refresh-rate real-time sub-detik tidak feasible, WebSocket tidak tersedia. Spoofing 2-snapshot (`binance_get_orderbook_delta`) SEKARANG tersedia tapi menambah latency ~1-2 detik.
+6. **Kenali batasan teknis** — latency 300-900ms/call, tidak ada data liquidation sama sekali (dihapus permanen, lihat Section 4.1; OI-drop + trade-volume-concentration proxy jadi mitigasi terbaik yang tersedia), retensi historis top-trader ratio terbatas. Spoofing 2-snapshot (`binance_get_orderbook_delta`) menambah latency ~1-2 detik; wall lifecycle sub-detik sekarang ADA via `binance_watch_orderbook_realtime` (WS `@depth@100ms` on-demand, TTL-bounded — lihat Section 3.2b), tapi always-on depth/aggTrade per-symbol tetap di luar scope.
 
 ---
 

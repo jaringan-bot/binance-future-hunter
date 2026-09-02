@@ -12,6 +12,7 @@ import { createStore } from "./store.mjs";
 import { createWsClient } from "./ws-client.mjs";
 import { createServer } from "./server.mjs";
 import { parseEnvelope } from "./parse.mjs";
+import { createDepthWatcher } from "./depthWatch.mjs";
 
 const PORT = Number(process.env.STREAM_GATEWAY_PORT) || 8081;
 const DB_PATH = process.env.STREAM_DB_PATH || "./data.db";
@@ -25,6 +26,11 @@ const DB_PATH = process.env.STREAM_DB_PATH || "./data.db";
 const WS_URL =
   process.env.STREAM_WS_URL ||
   "wss://dstream.binance.com/stream?streams=!forceOrder@arr/!contractInfo";
+// Per-symbol depth watch (Task B) uses fstream directly — the black-hole
+// that forces dstream for the always-on feed is Oracle-IP-specific and does
+// NOT apply to AWS @depth@100ms (Krakatau spike 2026-09-02).
+const DEPTH_WS_BASE = process.env.STREAM_DEPTH_WS_BASE || "wss://fstream.binance.com/ws";
+const DEPTH_MAX_WATCHES = Number(process.env.STREAM_DEPTH_MAX_WATCHES) || 8;
 const SECRET = process.env.PROXY_SECRET;
 
 const PRUNE_INTERVAL_MS = 10 * 60 * 1000;
@@ -70,7 +76,12 @@ function health() {
   return { ...ws.getHealth(), malformedCount: stats.malformedCount };
 }
 
-const httpServer = createServer(() => ({ store, health: health(), secret: SECRET }));
+const depthWatch = createDepthWatcher({
+  wsUrlBase: DEPTH_WS_BASE,
+  maxWatches: DEPTH_MAX_WATCHES,
+});
+
+const httpServer = createServer(() => ({ store, health: health(), secret: SECRET, depthWatch }));
 
 const pruneTimer = setInterval(() => {
   try {
@@ -99,6 +110,7 @@ function shutdown(sig) {
   log(`${sig} — shutting down`);
   clearInterval(pruneTimer);
   ws.stop();
+  depthWatch.stopAll();
   httpServer.close(() => {
     store.close();
     process.exit(0);

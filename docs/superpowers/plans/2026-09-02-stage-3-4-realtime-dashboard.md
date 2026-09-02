@@ -13,9 +13,12 @@
 > - C  SELESAI — `449efae` (notify.ts multi-channel) + section README (ID+EN)
 > - D  SELESAI — `68a3dc0` (dashboard read-only) + section README (ID+EN)
 > - D2 SELESAI — README ID+EN proxy-relay rewrite + binanceProxyClient error wording
-> - B  BELUM (spike test Krakatau UNBLOCKED — lihat Task B; implement depthWatch.mjs belum, user bilang stop before B)
+> - B  SELESAI (kode) — depthWatch.mjs + endpoints + streamGatewayClient +
+>      tool `binance_watch_orderbook_realtime` + docs. Deploy stream-gateway
+>      update ke AWS = Krakatau (gated). 51 gateway test / 841 src test.
+> - service `ExecStart` fix (`/usr/bin/env node`) — blocker bootstrap AWS.
 > - E  BELUM (gated, tunggu acc user)
-> 835 test pass, typecheck bersih.
+> 841 src test + 51 gateway test pass, typecheck bersih.
 
 ## Goal
 
@@ -203,13 +206,25 @@ nyata buat kalibrasi jalan pakai data production asli.
       | 5 | spot depth | OK | 82ms | 600 |
       **Keputusan:** Rinjani lanjut `depthWatch.mjs` pakai `fstream` `#1` atau `#3`
       di **AWS VPS produksi**. Black-hole Oracle tidak generalize ke AWS.
-- [ ] Implement `depthWatch.mjs` + endpoint `server.mjs` (Rinjani, AWS `fstream` depth)
-- [ ] `streamGatewayClient.ts` + tool MCP baru.
-- [ ] Test: `stream-gateway/depthWatch.test.mjs` (pola sama
-      `ws-client.test.mjs`) + `src/tools/realtimeStream.test.ts` (extend,
-      mock gateway client, pola sama tool test lain di file itu).
-- [ ] Update `docs/mm_detection_framework.md` §3.2 (hapus "belum
-      dibangun", jelasin cara kerja + limitasi TTL/nya).
+- [x] Implement `stream-gateway/depthWatch.mjs` (per-symbol `@depth@100ms`,
+      coarse book, WALL_APPEARED/GREW/SHRANK/VANISHED, TTL + maxWatches,
+      warmup) + `server.mjs` `POST /stream/watch` + `GET /stream/depth-diff`
+      (+ POST body reader di `createServer`) + wire di `index.mjs`
+      (`STREAM_DEPTH_WS_BASE`=fstream, `STREAM_DEPTH_MAX_WATCHES`=8).
+- [x] `src/streamGatewayClient.ts` `watchOrderBook()` + `fetchDepthDiff()`
+      (POST helper, degrade graceful) + tool
+      `binance_watch_orderbook_realtime` (`src/tools/realtimeStream.ts`),
+      catalog metadata + count 76→77.
+- [x] Test: `stream-gateway/depthWatch.test.mjs` (13) +
+      `stream-gateway/server.test.mjs` (extend, 11) +
+      `src/tools/realtimeStream.test.ts` (extend, 6). 51 gateway test /
+      841 src test pass.
+- [x] `docs/mm_detection_framework.md` + `.en.md` §3.2/§3.2b diperbarui
+      (hapus "belum dibangun", jelasin lifecycle event + TTL/maxWatches +
+      limitasi "bukan L2 penuh").
+- [x] Fix service `ExecStart`: `/usr/bin/env node` + `Environment=PATH`
+      (node di `/usr/local/bin` di AWS, bukan `/usr/bin`) --
+      `whale-binance-proxy.service` + `whale-stream-gateway.service`.
 - [ ] `npm run typecheck && npm test`.
 
 ---

@@ -109,6 +109,7 @@ The trade-concentration concern raised during this probe series' diagnosis turne
 **Tools used:**
 - `binance_get_order_book_depth` (single snapshot, manual)
 - `binance_get_orderbook_delta` (2-snapshot, automated — see below)
+- `binance_watch_orderbook_realtime` (WS `@depth@100ms` sub-second, on-demand — see 3.2b)
 
 > ⚠️ **Technical limitation (validated):**
 > - Per-call latency varies significantly: **298-898ms** (average ~485ms) through the worker→Vercel→Binance proxy chain.
@@ -124,7 +125,33 @@ The trade-concentration concern raised during this probe series' diagnosis turne
 
 > 💡 **Why an EXPLICIT gap (default 1500ms) solves the latency-variance problem:** the earlier recommendation ("don't build detection on sequential snapshot comparison") assumed 2 calls made back-to-back with NO gap, where the 298-898ms latency variance made the actual time between snapshots unpredictable (could be 300ms, could be 900ms — a large relative difference). With an explicit 1500ms gap deliberately awaited BETWEEN the 2 fetches, the per-call latency variance (~600ms max) becomes small relative to the gap itself (~1500ms) — the time between snapshots stays consistently ~1.5-2 seconds, long enough to catch typical wall-pulling (usually seconds) but not just network noise. **Trade-off**: this tool is automatically ~1-2 seconds slower than the single-snapshot tools.
 
-> ❌ **WebSocket: NOT AVAILABLE** in Binance Future Hunter. All tools are discrete REST request/response. Sub-second real-time detection would require a separate stack outside this project.
+> ⚠️ **WebSocket: PARTIAL.** The VPS stream gateway holds `!forceOrder@arr` + `!contractInfo` always-on (→ `binance_get_realtime_liquidations`, `binance_get_contract_events`). Always-on per-symbol depth/aggTrade stays out of scope (too high-volume). What *is* available now: an **on-demand per-symbol depth watch** — see 3.2b.
+
+### 3.2b Sub-Second Wall Lifecycle — `binance_watch_orderbook_realtime` (2026-09-02)
+
+WebSocket `wss://fstream.binance.com/ws/<symbol>@depth@100ms` on the AWS
+stream gateway (the `fstream` black-hole is Oracle-IP-specific and does not
+apply to AWS depth — Krakatau spike, ~588 msg/60s). **On-demand, not
+always-on:** the tool *arms* a watch for one symbol; the gateway opens a
+single socket, keeps a COARSE book (only levels above a notional floor — to
+bound memory on a 1GB VPS), and emits wall-lifecycle events:
+
+| Event | Meaning |
+|---|---|
+| `WALL_APPEARED` | A level crosses the wall notional threshold (default $250k, heuristic — NOT calibrated) |
+| `WALL_GREW` / `WALL_SHRANK` | An existing wall changes qty ≥40% (still above threshold) |
+| `WALL_VANISHED` | A wall drops below the threshold / qty 0 |
+
+- **TTL-bounded** (default 5 min, max 15): with no renewal the watch dies,
+  the socket closes, the slot frees.
+- **Concurrent-watch cap** (default 8, `STREAM_DEPTH_MAX_WATCHES`) — same
+  class of constraint that cut `WALL_SCAN_WATCHLIST` 50→15.
+- **NOT a full L2 book** — a wall that never ticks won't show; a pre-existing
+  wall may register one `WALL_APPEARED` on connect (a ~1.5s warmup
+  suppresses most). This is a *lifecycle* feed, not a depth snapshot.
+- Call pattern: the first call arms it (0 events); later calls pass
+  `sinceMs` = last event ts for the new delta. Gateway endpoints:
+  `POST /stream/watch`, `GET /stream/depth-diff?symbol=&sinceMs=`.
 
 ---
 
@@ -302,7 +329,7 @@ This framework **does not prove** the presence of a market maker definitively �
 3. **Market context matters** — MM signals are more valid during low volume/consolidation areas.
 4. **False positives exist** — a news event or a large retail whale can trigger similar signals.
 5. **Calibrate per pair** — top-trader ratio thresholds must be built from that pair's own historical data (~5-30 days, depending on resolution), not a universal number.
-6. **Know the technical limitations** — 300-900ms latency/call, no liquidation data at all (permanently removed, see Section 4.1; the OI-drop + trade-volume-concentration proxies are the best available mitigation), limited top-trader ratio historical retention, sub-second real-time detection not feasible, no WebSocket available. 2-snapshot spoofing (`binance_get_orderbook_delta`) is NOW available but adds ~1-2s latency.
+6. **Know the technical limitations** — 300-900ms latency/call, no liquidation data at all (permanently removed, see Section 4.1; the OI-drop + trade-volume-concentration proxies are the best available mitigation), limited top-trader ratio historical retention. 2-snapshot spoofing (`binance_get_orderbook_delta`) adds ~1-2s latency; sub-second wall lifecycle is NOW available via `binance_watch_orderbook_realtime` (on-demand WS `@depth@100ms`, TTL-bounded — see Section 3.2b), but always-on per-symbol depth/aggTrade stays out of scope.
 
 ---
 

@@ -92,6 +92,7 @@ const CATALOG_METADATA: Record<string, CatalogMetadata> = {
   whalescope_compare_funding_across_exchanges: { category: "cross-exchange", tokenCost: "medium", useCase: "Bandingkan funding rate, price, OI, 24h change 1 pair across Binance/Bybit/OKX/Hyperliquid, deteksi divergensi", dependencies: ["funding"] },
   binance_get_realtime_liquidations: { category: "realtime", tokenCost: "medium", useCase: "Likuidasi paksa terbaru market-wide dari WS stream (di-buffer di gateway VPS, feed di-sampel Binance)", dependencies: [] },
   binance_get_contract_events: { category: "realtime", tokenCost: "low", useCase: "Event listing/delisting/settlement kontrak futures dari WS !contractInfo (buffer 30 hari)", dependencies: [] },
+  binance_watch_orderbook_realtime: { category: "realtime", tokenCost: "medium", useCase: "Arm watch sub-detik order book satu pair (@depth@100ms), balik event lifecycle wall (APPEARED/GREW/SHRANK/VANISHED). TTL-bounded, on-demand", dependencies: [] },
   binance_get_tool_catalog: { category: "meta", tokenCost: "low", useCase: "Daftar semua tool + kategori/use-case (tool ini sendiri)", dependencies: [] },
   binance_get_adl_risk: { category: "risk", tokenCost: "low", useCase: "Quantile risk rating ADL per pair (update tiap 30 menit)", dependencies: [] },
   binance_get_insurance_fund_balance: { category: "risk", tokenCost: "low", useCase: "Snapshot historis saldo insurance fund per asset margin", dependencies: [] },
