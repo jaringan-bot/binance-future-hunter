@@ -14,6 +14,12 @@ export interface PipelineDecisionLogRow {
   sourceRef: string | null;
   decision: PipelineDecision | string;
   rankingScore: number;
+  /** 4 sub-skor komponen ranking (0-100), migration 0014. null kalau hard
+   *  screen gagal sebelum scoreTier1Signals() -- null != 0. */
+  mmComponent: number | null;
+  smartMoneyComponent: number | null;
+  regimeComponent: number | null;
+  buyPressureComponent: number | null;
   hardScreenPassed: boolean;
   hardScreenReasons: string[];
   quoteVolumeUsd: number | null;
@@ -39,6 +45,7 @@ export function toPipelineDecisionLogRow(
   sourceRef?: string | null,
 ): PipelineDecisionLogRow {
   const hs = result.hardScreen;
+  const rc = result.rankingComponents;
   return {
     runAt,
     symbol: result.symbol.toUpperCase(),
@@ -46,6 +53,10 @@ export function toPipelineDecisionLogRow(
     sourceRef: sourceRef?.trim() ? sourceRef.trim() : null,
     decision: result.decision,
     rankingScore: result.rankingScore,
+    mmComponent: rc ? rc.mm : null,
+    smartMoneyComponent: rc ? rc.smartMoney : null,
+    regimeComponent: rc ? rc.regime : null,
+    buyPressureComponent: rc ? rc.buyPressure : null,
     hardScreenPassed: hs?.passed ?? false,
     hardScreenReasons: hs?.reasons ?? [],
     quoteVolumeUsd: Number.isFinite(hs?.quoteVolumeUsd) ? hs.quoteVolumeUsd : null,

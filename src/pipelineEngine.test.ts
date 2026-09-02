@@ -191,6 +191,22 @@ describe("scoreTier1Signals", () => {
     const lowMm = scoreTier1Signals(baseTier1({ mmTotalScore: 0 }));
     expect(highMm.rankingScore).toBeGreaterThan(lowMm.rankingScore);
   });
+
+  it("returns the 4 components (0-100) and rankingScore is their 35/30/20/15 weighted sum", () => {
+    const r = scoreTier1Signals(baseTier1({ mmTotalScore: 6, smartMoneyCondition: "BULLISH_ACCUMULATION", smartMoneyConfidenceScore: 60, obiBidPct20: 40, cvdBuyPct: 80 }));
+    for (const v of Object.values(r.components)) {
+      expect(v).toBeGreaterThanOrEqual(0);
+      expect(v).toBeLessThanOrEqual(100);
+    }
+    const weighted =
+      r.components.mm * 0.35 +
+      r.components.smartMoney * 0.3 +
+      r.components.regime * 0.2 +
+      r.components.buyPressure * 0.15;
+    expect(r.rankingScore).toBeCloseTo(weighted, 6);
+    // mmTotalScore 6/6 -> mm component pegged at 100
+    expect(r.components.mm).toBe(100);
+  });
 });
 
 describe("scaleCapitalForTargetLoss", () => {

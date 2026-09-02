@@ -53,6 +53,7 @@ import {
   decidePipelineOutcome,
   type HardScreenInput,
   type Tier1ScoreInput,
+  type Tier1ScoreComponents,
 } from "../pipelineEngine.js";
 import { calculateGridRisk, type GridInputParams, type GridRiskAnalysisResult } from "../gridRiskEngine.js";
 import type { BinanceMarketData } from "../binanceFetcher.js";
@@ -168,6 +169,10 @@ export interface SymbolPipelineResult {
   symbol: string;
   decision: PipelineDecision;
   rankingScore: number;
+  /** 4 sub-skor komponen ranking (0-100). Undefined kalau hard screen
+   *  gagal sebelum scoreTier1Signals() -- dipersist NULL ke
+   *  pipeline_decision_log (migration 0014). */
+  rankingComponents?: Tier1ScoreComponents;
   hardScreen: HardScreenSection;
   tier1?: Tier1Section;
   gridSetup?: GridBoundResult;
@@ -875,6 +880,7 @@ async function runPipelineInternal(
       symbol,
       decision: outcome.decision,
       rankingScore: tier1Score.rankingScore,
+      rankingComponents: tier1Score.components,
       hardScreen: hardScreenSection,
       tier1: tier1Section,
       gridSetup,

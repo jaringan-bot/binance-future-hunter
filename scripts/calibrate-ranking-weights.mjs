@@ -17,24 +17,25 @@
 // manual:
 //
 //   npx wrangler d1 execute binance-future-hunter-db --remote --json \
-//     --command "SELECT ranking_score, mm_component, smart_money_component,
+//     --command "SELECT mm_component, smart_money_component,
 //       regime_component, buy_pressure_component, forward_return_4h
 //       FROM pipeline_decision_log
-//       WHERE forward_return_4h IS NOT NULL" > dataset.json
+//       WHERE forward_return_4h IS NOT NULL
+//         AND mm_component IS NOT NULL" > dataset.json
 //
 // lalu:
 //
 //   node scripts/calibrate-ranking-weights.mjs dataset.json
 //
-// CATATAN PENTING soal fitur komponen: migration 0013 baru nyimpen
-// forward_return_*, BELUM nyimpen 4 sub-skor komponen (mm / smart money /
-// regime / buy pressure) sebagai kolom sendiri -- saat tulisan ini dibuat
-// nilai itu cuma ada di `notes` array hasil scoreTier1Signals(), tidak
-// dipersist terpisah. Jadi dataset.json HARUS kamu siapkan supaya tiap row
-// punya 4 nilai komponen (0-100). Opsi: (a) tambah kolom komponen di
-// migration lanjutan lalu backfill, atau (b) parse dari kolom lain kalau
-// nanti disimpan JSON. Script ini agnostik terhadap ASAL angka -- dia cuma
-// butuh 4 fitur + 1 outcome per row.
+// Kolom `mm_component` / `smart_money_component` / `regime_component` /
+// `buy_pressure_component` = migration 0014 (diisi saat row ditulis dari
+// scoreTier1Signals().components). Row SEBELUM 0014, dan row yang gagal
+// hard screen sebelum sampai scoreTier1Signals(), punya kolom ini NULL --
+// makanya filter `mm_component IS NOT NULL` di query di atas.
+//
+// Script ini SENGAJA tetap terima JSON export manual, TIDAK auto-connect
+// ke D1 -- pemisahan kredensial disengaja. Dia agnostik terhadap ASAL
+// angka: cuma butuh 4 fitur (0-100) + 1 outcome per row.
 //
 // ── Bentuk row yang diterima (nama field fleksibel) ─────────────────────
 //   fitur   : mm|mmComponent|mm_component,
