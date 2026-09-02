@@ -13,12 +13,18 @@
 //     checkHeartbeat() only sees the entry-alert path, not this one.
 //  3. checkD1Capacity -- market_snapshots + signal_history are pruned at 90
 //     days; alert if combined rows still cross the ceiling (prune lag / backlog).
+//  4. checkRelayHealth -- poll each configured REST relay's /health directly.
+//     checkMarketSnapshotFreshness only catches "the relay chain is down"
+//     indirectly and 20 min late; and it CANNOT see a secondary relay
+//     (PROXY_URL_2) dying silently while the primary keeps snapshots flowing
+//     -- which quietly puts all Binance egress back on one IP (418 -1003 risk).
 //
 // Each alert is KV-gated to at most one message per cooldown window, same
 // pattern as checkEntryAlertCronFreshness. now is injectable for tests.
 import * as d1Client from "../d1Client.js";
 import * as kvConfig from "../kvConfig.js";
 import * as streamGateway from "../streamGatewayClient.js";
+import * as binanceProxy from "../binanceProxyClient.js";
 import { dispatchNotification, type NotifyEnv } from "../notify.js";
 
 // Shared cooldown for the two "something is broken right now" checks (stream
@@ -130,4 +136,59 @@ export async function checkD1Capacity(env: NotifyEnv, now: number = Date.now()):
     )}. Dua tabel ini sudah di-prune 90 hari -- cek apakah prune */5 gagal atau backlog sebelum kena limit D1.`,
   );
   await recordNotified(D1_CAPACITY_KV_KEY, now, D1_CAPACITY_KV_TTL_SECONDS);
+}
+
+// ─────────────────────────────────────────────────────────────
+// 4. REST relay health (direct poll of each relay's /health)
+// ─────────────────────────────────────────────────────────────
+
+const RELAY_HEALTH_KV_KEY = "infra_relay_health_last_notified_at";
+export const RELAY_HEALTH_TIMEOUT_MS = 5_000;
+
+interface RelayProbe {
+  label: "primary" | "secondary";
+  url: string;
+  ok: boolean;
+  detail: string;
+}
+
+async function probeRelay(label: "primary" | "secondary", url: string): Promise<RelayProbe> {
+  const target = `${url.replace(/\/+$/, "")}/health`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), RELAY_HEALTH_TIMEOUT_MS);
+  try {
+    const res = await fetch(target, { signal: controller.signal, headers: { Accept: "application/json" } });
+    if (!res.ok) return { label, url, ok: false, detail: `HTTP ${res.status}` };
+    const body = (await res.json().catch(() => null)) as { ok?: boolean } | null;
+    return body?.ok === true
+      ? { label, url, ok: true, detail: "ok" }
+      : { label, url, ok: false, detail: "body bukan {ok:true}" };
+  } catch (err) {
+    const name = (err as Error)?.name;
+    return { label, url, ok: false, detail: name === "AbortError" ? "timeout 5s" : ((err as Error)?.message ?? "unreachable") };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function checkRelayHealth(env: NotifyEnv, now: number = Date.now()): Promise<void> {
+  const relays = binanceProxy.getRelayEndpoints();
+  if (relays.length === 0) return; // PROXY_URL belum diset -- bukan urusan check ini
+
+  const probes = await Promise.all(relays.map((r) => probeRelay(r.label, r.url)));
+  const down = probes.filter((p) => !p.ok);
+  if (down.length === 0) return;
+  if (await withinCooldown(RELAY_HEALTH_KV_KEY, now, INFRA_NOTIFY_COOLDOWN_MS)) return;
+
+  const stillUp = probes.length - down.length;
+  const downList = down.map((d) => `${d.label} (${d.detail})`).join(", ");
+  const tail =
+    stillUp === 0
+      ? "SEMUA relay down -- tool Binance-native (funding/OI/klines/order book/dst) akan gagal total. Cek VPS systemd `whale-binance-proxy` + Caddy + Cloudflare."
+      : probes.length > 1
+        ? `${stillUp} relay lain masih jalan (failover round-robin nutup request), TAPI weight Binance per-IP balik ke 1 IP -- rawan 418 -1003. Restart relay yang down (VPS systemd \`whale-binance-proxy\`).`
+        : "Cek VPS systemd `whale-binance-proxy` + Caddy.";
+
+  await dispatchNotification(env, `🚨 *REST Relay*: ${downList} DOWN. ${tail}`);
+  await recordNotified(RELAY_HEALTH_KV_KEY, now, NOTIFY_KV_TTL_SECONDS);
 }

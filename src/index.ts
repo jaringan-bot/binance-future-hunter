@@ -19,6 +19,7 @@ import {
   checkStreamGatewayHealth,
   checkMarketSnapshotFreshness,
   checkD1Capacity,
+  checkRelayHealth,
 } from "./cron/infraHealthCron.js";
 
 interface Env {
@@ -431,10 +432,11 @@ export default {
     );
 
     // Infra-health checks (src/cron/infraHealthCron.ts) -- juga piggyback di
-    // tick */5 ini. Keduanya KV-gated (maks 1 alert/jam selagi kondisi
-    // persist), jadi aman dijalanin tiap 5 menit. Nutup blind spot yang
-    // checkHeartbeat() gak lihat: stream gateway VPS mati, dan cron snapshot
-    // ini sendiri berhenti nulis baris.
+    // tick */5 ini. Semua KV-gated (maks 1 alert/jam selagi kondisi persist),
+    // jadi aman dijalanin tiap 5 menit. Nutup blind spot yang checkHeartbeat()
+    // gak lihat: stream gateway VPS mati, cron snapshot ini berhenti nulis
+    // baris, dan salah satu REST relay (`/health`) down -- termasuk secondary
+    // yang mati diam-diam.
     ctx.waitUntil(
       checkStreamGatewayHealth(defaultTickTelegramEnv).catch((err) =>
         console.error("[cron] gagal checkStreamGatewayHealth:", (err as Error)?.message ?? String(err)),
@@ -443,6 +445,13 @@ export default {
     ctx.waitUntil(
       checkMarketSnapshotFreshness(defaultTickTelegramEnv).catch((err) =>
         console.error("[cron] gagal checkMarketSnapshotFreshness:", (err as Error)?.message ?? String(err)),
+      ),
+    );
+    // Direct per-relay /health poll -- faster + per-relay than snapshot
+    // freshness, and the only thing that sees a silent PROXY_URL_2 death.
+    ctx.waitUntil(
+      checkRelayHealth(defaultTickTelegramEnv).catch((err) =>
+        console.error("[cron] gagal checkRelayHealth:", (err as Error)?.message ?? String(err)),
       ),
     );
 

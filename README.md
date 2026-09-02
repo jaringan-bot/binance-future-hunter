@@ -528,7 +528,8 @@ di-set — kalau tidak, alert cuma ke Workers Logs):
 | `checkEntryAlertCronFreshness` (`heartbeatCron.ts`) | nempel di `*/5` | nol tick entry-alert SELESAI dalam 40 menit (deteksi tick di-Cancel platform) — cooldown 1 jam |
 | `checkStreamGatewayHealth` (`infraHealthCron.ts`) | nempel di `*/5` | VPS stream gateway `:8081/health` unreachable, WS ke Binance putus, atau buffer basi >5 menit — cooldown 1 jam |
 | `checkMarketSnapshotFreshness` (`infraHealthCron.ts`) | nempel di `*/5` | nol baris `market_snapshots` baru dalam 20 menit (cron snapshot `*/5` berhenti nulis) — cooldown 1 jam |
-| `checkD1Capacity` (`infraHealthCron.ts`) | 3×/hari (piggyback `HEARTBEAT_CRON`) | `market_snapshots` + `signal_history` (dua tabel tanpa pruning) gabungan lewat 5 juta baris — cooldown 24 jam |
+| `checkRelayHealth` (`infraHealthCron.ts`) | nempel di `*/5` | `/health` salah satu REST relay (`PROXY_URL`/`PROXY_URL_2`) down/timeout — pesan bedakan "1 dari N down (failover nutup, tapi weight per-IP balik ke 1 IP)" vs "semua down" — cooldown 1 jam |
+| `checkD1Capacity` (`infraHealthCron.ts`) | 3×/hari (piggyback `HEARTBEAT_CRON`) | `market_snapshots` + `signal_history` (di-prune 90 hari) gabungan lewat 5 juta baris = backstop kalau prune telat — cooldown 24 jam |
 
 Semua cek KV-gated (maks 1 alert per cooldown selagi kondisi persist), aman
 dijalanin tiap 5 menit.
@@ -555,10 +556,11 @@ di-set, alert cuma masuk Workers Logs (tidak menggagalkan cron).
 
 **Yang MASIH belum ada** (kerjaan dashboard, bukan kode):
 
-- **Uptime monitor eksternal** ke worker `/` + relay `https://<vps>/health` —
-  pakai UptimeRobot / Cloudflare Health Checks (gratis, 5-menit). Ini yang
-  paling cepat nangkep VPS/relay mati total; cek internal di atas cuma
-  backstop dengan lag.
+- **Uptime monitor eksternal** ke worker `/` (independen dari worker itu
+  sendiri) — pakai UptimeRobot / Cloudflare Health Checks (gratis, 5-menit).
+  Relay `/health` sekarang sudah di-cek `checkRelayHealth` di atas, tapi itu
+  DARI worker — kalau worker sendiri mati (bukan cuma cron), gak ada yang
+  lapor. Monitor eksternal nutup itu.
 - **Cloudflare notification** untuk spike error-rate Workers / CPU-limit —
   observability (`[observability] enabled = true`) cuma ngumpulin data, gak
   ada rule alert.

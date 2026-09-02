@@ -148,6 +148,17 @@ export function setProxyConfig(
   roundRobinCursor = 0;
 }
 
+/**
+ * Configured relay endpoints (URL only, no secret) — for the infra-health
+ * cron to poll each relay's `/health`. Order: primary, then secondary.
+ */
+export function getRelayEndpoints(): { label: "primary" | "secondary"; url: string }[] {
+  const out: { label: "primary" | "secondary"; url: string }[] = [];
+  if (primaryEndpoint) out.push({ label: "primary", url: primaryEndpoint.url });
+  if (secondaryEndpoint) out.push({ label: "secondary", url: secondaryEndpoint.url });
+  return out;
+}
+
 export class BinanceProxyError extends Error {
   constructor(
     message: string,

@@ -541,7 +541,8 @@ set — otherwise alerts only reach Workers Logs):
 | `checkEntryAlertCronFreshness` (`heartbeatCron.ts`) | piggybacks `*/5` | no entry-alert tick COMPLETED within 40 min (detects platform-Cancel'd ticks) — 1h cooldown |
 | `checkStreamGatewayHealth` (`infraHealthCron.ts`) | piggybacks `*/5` | VPS stream gateway `:8081/health` unreachable, WS to Binance down, or buffer stale >5 min — 1h cooldown |
 | `checkMarketSnapshotFreshness` (`infraHealthCron.ts`) | piggybacks `*/5` | zero new `market_snapshots` rows in 20 min (the `*/5` snapshot cron stopped writing) — 1h cooldown |
-| `checkD1Capacity` (`infraHealthCron.ts`) | 3×/day (piggybacks `HEARTBEAT_CRON`) | `market_snapshots` + `signal_history` (the two unpruned tables) combined past 5M rows — 24h cooldown |
+| `checkRelayHealth` (`infraHealthCron.ts`) | piggybacks `*/5` | a REST relay's `/health` (`PROXY_URL`/`PROXY_URL_2`) is down/timing out — message distinguishes "1 of N down (failover holds, but per-IP weight is back on one IP)" from "all down" — 1h cooldown |
+| `checkD1Capacity` (`infraHealthCron.ts`) | 3×/day (piggybacks `HEARTBEAT_CRON`) | `market_snapshots` + `signal_history` (pruned at 90 days) combined past 5M rows = a backstop if pruning lags — 24h cooldown |
 
 All checks are KV-gated (at most one alert per cooldown while the condition
 persists), safe to run every 5 minutes.
@@ -568,10 +569,11 @@ alerts go to Workers Logs only (the cron never fails).
 
 **Still missing** (dashboard work, not code):
 
-- **External uptime monitor** on the worker `/` + relay `https://<vps>/health`
-  — UptimeRobot / Cloudflare Health Checks (free, 5-min). Fastest way to catch
-  a total VPS/relay outage; the internal checks above are only a lagging
-  backstop.
+- **External uptime monitor** on the worker `/` (independent of the worker
+  itself) — UptimeRobot / Cloudflare Health Checks (free, 5-min). Relay
+  `/health` is now covered by `checkRelayHealth` above, but that runs FROM
+  the worker — if the worker itself dies (not just a cron), nothing reports.
+  An external monitor closes that.
 - **Cloudflare notification** for Workers error-rate spikes / CPU-limit hits —
   observability (`[observability] enabled = true`) only collects data, no
   alerting rule.

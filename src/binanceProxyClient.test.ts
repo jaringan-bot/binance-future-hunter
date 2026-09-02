@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { setProxyConfig, getCurrentFundingRateNative, getAllTicker24hrNative, getKlinesNative, BinanceProxyError } from "./binanceProxyClient.js";
+import { setProxyConfig, getRelayEndpoints, getCurrentFundingRateNative, getAllTicker24hrNative, getKlinesNative, BinanceProxyError } from "./binanceProxyClient.js";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status });
@@ -25,6 +25,18 @@ describe("binanceProxyClient proxy failover", () => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
     setProxyConfig(undefined, undefined);
+  });
+
+  it("getRelayEndpoints reflects the configured relays (URL only, no secret), primary then secondary", () => {
+    expect(getRelayEndpoints()).toEqual([]);
+    setProxyConfig("https://primary.example", "s1");
+    expect(getRelayEndpoints()).toEqual([{ label: "primary", url: "https://primary.example" }]);
+    setProxyConfig("https://primary.example", "s1", "https://secondary.example", "s2");
+    expect(getRelayEndpoints()).toEqual([
+      { label: "primary", url: "https://primary.example" },
+      { label: "secondary", url: "https://secondary.example" },
+    ]);
+    expect(JSON.stringify(getRelayEndpoints())).not.toContain("s1");
   });
 
   it("throws immediately when primary is not configured, even with direct fallback enabled", async () => {
