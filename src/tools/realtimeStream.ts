@@ -198,19 +198,20 @@ export function registerRealtimeStreamTools(server: McpServer): void {
       const header = `# Watch Order Book Real-Time — ${symbol}`;
       try {
         const armed = await gw.watchOrderBook(symbol, ttlMs);
-        if (!armed.ok) {
+        if (!armed || !armed.ok) {
+          const reason = armed?.error ?? "gateway tidak balikin respons yang valid (relay tidak bisa dihubungi?)";
           return {
             content: [
               {
                 type: "text",
-                text: [header, "", `⚠️ **TIDAK BISA ARM WATCH**: ${armed.error ?? "gagal"}`, armed.activeWatches?.length ? `Watch aktif sekarang: ${armed.activeWatches.join(", ")}` : ""].filter(Boolean).join("\n"),
+                text: [header, "", `⚠️ **TIDAK BISA ARM WATCH**: ${reason}`, armed?.activeWatches?.length ? `Watch aktif sekarang: ${armed.activeWatches.join(", ")}` : ""].filter(Boolean).join("\n"),
               },
             ],
             structuredContent: {
               symbol,
               watching: false,
               degraded: true,
-              degradedReason: armed.error ?? "gagal arm watch",
+              degradedReason: reason,
               armed: false,
               events: [],
               eventCount: 0,

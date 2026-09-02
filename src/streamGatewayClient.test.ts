@@ -4,6 +4,8 @@ import {
   fetchLiquidations,
   fetchContractEvents,
   fetchStreamHealth,
+  watchOrderBook,
+  fetchDepthDiff,
   StreamGatewayError,
 } from "./streamGatewayClient.js";
 
@@ -96,5 +98,72 @@ describe("streamGatewayClient", () => {
     expect(String(fetchMock.mock.calls[0][0])).toBe(
       "https://relay.example/stream/contract-events?symbol=NEWUSDT",
     );
+  });
+
+  // ── Task B: watchOrderBook (POST) + fetchDepthDiff ──────────────────
+
+  it("watchOrderBook POSTs to /stream/watch with the symbol + secret", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ ok: true, watching: true, symbol: "BTCUSDT", expiresAt: 9 }));
+    const r = await watchOrderBook("btcusdt", 60000);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe("https://relay.example/stream/watch");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string)).toEqual({ symbol: "BTCUSDT", ttlMs: 60000 });
+    expect((init.headers as Record<string, string>)["x-proxy-secret"]).toBe("sekret");
+    expect(r.ok).toBe(true);
+  });
+
+  it("watchOrderBook passes a non-2xx JSON body back as data (e.g. 429 max watches)", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ ok: false, error: "batas 8 watch bersamaan tercapai" }, 429));
+    const r = await watchOrderBook("BTCUSDT");
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/batas/);
+  });
+
+  it("watchOrderBook throws StreamGatewayError (not undefined) when the relay is unreachable / non-JSON", async () => {
+    // SG-blocked relay: a plain-text error page, or an empty body
+    fetchMock.mockResolvedValue(new Response("<html>522</html>", { status: 522 }));
+    await expect(watchOrderBook("BTCUSDT")).rejects.toBeInstanceOf(StreamGatewayError);
+  });
+
+  it("watchOrderBook throws StreamGatewayError on a network failure", async () => {
+    fetchMock.mockRejectedValue(new Error("connection lost"));
+    await expect(watchOrderBook("BTCUSDT")).rejects.toBeInstanceOf(StreamGatewayError);
+  });
+
+  it("watchOrderBook throws on 401/403 even with a JSON body", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ ok: false, error: "unauthorized" }, 401));
+    await expect(watchOrderBook("BTCUSDT")).rejects.toMatchObject({ status: 401 });
+  });
+
+  it("fetchDepthDiff GETs /stream/depth-diff and flags watching:false as degraded", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ watching: false, symbol: "BTCUSDT", events: [], meta: { count: 0 } }));
+    const r = await fetchDepthDiff("BTCUSDT", 100);
+    expect(String(fetchMock.mock.calls[0][0])).toBe("https://relay.example/stream/depth-diff?symbol=BTCUSDT&sinceMs=100");
+    expect(r.degraded).toBe(true);
+    expect(r.degradedReason).toMatch(/watch/i);
+  });
+
+  it("fetchDepthDiff returns events + degraded=false for an active, fresh watch", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        watching: true,
+        symbol: "BTCUSDT",
+        expiresAt: 9,
+        events: [{ seq: 1, ts: 5, side: "bid", price: 100, type: "WALL_APPEARED", qty: 3000, notionalUsd: 300000 }],
+        meta: { count: 1, wsOk: true, lastMessageAgeMs: 200 },
+      }),
+    );
+    const r = await fetchDepthDiff("BTCUSDT");
+    expect(r.events).toHaveLength(1);
+    expect(r.degraded).toBe(false);
+  });
+
+  it("fetchDepthDiff flags degraded when the per-symbol WS is not connected", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ watching: true, symbol: "BTCUSDT", events: [], meta: { count: 0, wsOk: false } }),
+    );
+    const r = await fetchDepthDiff("BTCUSDT");
+    expect(r.degraded).toBe(true);
   });
 });

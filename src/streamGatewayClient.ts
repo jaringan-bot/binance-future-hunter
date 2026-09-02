@@ -106,12 +106,25 @@ async function getJson<T>(path: string, params: Record<string, string | number |
     return res;
   };
   const res = ttlSeconds > 0 ? await withCache(url, ttlSeconds, produce) : await produce();
-  return (await res.json()) as T;
+  let parsed: unknown;
+  try {
+    parsed = await res.json();
+  } catch {
+    parsed = undefined;
+  }
+  if (parsed == null || typeof parsed !== "object") {
+    throw new StreamGatewayError("stream gateway balik respons kosong / non-JSON (relay tidak bisa dihubungi?)");
+  }
+  return parsed as T;
 }
 
 // POST — never cached (it mutates watch state on the gateway). A non-2xx
-// still carries a JSON body (e.g. 429 "batas ... watch") that callers want,
-// so parse the body before deciding to throw.
+// with a valid JSON object body (e.g. 400 invalid symbol, 429 "batas ...
+// watch") is passed back to the caller as data; anything without a usable
+// object body — auth/server errors, an unreachable relay that yields a
+// non-JSON error page, an empty/truncated response — throws
+// StreamGatewayError so the tool degrades gracefully instead of seeing
+// `undefined`.
 async function postJson<T>(path: string, body: Record<string, unknown>): Promise<T> {
   const url = buildUrl(path, {});
   let res: Response;
@@ -130,8 +143,17 @@ async function postJson<T>(path: string, body: Record<string, unknown>): Promise
   } catch {
     parsed = undefined;
   }
-  if (res.status === 401 || res.status === 403 || res.status === 500 || res.status === 503) {
-    throw new StreamGatewayError(`stream gateway HTTP ${res.status}`, res.status);
+  if (
+    res.status === 401 ||
+    res.status === 403 ||
+    res.status >= 500 ||
+    parsed == null ||
+    typeof parsed !== "object"
+  ) {
+    throw new StreamGatewayError(
+      `stream gateway HTTP ${res.status}${parsed == null || typeof parsed !== "object" ? " (respons kosong / non-JSON — relay tidak bisa dihubungi?)" : ""}`,
+      res.status,
+    );
   }
   return parsed as T;
 }
