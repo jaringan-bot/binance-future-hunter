@@ -7,6 +7,7 @@ import * as d1Client from "./d1Client.js";
 import { SNAPSHOT_WATCHLIST, WALL_SCAN_WATCHLIST, HYPERLIQUID_WHALE_WATCHLIST } from "./shared.js";
 import { computeMmSignals } from "./tools/detectMmActivity.js";
 import { isAuthorized } from "./adminUsage.js";
+import { handleDashboardRequest } from "./dashboardApi.js";
 import { scanWallCandidates } from "./cron/wallTrackingCron.js";
 import { snapshotBasisForSymbol, snapshotNonWatchlistBasis } from "./cron/marketSnapshotCron.js";
 import { snapshotWhaleWallet } from "./cron/hyperliquidWhaleCron.js";
@@ -189,6 +190,14 @@ export default {
           new Response(`Gagal query usage log: ${(err as Error)?.message ?? String(err)}`, { status: 500 }),
         );
       }
+    }
+
+    // Dashboard read-only (GET /dashboard + /api/dashboard/*), gated
+    // ?key=<ADMIN_SECRET> sama seperti /admin/usage. Return null kalau
+    // path bukan urusan dashboard.
+    if (request.method === "GET") {
+      const dashboardResponse = await handleDashboardRequest(url, env);
+      if (dashboardResponse) return withCors(dashboardResponse);
     }
 
     if (url.pathname !== "/mcp") {
