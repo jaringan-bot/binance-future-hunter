@@ -318,6 +318,16 @@ hasil query live ke Binance.)_
    CROSSED riil, likuidasi bergantung pada TOTAL saldo akun, bukan cuma
    capital yang dialokasikan ke grid ini -- setiap hasil membawa
    `gridBotConfig.marginModeCaveat` yang menjelaskan ini eksplisit.
+   - **Buffer MMR di `liquidationPrice` = heuristik volume-based, BUKAN
+     bracket table riil.** `liquidationPrice = avgEntryPrice * (1 - 1/lev +
+     buffer)`. `buffer` dulu flat 0.5% untuk semua pair; sekarang
+     `estimateMaintenanceMarginBufferPct(quoteVolumeUsd)` memilih tier
+     0.5% / 0.75% / 1.5% dari quote volume 24h (>=500M / >=50M / sisanya;
+     volume tidak diketahui -> tier paling konservatif 1.5%). Ini mitigasi
+     arah-error yang selalu optimistic-salah (pair kecil MMR riil bisa 3x
+     asumsi lama, contoh NOMUSDT 1.50%). Threshold **belum dikalibrasi** ke
+     `/fapi/v1/leverageBracket` (endpoint SIGNED, butuh API key user,
+     ditunda) -- treat sebagai lantai kasar, bukan angka akurat.
 3. **Volume filter absolut, bukan percentile.** `min_quote_volume_usd`
    adalah ambang ABSOLUT ($5,000,000 default), pendekatan kasar dari cutoff
    "bottom 20%" -- TIDAK ada fetcher bulk-ticker/percentile baru di tool

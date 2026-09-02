@@ -8,6 +8,14 @@ export interface BinanceMarketData {
   predictedFundingRate: number;
   openInterest: number;
   orderBookBidDepthSL: number;
+  /**
+   * 24h quote volume (USDT) untuk symbol ini. OPSIONAL -- kalau undefined,
+   * konsumen (estimateMaintenanceMarginBufferPct di gridRiskEngine.ts)
+   * WAJIB fallback ke tier MMR paling konservatif, bukan diam-diam anggap
+   * "likuid"/aman. Sengaja optional supaya call-site lama (fixture test,
+   * self-assembly) tidak breaking.
+   */
+  quoteVolumeUsd?: number;
 }
 
 export interface SymbolTradingRules {
@@ -22,6 +30,10 @@ interface BinancePremiumIndexResponse {
 
 interface BinanceOpenInterestResponse {
   openInterest: string;
+}
+
+interface BinanceTicker24hrResponse {
+  quoteVolume: string;
 }
 
 interface BinanceDepthResponse {
@@ -72,7 +84,7 @@ export async function fetchBinanceMarketData(
 ): Promise<BinanceMarketData> {
   const normalizedSymbol = symbol.trim().toUpperCase();
 
-  const [funding, openInterest, depth] = await Promise.allSettled([
+  const [funding, openInterest, depth, ticker24hr] = await Promise.allSettled([
     fetchJson<BinancePremiumIndexResponse>("/fapi/v1/premiumIndex", {
       symbol: normalizedSymbol,
     }),
@@ -82,6 +94,12 @@ export async function fetchBinanceMarketData(
     fetchJson<BinanceDepthResponse>("/fapi/v1/depth", {
       symbol: normalizedSymbol,
       limit: "50",
+    }),
+    // quoteVolume 24h -> tier MMR buffer (estimateMaintenanceMarginBufferPct).
+    // Kalau gagal, quoteVolumeUsd dibiarkan undefined -> konsumen fallback
+    // ke tier paling konservatif (bukan optimis).
+    fetchJson<BinanceTicker24hrResponse>("/fapi/v1/ticker/24hr", {
+      symbol: normalizedSymbol,
     }),
   ]);
 
@@ -108,10 +126,14 @@ export async function fetchBinanceMarketData(
     }
   }
 
+  const quoteVolumeUsd =
+    ticker24hr.status === "fulfilled" ? parseFiniteNumber(ticker24hr.value.quoteVolume) : undefined;
+
   return {
     predictedFundingRate,
     openInterest: openInterestValue,
     orderBookBidDepthSL,
+    ...(quoteVolumeUsd !== undefined && quoteVolumeUsd > 0 ? { quoteVolumeUsd } : {}),
   };
 }
 

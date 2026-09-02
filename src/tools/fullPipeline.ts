@@ -721,6 +721,10 @@ async function runPipelineInternal(
         const qty = parseFloat(qtyStr);
         return price >= gridSetup.stopLossPrice && price > 0 && qty > 0 ? sum + price * qty : sum;
       }, 0),
+      // quoteVolumeUsd (Wave 1 ticker24hr) -> tier MMR buffer di
+      // calculateGridRisk (estimateMaintenanceMarginBufferPct). 0/NaN ->
+      // undefined -> tier paling konservatif (bukan optimis).
+      ...(quoteVolumeUsd > 0 ? { quoteVolumeUsd } : {}),
     };
 
     for (const leverage of sortedLeverages) {

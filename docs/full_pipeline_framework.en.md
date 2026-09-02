@@ -273,6 +273,17 @@ _(The numbers above are illustrative, to walk through the computation flow
    liquidation depends on the account's TOTAL balance, not just the
    capital allocated to this grid -- every result carries a
    `gridBotConfig.marginModeCaveat` string explaining this explicitly.
+   - **The MMR buffer in `liquidationPrice` is a volume-based heuristic,
+     NOT the real bracket table.** `liquidationPrice = avgEntryPrice *
+     (1 - 1/lev + buffer)`. `buffer` was a flat 0.5% for every pair; it is
+     now `estimateMaintenanceMarginBufferPct(quoteVolumeUsd)` picking a
+     0.5% / 0.75% / 1.5% tier from 24h quote volume (>=500M / >=50M /
+     otherwise; unknown volume -> the most conservative 1.5% tier). This
+     mitigates an error that was always optimistic (small pairs' real MMR
+     can be 3x the old assumption, e.g. NOMUSDT at 1.50%). The thresholds
+     are **not calibrated** against `/fapi/v1/leverageBracket` (SIGNED
+     endpoint, needs a user API key, deferred) -- treat it as a rough
+     floor, not an accurate figure.
 3. **Absolute volume filter, not a percentile.** `min_quote_volume_usd` is
    an ABSOLUTE threshold ($5,000,000 default), a rough approximation of a
    "bottom 20%" cutoff -- NO new bulk-ticker/percentile fetcher was added
