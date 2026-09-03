@@ -26,7 +26,7 @@ what's still manual: you STILL need to set secrets afterward (Cloudflare
 can't guess values from external services) — see `.dev.vars.example` in
 this repo for the full list, or
 [Proxy Relay setup](#setup-proxy-relay-required-one-time) below.
-`PROXY_URL`/`PROXY_SECRET` are REQUIRED (all 46 tools need them).
+`PROXY_URL`/`PROXY_SECRET` are REQUIRED (all 77 tools need them).
 
 ## Purpose
 
@@ -50,7 +50,7 @@ conversation with Claude, without needing a separate exchange dashboard.
 
 ## Strengths
 
-- 29 tools covering five analytical angles: directional market bias, key
+- 77 tools covering five analytical angles: directional market bias, key
   price areas (order book), execution confirmation (order flow/aggressor),
   Futures-vs-Spot comparison (leverage-driven vs real demand), and
   market-wide scanning (extreme funding rates across every pair, or
@@ -105,7 +105,7 @@ conversation with Claude, without needing a separate exchange dashboard.
   `api.binance.com` via the `market=spot` parameter).
 
 As a consequence, this worker needs `PROXY_URL`/`PROXY_SECRET` (relay
-proxy, required for all 46 tools) — see the Setup section below.
+proxy, required for all 77 tools) — see the Setup section below.
 
 **Caching & state, no extra credentials needed.** Upstream responses
 (funding rate, klines, OI, etc. — except order book & aggregate trades,
