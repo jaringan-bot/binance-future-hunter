@@ -25,7 +25,7 @@ generate `id`/`database_id` baru buat akun kamu, gak perlu bikin manual).
 setelah klik, kamu TETAP perlu set secret (Cloudflare gak bisa nebak value
 dari layanan eksternal) — lihat `.dev.vars.example` di repo ini buat daftar
 lengkap, atau [Setup Proxy Relay](#setup-proxy-relay-wajib-sekali-saja)
-di bawah. `PROXY_URL`/`PROXY_SECRET` WAJIB (semua 46 tool butuh).
+di bawah. `PROXY_URL`/`PROXY_SECRET` WAJIB (semua 77 tool butuh).
 
 ## Tujuan
 
@@ -49,7 +49,7 @@ dalam percakapan dengan Claude, tanpa perlu buka dashboard exchange terpisah.
 
 ## Kelebihan
 
-- 29 tools mencakup lima sudut analisis: bias arah pasar, area harga kunci
+- 77 tools mencakup lima sudut analisis: bias arah pasar, area harga kunci
   (order book), konfirmasi eksekusi (order flow/aggressor), pembanding
   Futures-vs-Spot (leverage-driven vs demand riil), dan market-wide scan
   (funding rate ekstrem lintas semua pair, atau bandingkan metrik across
@@ -106,7 +106,7 @@ dalam percakapan dengan Claude, tanpa perlu buka dashboard exchange terpisah.
   Spot API `api.binance.com` lewat parameter `market=spot`).
 
 Konsekuensinya, worker ini butuh `PROXY_URL`/`PROXY_SECRET` (proxy relay,
-wajib buat semua 46 tool) — lihat bagian Setup di bawah.
+wajib buat semua 77 tool) — lihat bagian Setup di bawah.
 
 **Caching & state, tanpa kredensial tambahan.** Response upstream (funding
 rate, klines, OI, dll — kecuali order book & aggregate trades yang butuh
