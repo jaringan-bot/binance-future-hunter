@@ -10,6 +10,7 @@
 import { fetchWithRetry } from "./retry.js";
 import { withCache } from "./cache.js";
 import { checkAndRecordRequest } from "./rateLimiter.js";
+import { signBinanceParams } from "./binanceHmac.js";
 
 const NO_CACHE_PATHS = new Set([
   "/fapi/v1/depth",
@@ -119,11 +120,21 @@ const PROXY_ALLOWED_PATHS = new Set([
   "/fapi/v1/rpiDepth",
   "/fapi/v1/tradingSchedule",
   "/fapi/v1/allForceOrders",
+  // SIGNED USER_DATA — needs BINANCE_API_KEY + HMAC via callProxySigned
+  "/fapi/v1/leverageBracket",
 ]);
 
 interface ProxyEndpoint {
   url: string;
   secret: string;
+}
+
+interface CallProxyOptions {
+  market?: "futures" | "spot";
+  /** Forwarded as `x-binance-api-key` → proxy → `X-MBX-APIKEY`. */
+  extraHeaders?: Record<string, string>;
+  /** Skip Cache API — required for signed params (timestamp/signature). */
+  bypassCache?: boolean;
 }
 
 let primaryEndpoint: ProxyEndpoint | undefined;
@@ -134,6 +145,11 @@ let directFallbackEnabled = true;
 // across the two egress IPs (each relay host has its own IP + its own
 // Binance weight budget). The not-first one becomes the failover tier.
 let roundRobinCursor = 0;
+
+// Optional Binance account API key — only for SIGNED endpoints (leverageBracket).
+// Set from Worker secrets; never logged.
+let binanceApiKey: string | undefined;
+let binanceApiSecret: string | undefined;
 
 export function setProxyConfig(
   url: string | undefined,
@@ -146,6 +162,23 @@ export function setProxyConfig(
   secondaryEndpoint = secondaryUrl && secondarySecret ? { url: secondaryUrl, secret: secondarySecret } : undefined;
   directFallbackEnabled = enableDirectFallback;
   roundRobinCursor = 0;
+}
+
+export function setBinanceApiCredentials(
+  apiKey: string | undefined,
+  apiSecret: string | undefined,
+): void {
+  if (apiKey && apiSecret) {
+    binanceApiKey = apiKey;
+    binanceApiSecret = apiSecret;
+  } else {
+    binanceApiKey = undefined;
+    binanceApiSecret = undefined;
+  }
+}
+
+export function hasBinanceApiCredentials(): boolean {
+  return Boolean(binanceApiKey && binanceApiSecret);
 }
 
 /**
@@ -247,6 +280,7 @@ async function callProxyEndpoint<T>(
   path: string,
   params: Record<string, string | number | undefined>,
   market: "futures" | "spot",
+  options: CallProxyOptions = {},
 ): Promise<T> {
   const url = new URL(`${endpoint.url}/api/binance`);
   url.searchParams.set("path", path);
@@ -255,11 +289,20 @@ async function callProxyEndpoint<T>(
     if (value !== undefined) url.searchParams.set(key, String(value));
   }
   const authErrorHint = "Cek PROXY_SECRET cocok antara worker dan host proxy relay (primary maupun secondary).";
-  const doFetch = () => fetchWithRetry(url.toString(), { headers: { "x-proxy-secret": endpoint.secret, Accept: "application/json" } });
+  const headers: Record<string, string> = {
+    "x-proxy-secret": endpoint.secret,
+    Accept: "application/json",
+    ...options.extraHeaders,
+  };
+  const doFetch = () => fetchWithRetry(url.toString(), { headers });
 
   let response: Response;
   try {
-    response = await withCache(buildCacheKeyUrl(path, params, market), cacheTtlForPath(path), doFetch);
+    if (options.bypassCache) {
+      response = await doFetch();
+    } else {
+      response = await withCache(buildCacheKeyUrl(path, params, market), cacheTtlForPath(path), doFetch);
+    }
   } catch (err) {
     throw new BinanceProxyError(
       `Gagal menghubungi proxy relay: ${(err as Error).message}. Cek apakah PROXY_URL benar dan proxy sedang aktif.`,
@@ -270,7 +313,7 @@ async function callProxyEndpoint<T>(
   try {
     return await parseProxyResponse<T>(response, path, authErrorHint);
   } catch (err) {
-    if (!isParseError(err)) throw err;
+    if (!isParseError(err) || options.bypassCache) throw err;
     // Body ke-corrupt padahal HTTP 200 -- kemungkinan race di withCache()
     // (clone()+Cache API di bawah beban concurrent), belum dipastikan akar
     // masalahnya. Retry 1x BYPASS cache sama sekali (fetch baru langsung),
@@ -294,17 +337,30 @@ async function callProxyDirect<T>(
   path: string,
   params: Record<string, string | number | undefined>,
   market: "futures" | "spot",
+  options: CallProxyOptions = {},
 ): Promise<T> {
   const url = new URL(`${DIRECT_BASE_BY_MARKET[market]}${path}`);
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined) url.searchParams.set(key, String(value));
   }
   const authErrorHint = "Kemungkinan WAF block Binance (lihat komentar DIRECT FALLBACK).";
-  const doFetch = () => fetchWithRetry(url.toString(), { headers: { Accept: "application/json" } });
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+    ...options.extraHeaders,
+  };
+  // Direct tier: Binance expects X-MBX-APIKEY (proxy maps x-binance-api-key).
+  if (options.extraHeaders?.["x-binance-api-key"]) {
+    headers["X-MBX-APIKEY"] = options.extraHeaders["x-binance-api-key"];
+  }
+  const doFetch = () => fetchWithRetry(url.toString(), { headers });
 
   let response: Response;
   try {
-    response = await withCache(buildCacheKeyUrl(path, params, market), cacheTtlForPath(path), doFetch);
+    if (options.bypassCache) {
+      response = await doFetch();
+    } else {
+      response = await withCache(buildCacheKeyUrl(path, params, market), cacheTtlForPath(path), doFetch);
+    }
   } catch (err) {
     throw new BinanceProxyError(
       `Gagal menghubungi Binance langsung (direct fallback): ${(err as Error).message}.`,
@@ -315,7 +371,7 @@ async function callProxyDirect<T>(
   try {
     return await parseProxyResponse<T>(response, path, authErrorHint);
   } catch (err) {
-    if (!isParseError(err)) throw err;
+    if (!isParseError(err) || options.bypassCache) throw err;
     let freshResponse: Response;
     try {
       freshResponse = await doFetch();
@@ -338,8 +394,15 @@ interface ProxyTier {
 async function callProxy<T>(
   path: string,
   params: Record<string, string | number | undefined> = {},
-  market: "futures" | "spot" = "futures",
+  marketOrOptions: "futures" | "spot" | CallProxyOptions = "futures",
+  maybeOptions?: CallProxyOptions,
 ): Promise<T> {
+  const options: CallProxyOptions =
+    typeof marketOrOptions === "string"
+      ? { market: marketOrOptions, ...maybeOptions }
+      : marketOrOptions;
+  const market = options.market ?? "futures";
+
   if (!path.startsWith("/") || !PROXY_ALLOWED_PATHS.has(path)) {
     throw new BinanceProxyError(
       `Path '${path}' tidak ada di whitelist proxy. Cek PROXY_ALLOWED_PATHS di binanceProxyClient.ts.`,
@@ -364,13 +427,16 @@ async function callProxy<T>(
     const b = primaryFirst ? secondaryEndpoint : primaryEndpoint!;
     const aLabel = primaryFirst ? "primary" : "secondary";
     const bLabel = primaryFirst ? "secondary" : "primary";
-    tiers.push({ label: aLabel, run: () => callProxyEndpoint<T>(a, path, params, market) });
-    tiers.push({ label: bLabel, run: () => callProxyEndpoint<T>(b, path, params, market) });
+    tiers.push({ label: aLabel, run: () => callProxyEndpoint<T>(a, path, params, market, options) });
+    tiers.push({ label: bLabel, run: () => callProxyEndpoint<T>(b, path, params, market, options) });
   } else {
-    tiers.push({ label: "primary", run: () => callProxyEndpoint<T>(primaryEndpoint!, path, params, market) });
+    tiers.push({
+      label: "primary",
+      run: () => callProxyEndpoint<T>(primaryEndpoint!, path, params, market, options),
+    });
   }
   if (directFallbackEnabled) {
-    tiers.push({ label: "direct", run: () => callProxyDirect<T>(path, params, market) });
+    tiers.push({ label: "direct", run: () => callProxyDirect<T>(path, params, market, options) });
   }
   let lastErr: unknown;
   for (let i = 0; i < tiers.length; i++) {
@@ -792,3 +858,41 @@ export async function getAllForceOrders(params: {
   if (params.symbol) q.symbol = params.symbol.toUpperCase();
   return callProxy<ForceOrder[]>("/fapi/v1/allForceOrders", q);
 }
+
+/** Raw Binance leverage-bracket payload (one entry per symbol). */
+export interface LeverageBracketResponse {
+  symbol: string;
+  brackets: Array<{
+    bracket: number;
+    initialLeverage: number;
+    notionalCap: number;
+    notionalFloor: number;
+    maintMarginRatio: number;
+    cum: number;
+  }>;
+}
+
+/**
+ * SIGNED USER_DATA — requires `setBinanceApiCredentials`. HMAC on Worker;
+ * proxy only forwards `x-binance-api-key`. Weight: 1.
+ */
+export async function getLeverageBracket(symbol: string): Promise<LeverageBracketResponse[]> {
+  if (!binanceApiKey || !binanceApiSecret) {
+    throw new BinanceProxyError(
+      "BINANCE_API_KEY / BINANCE_API_SECRET belum diset. Jalankan `wrangler secret put` untuk keduanya.",
+      undefined,
+      "/fapi/v1/leverageBracket",
+    );
+  }
+  const unsigned = {
+    symbol: symbol.toUpperCase(),
+    timestamp: Date.now(),
+    recvWindow: 5000,
+  };
+  const signed = await signBinanceParams(binanceApiSecret, unsigned);
+  return callProxy<LeverageBracketResponse[]>("/fapi/v1/leverageBracket", signed, {
+    bypassCache: true,
+    extraHeaders: { "x-binance-api-key": binanceApiKey },
+  });
+}
+

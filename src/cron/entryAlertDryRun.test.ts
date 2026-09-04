@@ -171,6 +171,7 @@ vi.mock("../binanceProxyClient.js", () => ({
     bump("getSpotPrice");
     return { symbol: s, price: "100" };
   }),
+  hasBinanceApiCredentials: () => false,
 }));
 
 describe("DRY-RUN: subrequest count per entry-alert tick (post-dedup)", () => {

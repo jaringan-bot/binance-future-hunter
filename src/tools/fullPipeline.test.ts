@@ -36,6 +36,7 @@ vi.mock("../binanceProxyClient.js", () => ({
   getOrderBookDepth: vi.fn(),
   getSpotPrice: vi.fn(),
   getFuturesExchangeInfo: vi.fn(),
+  hasBinanceApiCredentials: () => false,
 }));
 
 type PipelineToolResult = {

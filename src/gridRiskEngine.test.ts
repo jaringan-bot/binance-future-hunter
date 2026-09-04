@@ -11,7 +11,8 @@ import {
 } from "./gridRiskEngine.js";
 import { FALLBACK_CONTEXT } from "./marketContext.js";
 import type { BinanceMarketData } from "./binanceFetcher.js";
-import { setProxyConfig } from "./binanceProxyClient.js";
+import { setProxyConfig, setBinanceApiCredentials } from "./binanceProxyClient.js";
+import * as leverageBracket from "./leverageBracket.js";
 
 // quoteVolumeUsd tinggi disengaja: golden regression di bawah dihitung
 // dengan asumsi buffer MMR 0.5% (tier top-liquidity). Tanpa field ini,
@@ -69,6 +70,7 @@ function stubTradingRulesFetch(minQty = "0.1", stepSize = "0.1", minNotional = "
 afterEach(() => {
   vi.unstubAllGlobals();
   setProxyConfig(undefined, undefined);
+  setBinanceApiCredentials(undefined, undefined);
 });
 
 const trbBaseParams: GridInputParams = {
@@ -128,6 +130,28 @@ describe("calculateGridRisk - MMR buffer wired into liquidationPrice", () => {
       FALLBACK_CONTEXT,
     );
     expect(unknownLiq.liquidationPrice).toBeGreaterThan(highLiq.liquidationPrice);
+  });
+
+  it("prefers leverageBracket MMR over volume heuristic when available", async () => {
+    stubTradingRulesFetch();
+    setBinanceApiCredentials("test-key", "test-secret");
+    const spy = vi
+      .spyOn(leverageBracket, "fetchMaintMarginRatio")
+      .mockResolvedValue(0.02);
+    const withBracket = await calculateGridRisk(
+      { ...trbBaseParams, initialCapital: 101 },
+      marketData,
+      FALLBACK_CONTEXT,
+    );
+    spy.mockRestore();
+    setBinanceApiCredentials(undefined, undefined);
+    stubTradingRulesFetch();
+    const heuristic = await calculateGridRisk(
+      { ...trbBaseParams, initialCapital: 101 },
+      marketData,
+      FALLBACK_CONTEXT,
+    );
+    expect(withBracket.liquidationPrice).toBeGreaterThan(heuristic.liquidationPrice);
   });
 });
 
