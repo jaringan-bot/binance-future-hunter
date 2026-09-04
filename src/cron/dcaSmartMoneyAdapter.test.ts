@@ -10,6 +10,7 @@ import {
   evaluateDcaSmartMoney,
   DCA_TIMING_TRADE_MIN,
   DCA_TIMING_WATCH_MIN,
+  DCA_DEFAULT_MAX_ENTRIES,
   type DcaSmartMoneyInput,
 } from "./dcaSmartMoneyAdapter.js";
 import type { KlineCandle } from "../toolHelpers.js";
@@ -319,5 +320,67 @@ describe("K10: safety/pause harus mencerminkan arah, bukan selalu sudut pandang 
     // S_C 14 melawan LONG -> SOFT, tapi mendukung SHORT.
     expect(resolvePauseLevel(100, 14, 0, false, "LONG")).toBe("PAUSE_SOFT");
     expect(resolvePauseLevel(100, 14, 0, false, "SHORT")).toBe("NONE");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// Guard `entryCount >= maxEntries` (freeze plan, dcaSmartMoneyAdapter.ts).
+// Sampai blok ini ditulis guard-nya UNREACHABLE di SELURUH suite: tidak ada
+// satu pun test yang mengoper entryCount, jadi `input.entryCount ?? 0`
+// selalu 0 dan cek `0 >= 6` selalu false. Menghapus seluruh blok guard
+// tidak akan menggagalkan test apa pun -- persis lubang reachability yang
+// jadi alasan remediasi Stage 1-2 ditulis (lihat entryAlertCron.ts:507).
+//
+// Override di `healthy()` SENGAJA disalin dari test "1. valid accumulation"
+// supaya pauseLevel = NONE dan eksekusi benar-benar SAMPAI ke guard, bukan
+// berhenti lebih dulu di return STOP / PAUSE_HARD / PAUSE_SOFT yang berada
+// di ATAS-nya. Test pertama adalah kontrol negatif: tanpa itu, test freeze
+// tetap hijau walau guard dipindah ke atas ketiga return pause tsb.
+// ─────────────────────────────────────────────────────────────
+describe("guard maxEntries: freeze plan setelah ronde terakhir", () => {
+  const healthy = (over: Partial<DcaSmartMoneyInput> = {}): DcaSmartMoneyInput =>
+    baseInput({
+      flowAlignment: { takerFlowNorm: 90, multiTfAlign: 100 },
+      fundingHistory30d: Array.from({ length: 20 }, () => -0.0005),
+      fundingRate: -0.001,
+      oiVelocityPerHour: 80,
+      oiVelocityHistory: [10, 20, 30, 40, 50, 60, 70, 80],
+      ...over,
+    });
+
+  it("kontrol negatif: ronde belum habis -> plan JALAN, guard tidak aktif", () => {
+    const r = evaluateDcaSmartMoney(healthy({ entryCount: 5, maxEntries: 6 }));
+    expect(r.decision).toBe("DCA_TRADE");
+    expect(r.pauseLevel).toBe("NONE");
+    expect(r.entryCount).toBe(5);
+  });
+
+  it("entryCount == maxEntries -> freeze: DCA_PAUSE_HARD + alasan eksplisit", () => {
+    const r = evaluateDcaSmartMoney(healthy({ entryCount: 6, maxEntries: 6 }));
+    expect(r.decision).toBe("DCA_PAUSE_HARD");
+    expect(r.pauseLevel).toBe("PAUSE_HARD");
+    expect(r.pauseReason).toBe("Max entries reached (6/6)");
+    expect(r.reasons).toContain("Max entries cap — freeze DCA plan");
+  });
+
+  it("entryCount > maxEntries (plan kelewat, mis. maxEntries turun) tetap freeze", () => {
+    const r = evaluateDcaSmartMoney(healthy({ entryCount: 9, maxEntries: 6 }));
+    expect(r.decision).toBe("DCA_PAUSE_HARD");
+    expect(r.pauseReason).toBe("Max entries reached (9/6)");
+  });
+
+  it("maxEntries dari input dihormati, bukan dipaku ke DCA_DEFAULT_MAX_ENTRIES", () => {
+    // entryCount 3: di bawah default 6 (jadi TIDAK freeze kalau maxEntries
+    // diabaikan), tapi sudah mentok cap 3 milik plan ini.
+    const r = evaluateDcaSmartMoney(healthy({ entryCount: 3, maxEntries: 3 }));
+    expect(r.decision).toBe("DCA_PAUSE_HARD");
+    expect(r.pauseReason).toBe("Max entries reached (3/3)");
+    expect(r.maxEntries).toBe(3);
+  });
+
+  it("default DCA_DEFAULT_MAX_ENTRIES dipakai saat maxEntries tidak diisi", () => {
+    const r = evaluateDcaSmartMoney(healthy({ entryCount: DCA_DEFAULT_MAX_ENTRIES }));
+    expect(r.maxEntries).toBe(DCA_DEFAULT_MAX_ENTRIES);
+    expect(r.decision).toBe("DCA_PAUSE_HARD");
   });
 });
