@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { getUserClearinghouseState } from "./hyperliquidClient.js";
+import { getUserClearinghouseState, getUserClearinghouseSnapshot } from "./hyperliquidClient.js";
 
 // Belum ada precedent client-level fetch-mock test di repo ini (cek dulu --
 // nativeExtras.test.ts/wallTrackingCron.test.ts mock MODULE client, bukan
@@ -62,5 +62,36 @@ describe("getUserClearinghouseState", () => {
   it("throws on non-ok HTTP response", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse("server error", false, 500)));
     await expect(getUserClearinghouseState("0xbad")).rejects.toThrow("Hyperliquid HTTP 500");
+  });
+});
+
+describe("getUserClearinghouseSnapshot", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("includes marginSummary equity fields alongside positions", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          marginSummary: { accountValue: "1234.5", totalMarginUsed: "100" },
+          withdrawable: "900",
+          assetPositions: [
+            {
+              position: { coin: "BTC", szi: "1", entryPx: "64000", leverage: { value: 5, type: "cross" } },
+              type: "oneWay",
+            },
+          ],
+        }),
+      ),
+    );
+
+    const snap = await getUserClearinghouseSnapshot("0xabc");
+    expect(snap.accountValue).toBe(1234.5);
+    expect(snap.withdrawable).toBe(900);
+    expect(snap.totalMarginUsed).toBe(100);
+    expect(snap.positions).toHaveLength(1);
+    expect(snap.positions[0].coin).toBe("BTC");
   });
 });

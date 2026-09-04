@@ -52,8 +52,13 @@ const WINDOW_MS = 60_000;
 // (2026-08-28, lihat [[project_whalescope_vps_ip_ratelimit]]). 1400 x ~1.5 =
 // ~2100 weight -- buffer nyata ke 2400. Dipasangkan dengan ENTRY_WATCHLIST_SIZE
 // 350->250 + pacing 5500ms supaya real load turun di bawah 1400 dan wall-clock
-// tetap aman. Naikkan lagi HANYA setelah relay IP kedua (PROXY_URL_2) online.
-export const MAX_REQUESTS_PER_WINDOW = 1400;
+// tetap aman.
+//
+// 1400 -> 1800 (2026-09-03): relay IP kedua (PROXY_URL_2, Oracle) live --
+// weight Binance round-robin ~50/50. Per-IP efektif ~900 count/menit (1800/2).
+// 1800 x ~1.5 = ~2700 weight dibagi 2 IP = ~1350 weight/IP -- well under
+// batas 2400/menit per-IP Binance. Dipasangkan ENTRY_WATCHLIST_SIZE 250->350.
+export const MAX_REQUESTS_PER_WINDOW = 1800;
 
 let timestamps: number[] = [];
 

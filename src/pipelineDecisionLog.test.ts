@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { didStopLossTouch, scoreBucket, toPipelineDecisionLogRow } from "./pipelineDecisionLog.js";
+import {
+  didStopLossTouch,
+  scoreBucket,
+  scoreBucketSqlCase,
+  SCORE_BUCKET_MID_MIN,
+  SCORE_BUCKET_HIGH_MIN,
+  toPipelineDecisionLogRow,
+} from "./pipelineDecisionLog.js";
 import type { SymbolPipelineResult } from "./tools/fullPipeline.js";
 
 function result(partial: Partial<SymbolPipelineResult> & Pick<SymbolPipelineResult, "symbol" | "decision">): SymbolPipelineResult {
@@ -83,12 +90,13 @@ describe("toPipelineDecisionLogRow", () => {
         symbol: "SOLUSDT",
         decision: "TRADE",
         rankingScore: 62.4,
-        rankingComponents: { mm: 70, smartMoney: 55, regime: 60, buyPressure: 50 },
+        rankingComponents: { mm: 70, mmAdverse: 25, smartMoney: 55, regime: 60, buyPressure: 50 },
       }),
       1,
       "manual",
     );
     expect(row.mmComponent).toBe(70);
+    expect(row.mmAdverseComponent).toBe(25);
     expect(row.smartMoneyComponent).toBe(55);
     expect(row.regimeComponent).toBe(60);
     expect(row.buyPressureComponent).toBe(50);
@@ -155,5 +163,37 @@ describe("toPipelineDecisionLogRow", () => {
     expect(row.lowerPrice).toBe(100);
     expect(row.upperPrice).toBe(120);
     expect(row.stopLoss).toBe(95);
+  });
+});
+
+// Stage 4.1: bucket dipakai di DUA jalur -- scoreBucket() untuk sampel
+// detail dan ekspresi SQL untuk agregat atas seluruh rentang. Kalau keduanya
+// berbeda, satu skor bisa masuk bucket yang berlainan tergantung tabel mana
+// yang dibaca, dan kalibrasi Stage 4.5 akan menimbang bucket yang salah.
+describe("scoreBucketSqlCase", () => {
+  it("encodes the SAME thresholds that scoreBucket() uses", () => {
+    const sql = scoreBucketSqlCase("ranking_score");
+    expect(sql).toContain(`ranking_score >= ${SCORE_BUCKET_HIGH_MIN}`);
+    expect(sql).toContain(`ranking_score >= ${SCORE_BUCKET_MID_MIN}`);
+    // Label WAJIB cocok dengan angkanya -- label yang mengkodekan 40/55
+    // sementara ambangnya sudah bergeser adalah output yang berbohong.
+    expect(SCORE_BUCKET_MID_MIN).toBe(40);
+    expect(SCORE_BUCKET_HIGH_MIN).toBe(55);
+    expect(scoreBucket(SCORE_BUCKET_HIGH_MIN)).toBe("gte_55");
+    expect(scoreBucket(SCORE_BUCKET_MID_MIN)).toBe("40_55");
+    expect(scoreBucket(SCORE_BUCKET_MID_MIN - 0.01)).toBe("lt_40");
+  });
+
+  it("emits every bucket label exactly once, in descending threshold order", () => {
+    const sql = scoreBucketSqlCase();
+    for (const label of ["gte_55", "40_55", "lt_40"]) {
+      expect(sql.split(label)).toHaveLength(2);
+    }
+    expect(sql.indexOf("gte_55")).toBeLessThan(sql.indexOf("40_55"));
+  });
+
+  it("rejects a column name that is not a plain identifier", () => {
+    expect(() => scoreBucketSqlCase("ranking_score; DROP TABLE x")).toThrow(/tidak valid/);
+    expect(() => scoreBucketSqlCase("")).toThrow(/tidak valid/);
   });
 });

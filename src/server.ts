@@ -39,6 +39,8 @@ import { registerLiquiditySweepTools } from "./tools/liquiditySweep.js";
 import { registerRiskCircuitTools } from "./tools/riskCircuit.js";
 import { registerGridWallFinderTools } from "./tools/gridWallFinder.js";
 import { registerInstitutionalFlowTools } from "./tools/institutionalFlow.js";
+import { registerDeribitOptionsTools } from "./tools/deribitOptions.js";
+import { registerHyperliquidValidateWalletTools } from "./tools/hyperliquidValidateWallet.js";
 import { resetToolRegistry } from "./toolWrapper.js";
 
 export function createServer(): McpServer {
@@ -69,8 +71,10 @@ export function createServer(): McpServer {
   registerPipelineDecisionBacktestTools(server);
   registerNativeExtrasTools(server);
   registerHyperliquidWhaleTools(server);
+  registerHyperliquidValidateWalletTools(server);
   registerCrossVenueDepthTools(server);
   registerCftcPositioningTools(server);
+  registerDeribitOptionsTools(server);
   registerStablecoinSupplyTools(server);
   registerSlippageEstimatorTools(server);
   registerCvdDivergenceTools(server);

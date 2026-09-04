@@ -11,7 +11,8 @@ import {
 } from "./gridRiskEngine.js";
 import { FALLBACK_CONTEXT } from "./marketContext.js";
 import type { BinanceMarketData } from "./binanceFetcher.js";
-import { setProxyConfig } from "./binanceProxyClient.js";
+import { setProxyConfig, setBinanceApiCredentials } from "./binanceProxyClient.js";
+import * as leverageBracket from "./leverageBracket.js";
 
 // quoteVolumeUsd tinggi disengaja: golden regression di bawah dihitung
 // dengan asumsi buffer MMR 0.5% (tier top-liquidity). Tanpa field ini,
@@ -69,6 +70,7 @@ function stubTradingRulesFetch(minQty = "0.1", stepSize = "0.1", minNotional = "
 afterEach(() => {
   vi.unstubAllGlobals();
   setProxyConfig(undefined, undefined);
+  setBinanceApiCredentials(undefined, undefined);
 });
 
 const trbBaseParams: GridInputParams = {
@@ -117,17 +119,39 @@ describe("calculateGridRisk - MMR buffer wired into liquidationPrice", () => {
   it("pushes liquidationPrice closer to entry for a low-liquidity (unknown volume) pair", async () => {
     stubTradingRulesFetch();
     const highLiq = await calculateGridRisk(
-      { ...trbBaseParams, initialCapital: 101 },
+      { ...trbBaseParams, initialCapital: 101, leverage: 10 },
       { ...marketData, quoteVolumeUsd: 900_000_000 },
       FALLBACK_CONTEXT,
     );
     stubTradingRulesFetch();
     const unknownLiq = await calculateGridRisk(
-      { ...trbBaseParams, initialCapital: 101 },
+      { ...trbBaseParams, initialCapital: 101, leverage: 10 },
       { ...marketData, quoteVolumeUsd: undefined },
       FALLBACK_CONTEXT,
     );
     expect(unknownLiq.liquidationPrice).toBeGreaterThan(highLiq.liquidationPrice);
+  });
+
+  it("prefers leverageBracket MMR over volume heuristic when available", async () => {
+    stubTradingRulesFetch();
+    setBinanceApiCredentials("test-key", "test-secret");
+    const spy = vi
+      .spyOn(leverageBracket, "fetchMaintMarginRatio")
+      .mockResolvedValue(0.02);
+    const withBracket = await calculateGridRisk(
+      { ...trbBaseParams, initialCapital: 101, leverage: 10 },
+      marketData,
+      FALLBACK_CONTEXT,
+    );
+    spy.mockRestore();
+    setBinanceApiCredentials(undefined, undefined);
+    stubTradingRulesFetch();
+    const heuristic = await calculateGridRisk(
+      { ...trbBaseParams, initialCapital: 101, leverage: 10 },
+      marketData,
+      FALLBACK_CONTEXT,
+    );
+    expect(withBracket.liquidationPrice).toBeGreaterThan(heuristic.liquidationPrice);
   });
 });
 
@@ -183,7 +207,7 @@ describe("calculateGridRisk - grid point count (gridCount + 1)", () => {
     stubTradingRulesFetch();
 
     const result = await calculateGridRisk(
-      { ...trbBaseParams, initialCapital: 101 },
+      { ...trbBaseParams, initialCapital: 101, leverage: 10 },
       marketData,
       FALLBACK_CONTEXT,
     );
@@ -204,7 +228,7 @@ describe("calculateGridRisk - constant qty per level", () => {
     stubTradingRulesFetch();
 
     const result = await calculateGridRisk(
-      { ...trbBaseParams, initialCapital: 101 },
+      { ...trbBaseParams, initialCapital: 101, leverage: 10 },
       marketData,
       FALLBACK_CONTEXT,
     );
@@ -259,5 +283,95 @@ describe("calculateGridRisk - new validations", () => {
 
     expect(result.status).toBe("REJECT");
     expect(result.rejectionReason).toMatch(/trading rules/i);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// G3 + G4 (2026-09-04, Stage 3) -- matematika risiko grid.
+// ─────────────────────────────────────────────────────────────
+describe("G3: funding per siklus memakai siklus/hari, bukan jumlah level grid", () => {
+  it("membebankan SELURUH bleed harian ke satu siklus kalau estimasi tidak ada (konservatif)", async () => {
+    stubTradingRulesFetch();
+    const noEstimate = await calculateGridRisk(
+      { ...trbBaseParams, initialCapital: 101, leverage: 10 },
+      { ...marketData, predictedFundingRate: 0.0005 },
+      FALLBACK_CONTEXT,
+    );
+    stubTradingRulesFetch();
+    const fourCycles = await calculateGridRisk(
+      { ...trbBaseParams, initialCapital: 101, leverage: 10, estimatedCyclesPerDay: 4 },
+      { ...marketData, predictedFundingRate: 0.0005 },
+      FALLBACK_CONTEXT,
+    );
+
+    // Bleed harian sama; makin banyak siklus/hari, makin kecil beban funding
+    // per siklus -> net profit per siklus makin besar.
+    expect(fourCycles.netProfitPerCycleUSD).toBeGreaterThan(noEstimate.netProfitPerCycleUSD);
+  });
+
+  it("REGRESSION: pembagi TIDAK lagi gridCount -- mengubah gridCount saja tidak boleh menggeser beban funding per siklus lewat pembagi itu", async () => {
+    // Dulu: fundingPerCycle = dailyBleed / gridCount. Jadi grid 21 vs 42
+    // level mengubah beban funding 2x lipat semata-mata karena JUMLAH LEVEL --
+    // besaran yang tidak ada hubungannya dengan berapa sering siklus terjadi.
+    stubTradingRulesFetch();
+    const a = await calculateGridRisk(
+      { ...trbBaseParams, initialCapital: 101, leverage: 10, estimatedCyclesPerDay: 3 },
+      { ...marketData, predictedFundingRate: 0.0005 },
+      FALLBACK_CONTEXT,
+    );
+    const fundingPerCycleA = a.dailyFundingBleedUSD / 3;
+    expect(a.rawProfitPerCycleUSD - a.netProfitPerCycleUSD).toBeCloseTo(fundingPerCycleA, 6);
+  });
+});
+
+describe("G4: liquidationPrice dari exposure yang benar-benar terisi", () => {
+  it("mengembalikan 0 (likuidasi tidak mungkin) saat margin melebihi notional", async () => {
+    // leverage 2 pada fixture ini cuma memakai ~$79 notional dari $101
+    // margin -- leverage EFEKTIF di bawah 1x. Rumus lama tetap mengarang
+    // harga likuidasi dari `1 - 1/leverage`, lalu memakainya sebagai gate.
+    stubTradingRulesFetch();
+    const r = await calculateGridRisk(
+      { ...trbBaseParams, initialCapital: 101, leverage: 2 },
+      marketData,
+      FALLBACK_CONTEXT,
+    );
+    expect(r.status).not.toBe("REJECT");
+    expect(r.liquidationPrice).toBe(0);
+  });
+
+  it("tidak bergantung pada BESAR capital -- menaikkan capital menaikkan notional dengan proporsi yang sama", async () => {
+    // gridQty berbanding lurus dengan initialCapital, jadi notional ikut
+    // naik proporsional dan rasio margin/notional TETAP. Jarak likuidasi
+    // memang tidak berubah kalau seluruh posisi diskalakan bersama.
+    stubTradingRulesFetch();
+    const small = await calculateGridRisk(
+      { ...trbBaseParams, initialCapital: 101, leverage: 10 },
+      marketData,
+      FALLBACK_CONTEXT,
+    );
+    stubTradingRulesFetch();
+    const large = await calculateGridRisk(
+      { ...trbBaseParams, initialCapital: 202, leverage: 10 },
+      marketData,
+      FALLBACK_CONTEXT,
+    );
+    expect(large.liquidationPrice).toBeCloseTo(small.liquidationPrice, 6);
+  });
+
+  it("mendekat ke entry saat LEVERAGE naik (margin makin tipis relatif terhadap notional)", async () => {
+    stubTradingRulesFetch();
+    const lowLev = await calculateGridRisk(
+      { ...trbBaseParams, initialCapital: 101, leverage: 5 },
+      marketData,
+      FALLBACK_CONTEXT,
+    );
+    stubTradingRulesFetch();
+    const highLev = await calculateGridRisk(
+      { ...trbBaseParams, initialCapital: 101, leverage: 20 },
+      marketData,
+      FALLBACK_CONTEXT,
+    );
+    expect(highLev.liquidationPrice).toBeGreaterThan(lowLev.liquidationPrice);
+    expect(highLev.liquidationPrice).toBeLessThan(highLev.avgEntryPrice);
   });
 });

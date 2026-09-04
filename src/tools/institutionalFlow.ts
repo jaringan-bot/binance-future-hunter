@@ -24,6 +24,7 @@ import { queryHyperliquidWhaleRecentByCoin } from "../d1Client.js";
 import { computeWhaleDeltas, aggregateWhaleDeltas } from "./hyperliquidWhale.js";
 import { queryCftcPositioningHistory } from "../d1Client.js";
 import { computeCftcTrend, CFTC_CONTRACT_NAME } from "../cftcClient.js";
+import { getOptionsSummary, computeOptionsPositioning } from "../deribitClient.js";
 import { computeInstitutionalFlowScore, type InstitutionalFlowScore } from "../institutionalFlow.js";
 
 const CFTC_TREND_WEEKS = 8;
@@ -52,14 +53,15 @@ export function registerInstitutionalFlowTools(server: McpServer): void {
     server,
     "binance_analyze_institutional_flow",
     {
-      title: "Skor Alignment Institutional Flow (Whale + CFTC + Cross-Venue)",
+      title: "Skor Alignment Institutional Flow (Whale + CFTC + Cross-Venue + Options)",
       description:
-        "Gabungkan 3 sinyal institusional jadi 1 skor alignment: posisi whale on-chain Hyperliquid, trend CFTC COT " +
-        "(Leveraged Funds, BTC/ETH saja), dan wall order book yang corroborated lintas >=2 exchange -- ke arah LONG " +
-        "atau SHORT, plus flag kalau funding rate antar-exchange lagi gak sepakat (confidence gabungan diragukan). " +
-        "PENTING: bukan skor tunggal weighted-average -- tiap komponen bisa 'tidak tersedia' (watchlist Hyperliquid " +
-        "kosong, coin bukan BTC/ETH buat CFTC, dst), alignmentScore cuma dihitung dari komponen yang TERSEDIA " +
-        "(componentsAvailable). Heuristik, BUKAN probabilitas terkalibrasi -- sama seperti binance_detect_mm_activity.",
+        "Gabungkan sampai 4 sinyal institusional jadi 1 skor alignment: posisi whale on-chain Hyperliquid, trend CFTC COT " +
+        "(Leveraged Funds, BTC/ETH saja), wall order book yang corroborated lintas >=2 exchange, dan put/call OI Deribit " +
+        "(BTC/ETH) -- ke arah LONG atau SHORT, plus flag kalau funding rate antar-exchange lagi gak sepakat (confidence " +
+        "gabungan diragukan). PENTING: bukan skor tunggal weighted-average -- tiap komponen bisa 'tidak tersedia' " +
+        "(watchlist Hyperliquid kosong, coin bukan BTC/ETH buat CFTC/options, dst), alignmentScore cuma dihitung dari " +
+        "komponen yang TERSEDIA (componentsAvailable). Heuristik, BUKAN probabilitas terkalibrasi -- sama seperti " +
+        "binance_detect_mm_activity.",
       inputSchema: { symbol: symbolSchema },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -68,17 +70,21 @@ export function registerInstitutionalFlowTools(server: McpServer): void {
         const hlCoin = toExchangeSymbol(symbol, "hyperliquid"); // base asset, mis. "BTC", null kalau gak bisa di-derive
         const cftcCoin = hlCoin && hlCoin in CFTC_CONTRACT_NAME ? (hlCoin as keyof typeof CFTC_CONTRACT_NAME) : null;
 
-        const [fundingDivergenceRes, crossVenueRes, whaleRes, cftcRes] = await Promise.allSettled([
+        const [fundingDivergenceRes, crossVenueRes, whaleRes, cftcRes, optionsRes] = await Promise.allSettled([
           fetchFundingDivergence(symbol),
           fetchCrossVenueWalls(symbol),
           hlCoin ? queryHyperliquidWhaleRecentByCoin(hlCoin) : Promise.resolve(null),
           cftcCoin ? queryCftcPositioningHistory(cftcCoin, CFTC_TREND_WEEKS) : Promise.resolve(null),
+          cftcCoin
+            ? getOptionsSummary(cftcCoin).then((rows) => computeOptionsPositioning(rows, cftcCoin))
+            : Promise.resolve(null),
         ]);
 
         const fundingDivergence = fundingDivergenceRes.status === "fulfilled" ? fundingDivergenceRes.value : null;
         const crossVenueWalls = crossVenueRes.status === "fulfilled" ? crossVenueRes.value.walls : null;
         const whaleRows = whaleRes.status === "fulfilled" ? whaleRes.value : null;
         const cftcHistory = cftcRes.status === "fulfilled" ? cftcRes.value : null;
+        const deribitOptions = optionsRes.status === "fulfilled" ? optionsRes.value : null;
 
         const hyperliquidWhale = whaleRows ? aggregateWhaleDeltas(hlCoin ?? "", computeWhaleDeltas(whaleRows)) : null;
         const cftcTrend = cftcHistory
@@ -92,13 +98,14 @@ export function registerInstitutionalFlowTools(server: McpServer): void {
           crossVenueWalls,
           hyperliquidWhale,
           cftcTrend,
+          deribitOptions,
         });
 
         const builder = new ToolResponseBuilder()
           .header(`Institutional Flow -- ${symbol}`)
           .row("Net Direction", score.netDirection)
           .row("Alignment Score", `${score.alignmentScore.toFixed(1)}/100`)
-          .row("Komponen Tersedia", `${score.componentsAvailable}/3`);
+          .row("Komponen Tersedia", `${score.componentsAvailable}/4`);
 
         builder.subheader("Detail Komponen").table(
           ["Komponen", "Tersedia?", "Arah", "Strength", "Catatan"],

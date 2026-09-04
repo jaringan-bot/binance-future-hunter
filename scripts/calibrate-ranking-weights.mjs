@@ -17,11 +17,27 @@
 // manual:
 //
 //   npx wrangler d1 execute binance-future-hunter-db --remote --json \
-//     --command "SELECT mm_component, smart_money_component,
-//       regime_component, buy_pressure_component, forward_return_4h
+//     --command "SELECT mm_component, mm_adverse_component,
+//       smart_money_component, regime_component, buy_pressure_component,
+//       forward_return_4h
 //       FROM pipeline_decision_log
 //       WHERE forward_return_4h IS NOT NULL
-//         AND mm_component IS NOT NULL" > dataset.json
+//         AND mm_component IS NOT NULL
+//         AND mm_adverse_component IS NOT NULL" > dataset.json
+//
+// Filter `mm_adverse_component IS NOT NULL` WAJIB (migration 0015 / Stage 3
+// K6): sebelum migration itu `mm_component` adalah gabungan keenam sinyal
+// detectMmActivity dengan tanda terbalik; sesudahnya hanya yang supportive.
+// Angkanya TIDAK sebanding lintas batas tersebut. Script menolak dataset
+// campuran lewat assertSingleMmSemantics() -- jangan diakali, ambil salah
+// satu sisi saja.
+//
+// BELUM DIKERJAKAN (Stage 4.5, butuh data pasca-Stage-3 dulu): mengkalibrasi
+// MAGNITUDO penalti mmAdverse itu sendiri. Model di script ini punya 4 fitur
+// dan meng-clamp koefisien negatif ke 0 sebelum normalisasi -- bentuk itu
+// TIDAK bisa merepresentasikan suku penalti yang koefisiennya memang
+// diharapkan negatif. Menambah fitur ke-5 mengubah bentuk model, dan itu
+// keputusan yang harus diambil DENGAN data di tangan, bukan sebelumnya.
 //
 // lalu:
 //
@@ -229,11 +245,48 @@ export function unwrapDataset(raw) {
   throw new Error("format dataset tidak dikenal (butuh array row, {rows:[...]}, atau {results:[...]})");
 }
 
+const MM_ADVERSE_ALIASES = ["mmAdverse", "mmAdverseComponent", "mm_adverse_component"];
+
+/**
+ * Deteksi dataset yang MENCAMPUR semantik `mm_component` lintas migration
+ * 0015 (Stage 3, K6).
+ *
+ * Sebelum 0015 `mm_component` = jumlah KEENAM sinyal detectMmActivity
+ * (supportive + adverse digabung, tandanya terbalik). Sesudah 0015 kolom
+ * yang sama hanya berisi sinyal SUPPORTIVE, dan yang adverse pindah ke
+ * kolom sendiri. Angka di kolom itu TIDAK SEBANDING lintas batas tersebut.
+ *
+ * Baris pra-0015 dikenali dari `mm_adverse_component` yang NULL/absen.
+ * Kalau dataset memuat KEDUANYA, regresi akan mencocokkan satu bobot untuk
+ * dua besaran berbeda dan hasilnya tidak berarti -- makanya ini error,
+ * bukan warning yang bisa terlewat.
+ */
+export function assertSingleMmSemantics(rawRows) {
+  let withAdverse = 0;
+  let withoutAdverse = 0;
+  for (const r of rawRows) {
+    const v = pickField(r, MM_ADVERSE_ALIASES);
+    if (v === undefined || !Number.isFinite(v)) withoutAdverse++;
+    else withAdverse++;
+  }
+  if (withAdverse > 0 && withoutAdverse > 0) {
+    throw new Error(
+      `dataset mencampur semantik mm_component: ${withAdverse} baris pasca-migration-0015 ` +
+        `(punya mm_adverse_component) dan ${withoutAdverse} baris pra-0015 (tidak punya). ` +
+        "Kolom mm_component berarti hal BERBEDA di keduanya. Tambahkan " +
+        "`AND mm_adverse_component IS NOT NULL` ke query export.",
+    );
+  }
+  return { withAdverse, withoutAdverse };
+}
+
 export function parseDataset(rawRows, opts = {}) {
   const { labelThreshold = 0, returnField } = opts;
   const rows = [];
   let dropped = 0;
   let detectedReturnField = returnField ?? null;
+
+  assertSingleMmSemantics(rawRows);
 
   for (const r of rawRows) {
     const feats = FEATURE_KEYS.map((k) => pickField(r, FIELD_ALIASES[k]));

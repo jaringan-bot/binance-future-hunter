@@ -1,718 +1,756 @@
 # Binance Future Hunter — Binance Futures Market Intelligence
 
-> Rebrand dari `whalescope-mcp` (nama internal lama) ke `binance-future-hunter`,
-> mengikuti nama repo. Codebase/logic yang sudah teruji tidak dibuang — cuma
-> identitas deployment (nama worker, D1, judul) yang berganti. Lihat commit
-> rebrand untuk daftar lengkap perubahan.
+> Rebranded from `whalescope-mcp` (former internal name) to
+> `binance-future-hunter`, matching the repo name. The tested codebase/logic
+> wasn't thrown away — only the deployment identity (worker name, D1, title)
+> changed. See the rebrand commit for the full list of changes.
 
-🇮🇩 Bahasa Indonesia | [🇬🇧 English](README.en.md)
-
-MCP server yang menyediakan data publik Binance USDS-M Futures (funding rate,
-open interest, long/short ratio, taker volume, candlestick, order book,
-volatility) plus pembanding Binance Spot (harga, order book, candlestick,
-CVD) sebagai tools yang bisa dipanggil Claude. Semua data yang disajikan
-bersifat **publik read-only** — tidak ada order/trading, tidak ada akses ke
-data akun pribadi.
+MCP server that exposes public Binance USDS-M Futures data (funding rate,
+open interest, long/short ratio, taker volume, candlesticks, order book,
+volatility) plus a Binance Spot comparison layer (price, order book,
+candlesticks, CVD) as tools callable by Claude. All data served is
+**public, read-only** — no order placement/trading, no access to private
+account data.
 
 ## Quick Deploy
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/jaringan-bot/binance-future-hunter)
 
-Tombol ini clone repo + bikin Worker di akun Cloudflare kamu sendiri,
-termasuk **provision KV namespace & D1 database baru otomatis** (Cloudflare
-generate `id`/`database_id` baru buat akun kamu, gak perlu bikin manual).
-**Bukan zero-touch sepenuhnya** — biar jujur soal apa yang masih manual:
-setelah klik, kamu TETAP perlu set secret (Cloudflare gak bisa nebak value
-dari layanan eksternal) — lihat `.dev.vars.example` di repo ini buat daftar
-lengkap, atau [Setup Proxy Relay](#setup-proxy-relay-wajib-sekali-saja)
-di bawah. `PROXY_URL`/`PROXY_SECRET` WAJIB (semua 46 tool butuh).
+This button clones the repo and creates a Worker in your own Cloudflare
+account, including **auto-provisioning a new KV namespace & D1 database**
+(Cloudflare generates fresh `id`/`database_id` values for your account, no
+manual creation needed). **Not fully zero-touch** — to be honest about
+what's still manual: you STILL need to set secrets afterward (Cloudflare
+can't guess values from external services) — see `.dev.vars.example` in
+this repo for the full list, or
+[Proxy Relay setup](#setup-proxy-relay-required-one-time) below.
+`PROXY_URL`/`PROXY_SECRET` are REQUIRED (all 79 tools need them).
 
-## Tujuan
+## Purpose
 
-Menyediakan gambaran positioning pasar Binance Futures — bukan cuma harga,
-tapi juga *siapa* yang lagi buka posisi apa (retail vs top trader), *seberapa
-crowded* leverage-nya, dan *di harga berapa* likuiditas menumpuk — langsung
-dalam percakapan dengan Claude, tanpa perlu buka dashboard exchange terpisah.
+Provide a picture of Binance Futures market positioning — not just price,
+but also *who* is holding what (retail vs top trader), *how crowded* the
+leverage is, and *at what price* liquidity is stacked — directly inside a
+conversation with Claude, without needing a separate exchange dashboard.
 
-## Manfaat
+## Benefits
 
-- **Satu pintu buat banyak sinyal.** Funding rate, open interest, order book,
-  dan order flow — semua lewat satu MCP connector, bukan gonta-ganti tab.
-- **Bisa bedain retail vs whale.** `binance_get_top_trader_ratio` kasih
-  breakdown murni top-trader (terpisah dari `binance_get_long_short_ratio`
-  yang blended) — berguna buat lihat kalau posisi retail dan whale lagi
-  divergen.
-- **Native Binance di mana itu penting.** Harga, funding rate, klines, order
-  book — semua lewat jalur native Binance (bukan derivasi pihak ketiga),
-  supaya presisi terjaga terutama untuk pair kecil/kurang likuid.
-- **Gratis buat pemakaian personal** — lihat bagian [Biaya](#biaya).
+- **One door for many signals.** Funding rate, open interest, order book,
+  and order flow — all through a single MCP connector, no tab-switching.
+- **Distinguish retail from whale.** `binance_get_top_trader_ratio` gives a
+  pure top-trader breakdown (separate from `binance_get_long_short_ratio`,
+  which is blended) — useful for spotting divergence between retail and
+  whale positioning.
+- **Native Binance where it matters.** Price, funding rate, klines, order
+  book — all through the native Binance path (not a third-party derivation),
+  so precision holds up especially for smaller/less liquid pairs.
+- **Free for personal use** — see the [Cost](#cost) section.
 
-## Kelebihan
+## Strengths
 
-- 29 tools mencakup lima sudut analisis: bias arah pasar, area harga kunci
-  (order book), konfirmasi eksekusi (order flow/aggressor), pembanding
-  Futures-vs-Spot (leverage-driven vs demand riil), dan market-wide scan
-  (funding rate ekstrem lintas semua pair, atau bandingkan metrik across
-  beberapa pair) — plus tool composite (`binance_analyze_pair`) buat
-  overview cepat tanpa banyak tool call, dan config/histori (threshold
-  per-pair, basis time-series) yang tersimpan di Workers KV.
-- Read-only terhadap data pasar Binance — tidak ada order/trading. Satu-
-  satunya tool yang menulis state (`binance_set_pair_threshold`) cuma
-  nyimpen preferensi threshold kamu sendiri di Workers KV, tidak menyentuh
-  akun Binance/data pihak luar sama sekali.
-- Transparan soal keterbatasan tiap tool (lihat bagian di bawah), bukan
-  dibungkus seolah semua data sempurna.
-- Infrastruktur cukup dengan free tier (Cloudflare Workers + host relay
-  gratis seperti Fly.io / Deno Deploy, atau VPS ~$5/bln) untuk pemakaian
-  personal — 100% Binance-native, tidak ada dependensi agregator pihak
-  ketiga lagi.
+- 79 tools covering five analytical angles: directional market bias, key
+  price areas (order book), execution confirmation (order flow/aggressor),
+  Futures-vs-Spot comparison (leverage-driven vs real demand), and
+  market-wide scanning (extreme funding rates across every pair, or
+  comparing a metric across several pairs) — plus a composite tool
+  (`binance_analyze_pair`) for a quick overview without many tool calls,
+  and config/history tools (per-pair thresholds, basis time-series) backed
+  by Workers KV.
+- Read-only with respect to Binance market data — no order placement or
+  trading. The one tool that writes state (`binance_set_pair_threshold`)
+  only stores your own threshold preference in Workers KV; it never
+  touches a Binance account or any third-party data.
+- Transparent about each tool's limitations (see the section below), not
+  glossed over as if all data were perfect.
+- Infrastructure fits comfortably in free tiers (Cloudflare Workers + a
+  free relay host like Fly.io / Deno Deploy, or a ~$5/mo VPS) for personal
+  use — 100% Binance-native, no third-party aggregator dependency anymore.
 
-## Kekurangan
+## Weaknesses
 
-- **Sebagian besar tool request/response.** Funding/OI/klines/order book/ratio
-  semua snapshot atau histori periodik. Data streaming yang ada terbatas:
-  `binance_get_realtime_liquidations` + `binance_get_contract_events` (via
-  stream gateway VPS, lihat di bawah) — tidak ada push tick-by-tick untuk
-  harga / order book.
-- **Liquidation: SAMPLED, bukan lengkap.** Sejak 2026-08-28 ada
-  `binance_get_realtime_liquidations` — WebSocket `!forceOrder@arr`
-  (`dstream.binance.com`) di-buffer always-on di **VPS AWS Singapore**
-  (`svm-vps`, `13.212.7.132` — `stream-gateway/`, di luar Cloudflare).
-  Catatan IP: `fstream.binance.com` di-black-hole dari IP Oracle lama
-  (146.235.17.228); produksi pindah AWS 2026-09-02. Binance men-throttle stream ini maks 1
-  event/symbol/detik, jadi ini SAMPEL likuidasi, bukan tiap satu. Tetap cukup
-  buat konfirmasi cluster stop-hunt di `binance_detect_mm_activity` (proxy
-  ke-3, price-anchored & sisi-hunt). Tidak ada histori liquidation jauh ke
-  belakang (buffer 24 jam).
-- **Setup awal butuh proxy relay** (wajib, `proxy-standalone/`) — bukan
-  pasang-langsung-jalan, ada langkah konfigurasi manual sekali di awal.
-- Tidak ada data wallet on-chain atau data dari exchange selain Binance
+- **Most tools are request/response.** Funding/OI/klines/order book/ratios are
+  all snapshots or periodic history. Streaming data is limited to
+  `binance_get_realtime_liquidations` + `binance_get_contract_events` (via the
+  VPS stream gateway, below) — no tick-by-tick push for price / order book.
+- **Liquidations: SAMPLED, not exhaustive.** Since 2026-08-28,
+  `binance_get_realtime_liquidations` reads a 24h buffer from an always-on
+  WebSocket (`!forceOrder@arr` via `dstream.binance.com`) held on the
+  **AWS Singapore VPS** (`svm-vps`, `13.212.7.132`, `stream-gateway/` —
+  outside Cloudflare). Production moved from Oracle (2026-09-02); `fstream`
+  black-hole was IP-specific to Oracle. Binance throttles the stream to 1 event/symbol/second, so this is a sample. Still
+  enough to confirm stop-hunt liquidation clusters in
+  `binance_detect_mm_activity` (a 3rd, price-anchored, hunt-side proxy). No
+  long liquidation history (24h buffer).
+- **Initial setup needs a proxy relay** (required, `proxy-standalone/`) —
+  not plug-and-play, there's a one-time manual configuration step.
+- No on-chain wallet data, and no data from exchanges other than Binance
   Futures USDS-M.
 
-**Sumber data: satu jalur, 100% Binance native.**
+**Data sources: one path, 100% Binance native.**
 
-- **Binance native, lewat proxy relay.** Domain Binance
-  (`fapi.binance.com`) memblokir traffic dari Cloudflare Workers di level WAF
-  (403, company-wide — sudah dites langsung dari worker ini, bukan asumsi).
-  Host relay (VPS/Fly.io/Deno di region Singapore/Tokyo) pakai IP yang tidak
-  kena block itu. Worker Cloudflare relay lewat proxy kecil di
-  `proxy-standalone/` (`handler.mjs`, lihat
-  [`proxy-standalone/README.md`](proxy-standalone/README.md); relay awal di
-  `proxy/` berbasis Vercel sudah retired). Ini jalur untuk funding rate
-  (current & histori), klines/OHLCV, bias multi-timeframe, realized
-  volatility, statistik 24 jam, order book depth, aggregate trades, open
-  interest (current & histori), long/short ratio (blended & top-trader),
-  taker buy/sell volume ratio, dan harga spot (proxy juga relay ke Binance
-  Spot API `api.binance.com` lewat parameter `market=spot`).
+- **Native Binance, via a relay proxy.** Binance's domain
+  (`fapi.binance.com`) blocks traffic from Cloudflare Workers at the WAF
+  level (403, company-wide — tested directly from this worker, not an
+  assumption). A relay host (VPS/Fly.io/Deno in a Singapore/Tokyo region)
+  uses an IP that isn't blocked. The Cloudflare Worker relays through a
+  small proxy in `proxy-standalone/` (`handler.mjs`, see
+  [`proxy-standalone/README.md`](proxy-standalone/README.md); the earlier
+  Vercel-based `proxy/` is retired). This path serves funding rate (current
+  & history), klines/OHLCV, multi-timeframe bias, realized volatility, 24h
+  stats, order book depth, aggregate trades, open interest (current &
+  history), long/short ratio (blended & top-trader), taker buy/sell volume
+  ratio, and spot price (the proxy also relays to the Binance Spot API
+  `api.binance.com` via the `market=spot` parameter).
 
-Konsekuensinya, worker ini butuh `PROXY_URL`/`PROXY_SECRET` (proxy relay,
-wajib buat semua 46 tool) — lihat bagian Setup di bawah.
+As a consequence, this worker needs `PROXY_URL`/`PROXY_SECRET` (relay
+proxy, required for all 79 tools) — see the Setup section below.
 
-**Caching & state, tanpa kredensial tambahan.** Response upstream (funding
-rate, klines, OI, dll — kecuali order book & aggregate trades yang butuh
-freshness ketat) di-cache bertingkat (5 detik-1 jam tergantung endpoint)
-lewat Cache API bawaan Cloudflare Workers, tidak perlu setup apapun.
-Threshold custom per-pair tersimpan di Workers KV (binding `CONFIG_KV`).
-Time-series (basis+funding+OI, dan 6 skor sinyal `binance_detect_mm_activity`)
-tersimpan di D1 (binding `DB`) — diisi otomatis oleh Cron Trigger tiap 5
-menit untuk watchlist tetap 50 pair (`SNAPSHOT_WATCHLIST` di `src/shared.ts`,
-diurutkan market cap, mis. BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT, dst).
+**Caching & state, no extra credentials needed.** Upstream responses
+(funding rate, klines, OI, etc. — except order book & aggregate trades,
+which need strict freshness) are cached in tiers (5 seconds to 1 hour
+depending on the endpoint) via Cloudflare Workers' built-in Cache API, no
+setup required. Per-pair custom thresholds are stored in Workers KV
+(binding `CONFIG_KV`). Time-series data (basis+funding+OI, and
+`binance_detect_mm_activity`'s 6 signal scores) is stored in D1 (binding
+`DB`) — filled in automatically by a Cron Trigger every 5 minutes for a
+fixed 50-pair watchlist (`SNAPSHOT_WATCHLIST` in `src/shared.ts`, ordered
+by market cap, e.g. BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT, etc.).
 
-**Cross-exchange, tanpa proxy tambahan.** `whalescope_compare_funding_across_exchanges`
-akses Bybit/OKX/Hyperliquid LANGSUNG dari worker (dites dari edge
-Cloudflare beneran, gak kena WAF/geo-block kayak Binance) — gak ada
-kredensial atau setup tambahan buat 3 exchange itu.
+**Cross-exchange, no extra proxy needed.** `whalescope_compare_funding_across_exchanges`
+accesses Bybit/OKX/Hyperliquid DIRECTLY from the worker (tested from real
+Cloudflare edge, no WAF/geo-block like Binance) — no credentials or extra
+setup needed for those 3 exchanges.
 
-## Yang disediakan
+## What's provided
 
-| Tool | Fungsi | Sumber |
+| Tool | Function | Source |
 |---|---|---|
-| `binance_get_funding_rate` | Funding rate terkini + basis (deviasi mark vs index price) | Binance native |
-| `binance_get_funding_rate_history` | Tren funding rate dari waktu ke waktu | Binance native |
-| `binance_get_spot_price` | Harga spot Binance + basis riil vs mark price futures (beda dari basis di atas yang vs index price). Error jelas kalau pair futures-only (tidak listed di Spot) | Binance native (Spot) |
-| `binance_scan_funding_extremes` | Scan funding rate SEMUA pair Futures sekaligus (1 call bulk), kembalikan top pair paling crowded long/short | Binance native |
-| `binance_get_open_interest` | OI snapshot terkini | Binance native |
-| `binance_get_open_interest_history` | Tren OI naik/turun | Binance native |
-| `binance_get_long_short_ratio` | Rasio long vs short agregat (blended, semua trader) + tren | Binance native |
-| `binance_get_top_trader_ratio` | Rasio long/short KHUSUS top trader (breakdown murni, akun atau size posisi) | Binance native |
-| `binance_get_order_book_depth` | Snapshot order book (bid/ask), spread, wall terbesar | Binance native |
-| `binance_get_order_book_imbalance` | Imbalance volume bid vs ask di depth 5/10/20, dengan label bias (BULLISH/BEARISH/SEIMBANG) | Binance native |
-| `binance_get_agg_trades` | Trade individual granular (buy/sell aggressor) untuk deteksi absorption | Binance native |
-| `binance_get_taker_volume_ratio` | Tekanan beli/jual agresif (taker volume), statistik resmi Binance | Binance native |
-| `binance_get_klines` | Candlestick OHLCV per timeframe, dukung `startTime`/`endTime` (histori jauh ke belakang, buat backtest, maks 1500 candle/panggilan) | Binance native |
-| `binance_get_multi_timeframe_bias` | Bias Bullish/Bearish/Sideways di 5 timeframe sekaligus (1m/5m/15m/1h/1d) | Binance native |
-| `binance_get_realized_volatility` | Realized volatility historis (15m/1h) dari log-return, untuk kalibrasi lebar grid | Binance native |
-| `binance_get_24hr_ticker` | Ringkasan statistik 24 jam (rolling window resmi) | Binance native |
-| `binance_get_spot_ticker_24hr` | Statistik 24 jam versi Spot (harga, %change, VWAP, volume, jumlah trade) — bandingkan dengan versi Futures di atas | Binance native (Spot) |
-| `binance_get_spot_book_ticker` | Best bid/ask + qty real-time Spot, lebih ringan dari full order book | Binance native (Spot) |
-| `binance_get_spot_order_book` | Order book depth Spot (bid/ask, spread, wall terbesar) | Binance native (Spot) |
-| `binance_get_spot_klines` | Candlestick OHLCV Spot per timeframe, dukung `startTime`/`endTime` (maks 1000 candle/panggilan) | Binance native (Spot) |
-| `binance_get_spot_agg_trades` | Trade individual granular Spot (CVD riil, bukan leverage) | Binance native (Spot) |
-| `binance_get_spot_avg_price` | Harga rata-rata bergerak Spot (window beberapa menit, lebih stabil dari last-trade) | Binance native (Spot) |
-| `binance_check_spot_listing` | Cek apakah pair listed di Binance Spot + status trading — dipakai sebelum panggil tool Spot lain untuk pair yang belum pasti | Binance native (Spot) |
-| `binance_analyze_pair` | Overview cepat 1 pair (composite): funding, tren OI, tren top trader, taker volume, order book, bias harga — 6 tool sekaligus dalam 1 call | Binance native |
-| `binance_compare_symbols` | Bandingkan 1 metrik (funding rate, %change 24h, OI, top trader ratio, taker ratio) across 2-10 pair sekaligus, diurutkan dari paling ekstrem | Binance native |
-| `binance_set_pair_threshold` | Set threshold funding/basis custom per-pair (override default ±0.03%/±0.05%), tersimpan di Workers KV | Workers KV |
-| `binance_get_pair_threshold` | Cek threshold custom yang sudah di-set untuk sebuah pair | Workers KV |
-| `binance_get_basis_history` | Histori basis+funding+OI time-series (snapshot Cron tiap 5 menit ke D1) — selalu tersedia untuk watchlist tetap 50 pair, best-effort untuk pair lain yang sering di-query — deteksi "basis melebar lalu kembali" tanpa cek manual berkali-kali | D1 + Cron Trigger |
-| `binance_get_orderbook_delta` | 2 snapshot order book ~1-2 detik terpisah, bandingkan wall antar snapshot untuk deteksi spoofing RIIL (wall hilang tanpa harga crossing level itu) — beda dari `binance_get_order_book_depth` yang cuma 1 snapshot | Binance native |
-| `binance_detect_mm_activity` | Skor + tier (Weak/Moderate/Strong/Extreme) dari 6 sinyal MM/whale sekaligus (absorption, spoofing 2-snapshot RIIL, stop-hunt simetris + OI-drop proxy + trade-volume-concentration proxy, basis arbitrage, OI divergence, funding extreme) — ganti 5-6 tool call manual. Stop-hunt TETAP tanpa data liquidation riil (dihapus permanen), lihat [Keterbatasan](#keterbatasan-yang-jujur-perlu-diketahui) | Binance native |
-| `binance_market_regime` | Klasifikasi kondisi pasar: TRENDING_UP/DOWN, RANGING, BREAKOUT, ACCUMULATION, DISTRIBUTION — pakai ADX(14), tren OI, CVD, spike volatilitas/volume | Binance native |
-| `binance_backtest_signal` | Validasi empiris sinyal `binance_detect_mm_activity`: win rate/avg return/max drawdown dari histori sinyal D1 (watchlist tetap), forward return dihitung on-demand dari klines historis | D1 + Binance native |
-| `whalescope_backtest_pipeline_decisions` | Uji maju keputusan `full_pipeline` yang tersimpan di `pipeline_decision_log` (entry-alert Phase 2 + `persist=true`): win rate / avg return / SL-touch per keputusan (TRADE/WATCH/NO_TRADE) dan bucket skor (`lt_40` / `40_55` / `gte_55`). Forward return on-demand dari klines, bukan kolom precompute, bukan auto-tune bobot | D1 + Binance native |
-| `binance_analyze_smart_money` | Skor divergensi smart money (top trader) vs retail (global account) dari 5 variabel: top trader ratio, global account ratio, delta OI, funding rate, orderbook imbalance — kondisi LONG_LIQUIDATION_RISK/BULLISH_ACCUMULATION/SHORT_SQUEEZE_RISK/NEUTRAL + confidenceScore. Beda dari `binance_detect_mm_activity` (6 sinyal absorption/spoofing/stop-hunt/basis-arb) — fokus khusus top-trader-vs-retail | Binance native |
-| `whalescope_compare_funding_across_exchanges` | Bandingkan funding rate, last price, open interest, 24h change 1 pair across Binance/Bybit/OKX/Hyperliquid, deteksi divergensi — cross-confirm sinyal MM detection antar exchange. Satu-satunya tool yang BUKAN Binance-only | Binance native + Bybit + OKX + Hyperliquid |
-| `binance_get_tool_catalog` | Daftar semua tool + kategori/token-cost/use-case, filter per kategori — cek ini dulu sebelum manggil banyak tool individual. Nama+description auto dari tool registry (selalu akurat), kategori/token-cost tetap manual | Semi-otomatis |
-| `binance_get_adl_risk` | Rating risiko Auto-Deleveraging (LOW/MEDIUM/HIGH) per pair, update tiap 30 menit | Binance native |
-| `binance_get_insurance_fund_balance` | Snapshot historis saldo insurance fund per asset margin | Binance native |
-| `binance_get_mark_price_klines` | Candlestick dari MARK PRICE (acuan liquidation/funding), bukan harga transaksi | Binance native |
-| `binance_get_index_price_klines` | Candlestick dari INDEX PRICE (blended beberapa exchange spot), dasar premium index/funding | Binance native |
-| `binance_get_premium_index_klines` | Candlestick dari PREMIUM INDEX (rasio mark vs index price), komponen utama funding rate | Binance native |
-| `binance_get_continuous_klines` | Candlestick kontrak PERPETUAL/CURRENT_QUARTER/NEXT_QUARTER per pair underlying | Binance native |
-| `binance_get_quarterly_settlement_price` | Histori delivery/settlement price kontrak quarterly (tidak berlaku untuk perpetual) | Binance native |
-| `binance_get_composite_index_info` | Komposisi base asset + bobot sebuah composite index symbol (mis. BTCDOMUSDT) | Binance native |
-| `binance_get_index_constituents` | Daftar exchange+harga+bobot penyusun index price sebuah pair | Binance native |
-| `whalescope_full_pipeline` | Decision chain PENUH Grid Bot Futures (composite tertinggi): hard screen → Tier-1 intelligence (smart money, MM composite, regime 1h+4h, order book) → hitung bound grid Compass-equivalent (ATR + swing high/low) → capital-solve EXACT ke budget rugi (`risk_usd`) per opsi leverage → keputusan TRADE/WATCH/NO_TRADE + parameter Grid Bot siap copy-paste, untuk 1-20 symbol sekaligus. `persist=true` (opsional) menulis row compact ke `pipeline_decision_log` (`source=manual` atau `dropstab` + `persist_ref` slug tab). Token cost TINGGI — lihat [`docs/full_pipeline_framework.md`](docs/full_pipeline_framework.md) | Binance native |
+| `binance_get_funding_rate` | Current funding rate + basis (mark vs index price deviation) | Binance native |
+| `binance_get_funding_rate_history` | Funding rate trend over time | Binance native |
+| `binance_get_spot_price` | Binance spot price + real basis vs futures mark price (different from the basis above, which is vs index price). Clear error if the pair is futures-only (not listed on Spot) | Binance native (Spot) |
+| `binance_scan_funding_extremes` | Scans funding rate across ALL Futures pairs at once (1 bulk call), returns the top pairs most crowded long/short | Binance native |
+| `binance_get_open_interest` | Current OI snapshot | Binance native |
+| `binance_get_open_interest_history` | OI trend up/down | Binance native |
+| `binance_get_long_short_ratio` | Aggregate long vs short ratio (blended, all traders) + trend | Binance native |
+| `binance_get_top_trader_ratio` | Long/short ratio for top traders ONLY (pure breakdown, by account or position size) | Binance native |
+| `binance_get_order_book_depth` | Order book snapshot (bid/ask), spread, largest wall | Binance native |
+| `binance_get_order_book_imbalance` | Bid vs ask volume imbalance at depth 5/10/20, with a bias label (BULLISH/BEARISH/BALANCED) | Binance native |
+| `binance_get_agg_trades` | Granular individual trades (buy/sell aggressor) for absorption detection | Binance native |
+| `binance_get_taker_volume_ratio` | Aggressive buy/sell pressure (taker volume), official Binance statistic | Binance native |
+| `binance_get_klines` | OHLCV candlesticks per timeframe, supports `startTime`/`endTime` (deep history, for backtesting, up to 1500 candles/call) | Binance native |
+| `binance_get_multi_timeframe_bias` | Bullish/Bearish/Sideways bias across 5 timeframes at once (1m/5m/15m/1h/1d) | Binance native |
+| `binance_get_realized_volatility` | Historical realized volatility (15m/1h) from log-returns, for grid-width calibration | Binance native |
+| `binance_get_24hr_ticker` | 24-hour statistics summary (official rolling window) | Binance native |
+| `binance_get_spot_ticker_24hr` | Spot version of 24h stats (price, % change, VWAP, volume, trade count) — compare against the Futures version above | Binance native (Spot) |
+| `binance_get_spot_book_ticker` | Real-time best bid/ask + qty on Spot, lighter than a full order book | Binance native (Spot) |
+| `binance_get_spot_order_book` | Spot order book depth (bid/ask, spread, largest wall) | Binance native (Spot) |
+| `binance_get_spot_klines` | Spot OHLCV candlesticks per timeframe, supports `startTime`/`endTime` (up to 1000 candles/call) | Binance native (Spot) |
+| `binance_get_spot_agg_trades` | Granular individual Spot trades (real CVD, not leverage) | Binance native (Spot) |
+| `binance_get_spot_avg_price` | Spot moving average price (a few-minute window, more stable than last-trade) | Binance native (Spot) |
+| `binance_check_spot_listing` | Checks whether a pair is listed on Binance Spot + trading status — used before calling other Spot tools for a pair that isn't certain to be listed | Binance native (Spot) |
+| `binance_analyze_pair` | Quick composite overview of one pair: funding, OI trend, top-trader trend, taker volume, order book, price bias — 6 tools at once in a single call | Binance native |
+| `binance_compare_symbols` | Compare one metric (funding rate, 24h % change, OI, top-trader ratio, taker ratio) across 2-10 pairs at once, sorted from most extreme | Binance native |
+| `binance_set_pair_threshold` | Set a custom funding/basis threshold per pair (overrides the ±0.03%/±0.05% default), stored in Workers KV | Workers KV |
+| `binance_get_pair_threshold` | Check the custom threshold already set for a pair | Workers KV |
+| `binance_get_basis_history` | Time-series basis+funding+OI history (Cron snapshot every 5 min to D1) — always available for the fixed 50-pair watchlist, best-effort for other frequently-queried pairs — detects "basis widens then reverts" without manual repeated checks | D1 + Cron Trigger |
+| `binance_get_orderbook_delta` | 2 order book snapshots ~1-2 seconds apart, compares walls between them for REAL spoofing detection (a wall gone without price actually trading through that level) — unlike `binance_get_order_book_depth`, which is just 1 snapshot | Binance native |
+| `binance_detect_mm_activity` | Score + tier (Weak/Moderate/Strong/Extreme) from 6 MM/whale signals at once (absorption, real 2-snapshot spoofing, symmetric stop-hunt + OI-drop proxy + trade-volume-concentration proxy, basis arbitrage, OI divergence, funding extreme) — replaces 5-6 manual tool calls. Stop-hunt is STILL without real liquidation data (permanently removed), see [Honest limitations](#honest-limitations-you-should-know) | Binance native |
+| `binance_market_regime` | Classifies current market condition: TRENDING_UP/DOWN, RANGING, BREAKOUT, ACCUMULATION, DISTRIBUTION — uses ADX(14), OI trend, CVD, volatility/volume spike ratio | Binance native |
+| `binance_backtest_signal` | Empirically validates `binance_detect_mm_activity` signals: win rate/avg return/max drawdown from D1 signal history (fixed watchlist), forward return computed on-demand from historical klines | D1 + Binance native |
+| `whalescope_backtest_pipeline_decisions` | Tests stored `full_pipeline` decisions in `pipeline_decision_log` (entry-alert Phase 2 + `persist=true`): win rate / avg return / SL-touch by decision (TRADE/WATCH/NO_TRADE) and score bucket (`lt_40` / `40_55` / `gte_55`). Forward return is on-demand from klines — not a precomputed column, not weight auto-tuning | D1 + Binance native |
+| `binance_analyze_smart_money` | Smart money (top trader) vs retail (global account) divergence score from 5 variables: top trader ratio, global account ratio, OI delta, funding rate, orderbook imbalance — condition LONG_LIQUIDATION_RISK/BULLISH_ACCUMULATION/SHORT_SQUEEZE_RISK/NEUTRAL + confidenceScore. Different from `binance_detect_mm_activity` (6 absorption/spoofing/stop-hunt/basis-arb signals) — narrowly focused on top-trader-vs-retail | Binance native |
+| `whalescope_compare_funding_across_exchanges` | Compares funding rate, last price, open interest, and 24h change for one pair across Binance/Bybit/OKX/Hyperliquid, flags divergence — cross-confirms MM detection signals across venues. The only tool that is NOT Binance-only | Binance native + Bybit + OKX + Hyperliquid |
+| `binance_get_tool_catalog` | Lists all tools with category/token-cost/use-case, filterable by category — check this before calling many individual tools. Name+description are auto-pulled from the tool registry (always accurate); category/token-cost stay manual | Semi-automatic |
+| `binance_get_adl_risk` | Auto-Deleveraging risk rating (LOW/MEDIUM/HIGH) per pair, updated every 30 minutes | Binance native |
+| `binance_get_insurance_fund_balance` | Historical snapshot of insurance fund balance per margin asset | Binance native |
+| `binance_get_mark_price_klines` | Candlesticks from MARK PRICE (liquidation/funding reference), not the traded price | Binance native |
+| `binance_get_index_price_klines` | Candlesticks from INDEX PRICE (blended across spot exchanges), the basis for premium index/funding | Binance native |
+| `binance_get_premium_index_klines` | Candlesticks from PREMIUM INDEX (mark vs index price ratio), the main component of the funding rate | Binance native |
+| `binance_get_continuous_klines` | Candlesticks for PERPETUAL/CURRENT_QUARTER/NEXT_QUARTER contracts per underlying pair | Binance native |
+| `binance_get_quarterly_settlement_price` | Historical delivery/settlement price for quarterly contracts (not applicable to perpetuals) | Binance native |
+| `binance_get_composite_index_info` | Base asset composition + weights for a composite index symbol (e.g. BTCDOMUSDT) | Binance native |
+| `binance_get_index_constituents` | List of exchanges+prices+weights making up a pair's index price | Binance native |
+| `whalescope_full_pipeline` | The FULL Futures Grid Bot decision chain (highest-level composite tool): hard screen → Tier-1 intelligence (smart money, MM composite, 1h+4h regime, order book) → Compass-equivalent grid bound calculation (ATR + swing high/low) → EXACT capital-solve against a loss budget (`risk_usd`) per leverage option → TRADE/WATCH/NO_TRADE decision + copy-paste-ready Grid Bot config, for 1-20 symbols at once. `persist=true` (optional) writes a compact row to `pipeline_decision_log` (`source=manual` or `dropstab` + `persist_ref` tab slug). HIGH token cost — see [`docs/full_pipeline_framework.md`](docs/full_pipeline_framework.md) | Binance native |
 
-## Konvensi `detail`: summary vs full (hemat token)
+## The `detail` convention: summary vs full (token efficiency)
 
-Semua tool di atas yang balikin data array/histori (klines, agg trades,
-order book, open interest/funding/basis history, long-short &
-top-trader ratio) punya parameter opsional `detail: "summary" | "full"`,
-default `"summary"`. Ini **satu-satunya perubahan default-behavior yang
-disengaja** di pembaruan token-efficiency 2026-08 — bukan penghapusan
-parameter, cuma default baru:
+Every tool above that returns array/history data (klines, agg trades, order
+book, open interest/funding/basis history, long-short &
+top-trader ratio) has an optional `detail: "summary" | "full"` parameter,
+defaulting to `"summary"`. This is the **only intentional default-behavior
+change** in the 2026-08 token-efficiency update — not a parameter removal,
+just a new default:
 
-- `detail: "summary"` (default) — cuma metrik turunan (bias, tren, CVD,
-  dominance, dst — yang memang sudah dihitung tool-nya) + maksimal 10 poin
-  data terbaru. Ini yang dipakai kalau kamu tidak mengirim `detail` sama
-  sekali, TERMASUK untuk caller lama yang belum tahu param ini ada.
-- `detail: "full"` — array/level mentah penuh, perilaku identik dengan
-  sebelum pembaruan ini.
+- `detail: "summary"` (default) — only derived metrics (bias, trend, CVD,
+  dominance, etc. — whatever the tool already computes internally) + up to
+  10 most recent data points. This is what you get if you don't send
+  `detail` at all, INCLUDING for existing callers that don't know this
+  param exists yet.
+- `detail: "full"` — the full raw array/levels, identical to the
+  pre-update behavior.
 
-Tool composite (`binance_analyze_pair`, `binance_analyze_smart_money`,
+Composite tools (`binance_analyze_pair`, `binance_analyze_smart_money`,
 `binance_detect_mm_activity`, `analyze_futures_grid_risk`,
-`whalescope_full_pipeline`) juga dirapikan: teks dipotong ~8-12 baris,
-`structuredContent` jadi payload utama dengan key lebih pendek/flat, field
-kosong (null/undefined) dibuang. **Tidak ada sinyal/metrik yang hilang** —
-semua tetap reachable via `structuredContent` atau `detail: "full"`.
+`whalescope_full_pipeline`) were also tightened: text capped to ~8-12 lines,
+`structuredContent` is now the primary payload with shorter/flatter keys,
+empty (null/undefined) fields dropped. **No signal or metric was lost** —
+everything stays reachable via `structuredContent` or `detail: "full"`.
 
-Detail lengkap + mapping field yang berganti nama:
+Full details + renamed-field mapping:
 [`docs/tool_response_reference.md`](docs/tool_response_reference.md).
 
-## Framework Analisis: Deteksi Market Maker & Whale
+## Analysis Framework: Market Maker & Whale Detection
 
-Tidak ada tool yang bisa melihat identitas atau posisi spesifik market
-maker (MM)/whale secara langsung — data Binance yang publik memang tidak
-menyediakan itu. Yang bisa dilakukan (dan itulah fungsi framework ini):
-membaca **jejak aktivitas** mereka dengan menggabungkan beberapa tool di
-atas, lalu menghitung skor indikasi dari pola yang muncul.
+No tool can see a market maker (MM)/whale's identity or specific position
+directly — Binance's public data simply doesn't expose that. What this
+framework does instead: read the **footprints** their activity leaves
+behind by combining several of the tools above, then score how strongly
+those patterns line up.
 
-**Empat kategori sinyal yang dideteksi:**
+**Four signal categories detected:**
 
-| Sinyal | Tool utama | Contoh pola |
+| Signal | Main tools | Example pattern |
 |---|---|---|
-| **Absorption** | order book depth, agg trades (futures & spot), open interest | CVD flat/naik tapi harga stagnan = sell pressure sedang diserap (accumulation); OI spike tajam + harga sideways = posisi besar baru dibuka |
-| **Spoofing** | order book depth, `binance_get_orderbook_delta` (2-snapshot) | Wall besar muncul lalu hilang sebelum sempat tereksekusi TANPA harga benar-benar crossing level itu; spread tiba-tiba melebar lalu normal lagi dalam hitungan detik |
-| **Stop hunt** | open interest, agg trades, klines | Wick panjang (arah manapun) + body kecil candle reversal, dibantu OI-drop proxy + konsentrasi trade agresif per harga — TETAP tanpa konfirmasi liquidation riil (dihapus permanen, lihat Kekurangan) |
-| **Basis arbitrage** | spot price, funding rate, open interest | Basis spot-futures melebar lalu kembali cepat; funding ekstrem + OI naik (indikasi hedge short futures / long spot) |
+| **Absorption** | order book depth, agg trades (futures & spot), open interest | CVD flat/rising while price stalls = sell pressure being absorbed (accumulation); sharp OI spike + sideways price = a large position just opened |
+| **Spoofing** | order book depth, `binance_get_orderbook_delta` (2-snapshot) | A large wall appears then disappears before it's ever filled without price actually trading through it; spread suddenly widens then normalizes within seconds |
+| **Stop hunt** | open interest, agg trades, klines | A long wick (either direction) + small body reversal candle, boosted by an OI-drop proxy + aggressive trade-price concentration proxy — still no real liquidation confirmation (permanently removed, see Weaknesses) |
+| **Basis arbitrage** | spot price, funding rate, open interest | Spot-futures basis widens then quickly reverts; extreme funding + rising OI (suggests a short-futures/long-spot hedge) |
 
-**Rule of thumb:** kalau **≥3 sinyal align** dalam timeframe yang sama,
-indikasi aktivitas MM cukup kuat untuk ditindaklanjuti — ini heuristik
-checklist (lihat tier confidence di dokumen lengkap), **bukan** probabilitas
-yang terkalibrasi secara statistik.
+**Rule of thumb:** if **≥3 signals align** within the same timeframe, the
+indication of MM activity is strong enough to act on — this is a checklist
+heuristic (see the confidence tiers in the full document), **not** a
+statistically calibrated probability.
 
-Dokumen lengkap: [`docs/mm_detection_framework.md`](docs/mm_detection_framework.md)
-(v4, final) — berisi kriteria detail tiap sinyal, workflow step-by-step,
-checklist live, dan mapping tool → sinyal.
+Full document: [`docs/mm_detection_framework.md`](docs/mm_detection_framework.md)
+(v4, final) — contains detailed criteria per signal, a step-by-step
+workflow, a live checklist, and a tool → signal mapping.
 
 ## Framework: Full Pipeline Grid Bot (`whalescope_full_pipeline`)
 
-Tool composite tertinggi di repo ini — menjalankan SELURUH decision chain
-Grid Bot Futures dalam satu tool call, untuk satu atau banyak symbol
-sekaligus (maks 20 per call), menggantikan ~8 tool call manual
+The highest-level composite tool in this repo — runs the ENTIRE Futures
+Grid Bot decision chain in a single tool call, for one or many symbols at
+once (max 20 per call), replacing ~8 manual tool calls
 (`binance_market_regime` ×2, `binance_analyze_smart_money`,
 `binance_detect_mm_activity`, `binance_get_order_book_imbalance`,
-`analyze_futures_grid_risk`, dst.) plus kalkulasi bound grid yang
-sebelumnya tidak ada tool-nya sama sekali.
+`analyze_futures_grid_risk`, etc.) plus grid-bound math that previously had
+no tool at all.
 
-**Tahapan (2-wave fetch, reject-early):**
+**Stages (2-wave fetch, reject-early):**
 
 ```
 ┌───────────────────────────────────────────────────────────────┐
-│ WAVE 1 (semua symbol, paralel): ticker24hr, funding, klines    │
-│ 1h+4h, OI+histori, agg trades, market context                  │
+│ WAVE 1 (all symbols, parallel): ticker24hr, funding, 1h+4h      │
+│ klines, OI+history, agg trades, market context                  │
 ├───────────────────────────────────────────────────────────────┤
-│ HARD SCREEN: tradable? volume >= minimum? |funding| <= maks?   │
+│ HARD SCREEN: tradable? volume >= minimum? |funding| <= max?     │
 │ regime 1h/4h != BREAKOUT?                                       │
-│   → GAGAL = NO_TRADE, Wave 2 TIDAK PERNAH DIPANGGIL             │
+│   → FAIL = NO_TRADE, WAVE 2 IS NEVER CALLED                     │
 ├───────────────────────────────────────────────────────────────┤
-│ WAVE 2 (survivor saja, paralel): top-trader ratio, global      │
-│ account ratio, OI histori 24 titik, order book depth 50        │
+│ WAVE 2 (survivors only, parallel): top-trader ratio, global     │
+│ account ratio, 24-point OI history, depth-50 order book         │
 ├───────────────────────────────────────────────────────────────┤
-│ TIER-1 SCORING: smart money divergence + 6 skor MM composite   │
-│ + order book imbalance + CVD + regime → rankingScore 0-100     │
+│ TIER-1 SCORING: smart money divergence + 6 MM composite scores  │
+│ + order book imbalance + CVD + regime → rankingScore 0-100      │
 ├───────────────────────────────────────────────────────────────┤
-│ GRID BOUNDS (Compass-equivalent): ATR + swing high/low →       │
-│ upper/lower/SL/TP/gridCount/gridType                            │
+│ GRID BOUNDS (Compass-equivalent): ATR + swing high/low →        │
+│ upper/lower/SL/TP/gridCount/gridType                             │
 ├───────────────────────────────────────────────────────────────┤
-│ CAPITAL SOLVE: exact (bukan iteratif) per opsi leverage, pilih  │
-│ leverage tertinggi SAFE/MODERATE dengan likuidasi aman          │
+│ CAPITAL SOLVE: exact (not iterative) per leverage option, picks │
+│ the highest leverage that's SAFE/MODERATE with safe liquidation │
 ├───────────────────────────────────────────────────────────────┤
-│ KEPUTUSAN: TRADE / WATCH / NO_TRADE + Grid Bot config siap-pakai│
+│ DECISION: TRADE / WATCH / NO_TRADE + ready-to-use Grid Bot config│
 └───────────────────────────────────────────────────────────────┘
 ```
 
-Dokumen lengkap (stage-by-stage, worked example, Known Limitations):
+Full document (stage-by-stage, worked example, Known Limitations):
 [`docs/full_pipeline_framework.md`](docs/full_pipeline_framework.md).
 
-### Hasil Validasi Empiris
+### Empirical Validation Results
 
-Setiap klaim teknis di framework ini divalidasi langsung ke worker deployed
-(bukan asumsi) sebelum masuk versi final. Beberapa temuan yang mengoreksi
-asumsi awal:
+Every technical claim in this framework was validated directly against the
+deployed worker (not assumed) before making it into the final version. A
+few findings that corrected the original assumptions:
 
-| Klaim awal | Hasil validasi |
+| Original claim | Validation result |
 |---|---|
-| Polling <500ms buat deteksi refresh-rate spoofing | ❌ Latency riil 298-898ms/call (rata-rata ~485ms) lewat proxy chain worker→Vercel→Binance — tidak reliable buat itu |
-| Threshold divergence top-trader ratio universal (flat >15% atau tiered 3-15%) | ❌ Tidak pernah trigger — pergerakan riil 4 pair yang dites (SOLUSDT, BNBUSDT, LINKUSDT, AVAXUSDT) dalam window 2 jam cuma 0.40-2.35 poin, jauh di bawah threshold manapun |
-| Retensi historis top-trader ratio "30-90 hari" | ⚠️ Dikoreksi — 90 hari tidak tersedia sama sekali dari Binance; 30 hari cuma di resolusi kasar (4h/1d), resolusi 15 menit cuma ~5 hari ke belakang |
-| Kondisi pasar tenang (BTCUSDT) tidak over-trigger | ✅ Terkonfirmasi — skor ~1-1.5/6 (tier Weak) saat pasar sideways, framework tidak salah alarm di kondisi normal |
+| <500ms polling for refresh-rate spoofing detection | ❌ Real latency is 298-898ms/call (avg ~485ms) through the worker→Vercel→Binance proxy chain — not reliable for that |
+| Universal top-trader ratio divergence threshold (flat >15% or tiered 3-15%) | ❌ Never triggered — real movement across the 4 pairs tested (SOLUSDT, BNBUSDT, LINKUSDT, AVAXUSDT) over a 2-hour window was only 0.40-2.35 points, far below either threshold |
+| Top-trader ratio historical retention "30-90 days" | ⚠️ Corrected — 90 days isn't available from Binance at all; 30 days only at coarse resolution (4h/1d), 15-minute resolution goes back only ~5 days |
+| Calm-market conditions (BTCUSDT) don't over-trigger | ✅ Confirmed — score ~1-1.5/6 (Weak tier) during sideways market, no false alarms under normal conditions |
 
-Detail penuh (termasuk raw data test per klaim): Section 10,
-[`docs/mm_detection_framework.md`](docs/mm_detection_framework.md#10-validasi-empiris).
+Full detail (including raw test data per claim): Section 10,
+[`docs/mm_detection_framework.md`](docs/mm_detection_framework.md#10-empirical-validation).
 
-## Keterbatasan yang jujur perlu diketahui
+## Honest limitations you should know
 
-- **Long/short ratio (`binance_get_long_short_ratio`) adalah rasio agregat
-  BLENDED**, bukan breakdown terpisah "global account (retail)" vs "top
-  trader (whale)". Untuk breakdown murni top-trader, pakai
-  `binance_get_top_trader_ratio` (sudah native Binance, terpisah dari tool
-  ini).
-- **Basis funding rate bisa noisy untuk pair kecil/baru listing** — index
-  price Binance adalah rata-rata tertimbang dari beberapa exchange spot,
-  salah satunya bisa illikuid untuk pair semacam itu.
-- **Order book depth (`binance_get_order_book_depth`) adalah snapshot
-  sesaat** — wall besar bisa hilang dalam hitungan detik (potensi
-  spoofing), jangan overinterpretasi satu snapshot. Untuk deteksi spoofing
-  RIIL (2-snapshot), pakai `binance_get_orderbook_delta` atau
-  `binance_detect_mm_activity` (lihat di bawah).
-- **Threshold "top trader" tidak dipublikasikan Binance secara pasti**, dan
-  datanya snapshot periodik, bukan real-time tick-by-tick.
-- Data histori OI (`binance_get_open_interest_history`) dibatasi retensi
-  endpoint resmi Binance (`/futures/data/openInterestHist`), cek langsung
-  kalau butuh rentang panjang.
-- Tidak ada data wallet on-chain.
-- **Liquidation cuma near-real-time + SAMPLED, tidak ada histori panjang.**
-  `binance_get_realtime_liquidations` baca buffer 24 jam dari stream gateway
-  VPS AWS (`!forceOrder@arr` via `dstream.binance.com` — `fstream.binance.com`
-  di-black-hole dari IP Oracle lama; produksi = AWS ap-southeast-1).
-  Binance throttle 1 event/symbol/detik → sampel,
-  bukan lengkap. Tidak ada REST publik market-wide buat backfill historis.
-  Worker Cloudflare sendiri masih tidak bisa WS langsung ke Binance (WAF).
-- **`binance_detect_mm_activity`: spoofing sekarang 2-snapshot RIIL**
-  (~1-2 detik lebih lambat dari tool lain karenanya, jeda eksplisit 1500ms
-  antar 2 fetch — lihat `binance_get_orderbook_delta`), bukan heuristik
-  1-snapshot lagi. **Stop-hunt sekarang simetris** (cek upper DAN lower
-  wick, dulu cuma upper — bug lama) **+ 2 proxy independen** (reuse fetch
-  yang sudah ada, bukan fetch baru): OI turun >=2% berbarengan sama wick
-  candle, dan/atau volume trade agresif >=30% terkonsentrasi tepat di zona
-  harga wick itu (dari 100 aggTrades terakhir, sama data yang dipakai
-  CVD). Confidence naik bertahap: 0 proxy aktif = base, 1 proxy = lebih
-  tinggi, 2 proxy sekaligus = tertinggi — TETAP TANPA data
-  liquidation-by-price riil (permanen, lihat poin di atas). Confidence
-  stop-hunt masih lebih rendah dari sinyal lain di tool yang sama —
-  dicatat di evidence text tiap response.
-- **`binance_market_regime`: spike volatilitas/volume dihitung relatif ke
-  window fetch yang sama** (10 candle terakhir vs 10 sebelumnya), bukan
-  baseline historis jangka panjang.
-- **Time-series D1 (`market_snapshots`, dibaca `binance_get_basis_history`)
-  SELALU tersedia untuk watchlist tetap 50 pair, best-effort untuk pair
-  lain** — pair non-watchlist dapat histori kalau di-query >=3x dalam ~24
-  jam DAN masuk top-5 pair non-watchlist paling sering di-query (KV
-  counter, `src/queryFrequency.ts`), cron 5 menit baru snapshot pair itu
-  setelah kondisi terpenuhi. `signal_history` (dibaca
-  `binance_backtest_signal`) TETAP watchlist-only, tidak ikut diperluas.
-- **Pair futures-only (HYPEUSDT, 1000PEPEUSDT, PUMPUSDT, dst.) — `spot_price`
-  & `basis` NULL di `market_snapshots`** karena tidak listed di Binance Spot.
-  Funding rate & Open Interest tetap tercatat normal; cuma kolom basis yang
-  kosong buat pair semacam itu.
-- **Belum ada pruning/retention buat row D1** — row nambah terus tanpa batas
-  seiring waktu (di 50 pair x ~6.048 row/hari gabungan kedua tabel, D1 free
-  tier 5 juta write/hari & 5GB storage masih longgar untuk waktu yang lama,
-  tapi ini bukan solusi permanen).
-- **Migrasi KV→D1 (basis history) TIDAK backfill data lama** — histori basis
-  yang sempat tersimpan di Workers KV sebelum migrasi ini hilang, window 24
-  jam baru keisi ulang natural beberapa jam setelah deploy.
-- **`binance_backtest_signal`: forward return DIHITUNG ON-DEMAND dari klines
-  historis** (close candle 1h terdekat ke waktu target), BUKAN simulasi
-  eksekusi order riil — slippage/fee/partial fill tidak dihitung. Sample
-  size kecil (di bawah ~20 sinyal) berarti confidence rendah, jangan
-  simpulkan sinyal "reliable" dari sedikit data historis (baru mulai
-  terkumpul dari kapan fitur ini deploy, bukan retroaktif).
+- **The long/short ratio (`binance_get_long_short_ratio`) is a BLENDED
+  aggregate ratio**, not a separate breakdown of "global account (retail)"
+  vs "top trader (whale)". For a pure top-trader breakdown, use
+  `binance_get_top_trader_ratio` (already native Binance, separate from
+  this tool).
+- **Funding rate basis can be noisy for small/newly-listed pairs** —
+  Binance's index price is a weighted average across several spot
+  exchanges, and one of them can be illiquid for such pairs.
+- **Order book depth (`binance_get_order_book_depth`) is a point-in-time
+  snapshot** — a large wall can disappear within seconds (potential
+  spoofing); don't over-interpret a single snapshot. For REAL spoofing
+  detection (2-snapshot), use `binance_get_orderbook_delta` or
+  `binance_detect_mm_activity` (see below).
+- **The "top trader" threshold is not precisely published by Binance**,
+  and the data is a periodic snapshot, not real-time tick-by-tick.
+- OI history data (`binance_get_open_interest_history`) is limited by the
+  retention of Binance's official endpoint
+  (`/futures/data/openInterestHist`); check directly if you need a long
+  range.
+- No on-chain wallet data.
+- **Liquidations are near-real-time + SAMPLED, with no long history.**
+  `binance_get_realtime_liquidations` reads a 24h buffer from the VPS stream
+  gateway (AWS VPS — `!forceOrder@arr` via `dstream.binance.com`; `fstream`
+  black-hole was Oracle-IP-specific, production = AWS ap-southeast-1).
+  Binance throttles to 1 event/symbol/second
+  → a sample, not every liquidation. No public market-wide REST endpoint for
+  a historical backfill. The Cloudflare Worker itself still can't open a WS
+  to Binance directly (WAF).
+- **`binance_detect_mm_activity`: spoofing is now REAL 2-snapshot
+  detection** (~1-2 seconds slower because of it, explicit 1500ms gap
+  between the 2 fetches — see `binance_get_orderbook_delta`), no longer a
+  1-snapshot heuristic. **Stop-hunt is now symmetric** (checks both upper
+  AND lower wick, used to only check upper — a bug) **+ 2 independent
+  proxies** (reuse existing fetches, no new calls): OI dropping >=2%
+  coinciding with the wick candle, and/or aggressive trade volume >=30%
+  concentrated right in the wick's price zone (from the last 100
+  aggTrades, the same data already used for CVD). Confidence scales with
+  how many proxies confirm: 0 active = base, 1 = higher, both at once =
+  highest — STILL WITHOUT real liquidation-by-price data (permanent, see
+  the point above). Stop-hunt confidence is still lower than the other
+  signals in the same tool — noted in the evidence text of every
+  response.
+- **`binance_market_regime`: volatility/volume spike ratios are computed
+  relative to the same fetch window** (last 10 candles vs the prior 10),
+  not a long-term historical baseline.
+- **D1 time-series (`market_snapshots`, read by `binance_get_basis_history`)
+  is ALWAYS available for the fixed 50-pair watchlist, best-effort for
+  other pairs** — a non-watchlist pair gets history once it's queried >=3
+  times within ~24h AND ranks in the top-5 most-queried non-watchlist pairs
+  (KV counter, `src/queryFrequency.ts`); the 5-minute cron only snapshots
+  it once that condition is met. `signal_history` (read by
+  `binance_backtest_signal`) remains watchlist-only, not extended.
+- **Futures-only pairs (HYPEUSDT, 1000PEPEUSDT, PUMPUSDT, …) — `spot_price`
+  & `basis` are NULL in `market_snapshots`** because they aren't listed on
+  Binance Spot. Funding rate & Open Interest are still recorded normally;
+  only the basis columns are empty for those pairs.
+- **No pruning/retention for D1 rows yet** — rows grow unbounded over time
+  (at 50 pairs, D1's free tier of 5M writes/day and 5GB storage has
+  headroom for a long while, but this isn't a permanent solution).
+- **The KV→D1 basis-history migration does NOT backfill old data** — basis
+  history that was stored in Workers KV before this migration is gone; the
+  24-hour window refills naturally a few hours after deploy.
+- **CVD in `whalescope_full_pipeline` comes from the LAST 100 aggTrades, not
+  a time window** — `getAggTrades(symbol, 100)` takes the last 100 trades as
+  they come. On very liquid pairs that can be as little as **2-10 seconds of
+  tape**, not a picture of an hour of order flow. Since Stage 3 (2026-09-04)
+  the sample width is measured (`cvdSampleSeconds`) and the buy-pressure
+  component is **pulled toward neutral** when the sample is too narrow
+  (`< 10 s` = not trusted at all, `>= 60 s` = fully trusted, linear in
+  between). A genuinely time-based window would need `aggTradesPaginator` —
+  measured at **~115 pages per 60 minutes** on BTCUSDT, so it is not used in
+  the 40-symbol cron because it would trigger a weight ban immediately. The
+  10 s / 60 s thresholds are **not yet calibrated**.
+- **MM sub-scores are split by the DIRECTION of their influence (since Stage
+  3)** — `absorption` + `oiDivergence` SUPPORT a long grid and raise the
+  score; `spoofing` + `stopHunt` + `fundingExtreme` + `basisArb` raise RISK
+  and **subtract** from it. Previously all six were summed into a single
+  positive component weighted 35%, so the more manipulation was detected the
+  higher a pair ranked. The penalty weight (`MM_ADVERSE_PENALTY_WEIGHT`) is
+  **not yet calibrated**.
+- **All indicators are computed from CLOSED candles only (since Stage 3)** —
+  `dropUnclosedKlines()` drops the in-progress candle at the fetch boundary.
+  Previously ADX/ATR/realized-vol/volume-spike/grid-bounds/sweep read a
+  half-formed candle, which made regime classification depend on **which
+  minute the cron happened to run** (:07 vs :52). The trade-off is that a
+  signal is delayed by at most one candle, in exchange for no repaint.
+  `currentPrice` stays real-time (mark price).
+- **`binance_backtest_signal`: forward returns are computed ON-DEMAND from
+  historical klines** (nearest 1h candle close to the target time), NOT a
+  simulation of real order execution — slippage/fees/partial fills aren't
+  accounted for. Small sample sizes (under ~20 signals) mean low
+  confidence — don't conclude a signal is "reliable" from little historical
+  data (data only starts accumulating from when this feature was deployed,
+  not retroactively).
 - **`pipeline_decision_log` + `whalescope_backtest_pipeline_decisions`:**
-  keputusan per-symbol Phase 2 entry-alert (dan `persist=true`) disimpan
-  compact 90 hari. Forward return / SL-touch dihitung on-demand dari
-  klines — **bukan** precompute, **bukan** auto-tune bobot 35/30/20/15
-  atau threshold 55. `entry_alert_skip_log` retensi 30 hari.
-- **`whalescope_compare_funding_across_exchanges`: Open Interest belum
-  divalidasi silang ke data live** antar 4 exchange (SEHARUSNYA base-asset
-  di semua exchange termasuk OKX yang pakai field `oiCcy`, tapi belum ada
-  pengecekan langsung — cek ulang kalau angkanya kelihatan janggal). Symbol
-  mapping Binance→exchange lain best-effort (strip suffix USDT) — pair
-  kecil yang gak listed di Bybit/OKX/Hyperliquid bakal muncul "gagal" di
-  baris itu, bukan bikin tool call gagal total.
-- **Rate limit self-throttle ke proxy Binance itu best-effort, BUKAN hard
-  global limiter** — counter in-memory per-isolate (`src/rateLimiter.ts`),
-  efektif SELAMA isolate yang sama dipakai ulang buat request beruntun,
-  TAPI worker ini stateless per-request jadi bukan jaminan keras
-  cross-isolate. Threshold 200 request/menit, count-based (bukan
-  weight-based per-endpoint kayak limit asli Binance).
-- **`binance_get_tool_catalog` SEMI-otomatis** — nama+description SELALU
-  akurat (ditarik dari tool registry, gak pernah basi/ketinggalan). Tapi
-  category/token-cost/dependencies TETAP manual (`CATALOG_METADATA` di
-  `src/tools/catalog.ts`) — tool baru yang belum di-curated bakal muncul
-  dengan category `"uncategorized"`, tetap kelihatan (gak ke-omit diam-diam)
-  tapi belum ter-kategorisasi rapi.
-- **`binance_analyze_smart_money` pakai threshold FIXED** (bukan hasil
-  kalibrasi statistik per-pair) — lihat Section 4.2 & 12 di
-  `docs/mm_detection_framework.md` untuk kenapa threshold absolut pada
-  top-trader ratio harus dipakai hati-hati. `confidenceScore` output-nya
-  mengukur margin di atas threshold, BUKAN probabilitas statistik
-  terkalibrasi.
+  per-symbol Phase 2 entry-alert decisions (and `persist=true`) are stored
+  compactly for 90 days. Forward return / SL-touch are computed on-demand
+  from klines — **not** precomputed, **not** auto-tuning the 35/30/20/15
+  weights or the 55 threshold. `entry_alert_skip_log` retention is 30 days.
+- **`whalescope_compare_funding_across_exchanges`: Open Interest hasn't
+  been cross-validated against live data** across the 4 exchanges (SHOULD
+  be base-asset denominated on all of them, including OKX which uses the
+  `oiCcy` field, but no direct check has been done yet — double-check if
+  the numbers look off). Binance→other-exchange symbol mapping is
+  best-effort (strips the USDT suffix) — a pair not listed on
+  Bybit/OKX/Hyperliquid shows as "failed" on that row instead of failing
+  the whole tool call.
+- **The Binance-proxy rate-limit self-throttle is best-effort, NOT a hard
+  global limiter** — an in-memory per-isolate counter
+  (`src/rateLimiter.ts`), effective as long as the same isolate handles
+  consecutive requests, but this worker is stateless per-request so it's
+  not a hard cross-isolate guarantee. Threshold is 200 requests/minute,
+  count-based (not weight-based per endpoint like Binance's actual limit).
+- **`binance_get_tool_catalog` is semi-automatic** — name+description are
+  ALWAYS accurate (pulled from the tool registry, never stale or missed).
+  But category/token-cost/dependencies stay manual (`CATALOG_METADATA` in
+  `src/tools/catalog.ts`) — a new tool not yet curated shows up with
+  category `"uncategorized"`, still visible (never silently omitted) but
+  not neatly categorized yet.
+- **`binance_analyze_smart_money` uses FIXED thresholds** (not the result
+  of per-pair statistical calibration) — see Section 4.2 & 12 of
+  `docs/mm_detection_framework.md` for why absolute thresholds on the
+  top-trader ratio need to be used carefully. Its `confidenceScore` output
+  measures margin past threshold, NOT a calibrated statistical probability.
 
-## Setup Proxy Relay (wajib, sekali saja)
+## Setup: Proxy Relay (required, one-time)
 
-Tool berlabel "Binance native" di tabel atas butuh proxy relay, karena
-worker Cloudflare diblokir langsung oleh WAF Binance. Jalur utama sekarang
-adalah **`proxy-standalone/`** (deploy ke VPS / Fly.io / Deno Deploy /
-Render — zero-dependency, satu file `handler.mjs`). Detail lengkap +
-opsi hosting ada di [`proxy-standalone/README.md`](proxy-standalone/README.md).
+Tools labeled "Binance native" in the table above need a relay proxy,
+because the Cloudflare Worker is blocked directly by Binance's WAF. The
+current path is **`proxy-standalone/`** (deploy to a VPS / Fly.io / Deno
+Deploy / Render — zero-dependency, one file `handler.mjs`). Full details +
+hosting options are in
+[`proxy-standalone/README.md`](proxy-standalone/README.md).
 
-> **Catatan historis:** relay awal proyek ini adalah project Vercel di
-> `proxy/`. Vercel mem-*pause*-nya untuk commercial-use di Hobby plan, jadi
-> `proxy/` **sudah retired** — jangan dipakai untuk setup baru. `proxy/` dan
-> `PROXY_URL` pointing ke Vercel masih jalan secara kode kalau kamu sudah
-> punya, tapi bukan jalur yang didukung.
+> **Historical note:** this project's original relay was a Vercel project in
+> `proxy/`. Vercel paused it for commercial use on the Hobby plan, so
+> `proxy/` is **retired** — do not use it for a new setup. `proxy/` and a
+> `PROXY_URL` still pointing at Vercel keep working code-wise if you already
+> have them, but it is not the supported path.
 
-Ringkasnya:
+In short:
 
-1. Deploy `proxy-standalone/` ke salah satu host di
-   [`proxy-standalone/README.md`](proxy-standalone/README.md) (pilih region
-   Singapore/Tokyo — hindari `us-*`). Set env `PROXY_SECRET` di host itu
-   (string acak, misal `openssl rand -hex 32`).
-2. Set dua secret ini di worker Cloudflare:
+1. Deploy `proxy-standalone/` to one of the hosts in
+   [`proxy-standalone/README.md`](proxy-standalone/README.md) (pick a
+   Singapore/Tokyo region — avoid `us-*`). Set `PROXY_SECRET` on that host
+   (a random string, e.g. `openssl rand -hex 32`).
+2. Set these two secrets on the Cloudflare worker:
    ```bash
    npx wrangler secret put PROXY_URL
    npx wrangler secret put PROXY_SECRET
    ```
-   `PROXY_URL` = URL relay yang barusan di-deploy, `PROXY_SECRET` = string
-   yang sama persis dengan yang di-set di host relay.
+   `PROXY_URL` = the relay URL you just deployed, `PROXY_SECRET` = the exact
+   same string set on the relay host.
 
-Tanpa dua secret ini, tool berlabel "Binance native" akan gagal dengan pesan
-error yang jelas ("PROXY_URL atau PROXY_SECRET belum diset di worker").
+Without these two secrets, tools labeled "Binance native" will fail with a
+clear error message ("PROXY_URL atau PROXY_SECRET belum diset di worker").
 
-**Penting**: jangan pernah buat secret Cloudflare dengan VALUE sebagai NAME
-(misal `wrangler secret put` lalu tidak sengaja paste value di prompt nama).
-`wrangler secret list` hanya boleh membocorkan nama secret, tidak pernah
-value — kesalahan ini membuat value asli bocor lewat command yang seharusnya
-aman.
+**Important**: never create a Cloudflare secret with the VALUE as the NAME
+(e.g. running `wrangler secret put` and accidentally pasting the value at
+the name prompt). `wrangler secret list` should only ever leak secret
+*names*, never values — this mistake leaks the real value through a
+command that's supposed to be safe.
 
-### Proxy sekunder / failover (opsional)
+### Secondary / failover proxy (optional)
 
-Kalau proxy primary kena WAF block/rate-limit/5xx, worker otomatis coba
-proxy sekunder — TAPI cuma kalau dikonfigurasi. Tanpa ini, perilaku persis
-sama seperti sebelumnya (1 proxy, error langsung dilempar kalau gagal).
-Ini juga mitigasi weight-ban IP tunggal: kalau SEMUA traffic Binance keluar
-dari 1 IP relay, sekali kena `-1003` (HTTP 418) semua tool ikut kena.
+If the primary proxy hits a WAF block/rate-limit/5xx, the worker
+automatically tries a secondary proxy — but only if one is configured.
+Without it, behavior is identical to before (single proxy, error thrown
+immediately on failure).
 
-1. Deploy instance `proxy-standalone/` KEDUA di host BEDA (IP beda — Fly.io
-   region lain, Deno Deploy, atau VPS kedua; **bukan** Vercel) dengan
-   `PROXY_SECRET` sendiri (boleh beda dari primary).
-2. Set dua secret tambahan:
+This also mitigates single-IP weight bans: if ALL Binance traffic egresses
+one relay IP, a single `-1003` (HTTP 418) takes every tool down with it.
+
+1. Deploy a SECOND `proxy-standalone/` instance on a DIFFERENT host (a
+   different IP — another Fly.io region, Deno Deploy, or a second VPS; **not**
+   Vercel) with its own `PROXY_SECRET` (can differ from the primary).
+2. Set two additional secrets:
    ```bash
    npx wrangler secret put PROXY_URL_2
    npx wrangler secret put PROXY_SECRET_2
    ```
 
-Failover cuma jalan untuk error yang berkaitan sama kesehatan/kredensial
-tier (401 secret salah, 403 WAF block, 429 rate limit, 5xx) — bukan buat
-error request genuinely (400 symbol salah, 404) yang bakal gagal identik
-di tier manapun. 401 SENGAJA termasuk (beda dari versi sebelumnya) karena
-tiap tier proxy punya secret SENDIRI — primary salah bukan berarti
-secondary juga salah.
+Failover only triggers for errors related to tier health/credentials (401
+wrong secret, 403 WAF block, 429 rate limit, 5xx) — not for genuine request
+errors (400 bad symbol, 404), which would fail identically on any tier.
+401 is INTENTIONALLY included (a change from the earlier version) because
+each proxy tier has its OWN secret — a wrong primary secret doesn't mean
+the secondary's is wrong too.
 
-### Direct fallback (tier terakhir, otomatis ON)
+### Direct fallback (last-resort tier, automatically ON)
 
-Kalau primary DAN secondary (kalau dikonfigurasi) sama-sama gagal, worker
-otomatis coba langsung ke `fapi.binance.com`/`api.binance.com` TANPA proxy
-sama sekali sebagai last-resort. Tidak butuh setup apapun (default ON) --
-set `DISABLE_DIRECT_FALLBACK=true` di environment variable worker (bukan
-secret, plain var biasa) kalau mau matikan. Lihat komentar "DIRECT
-FALLBACK" di `src/binanceProxyClient.ts` untuk detail & catatan jujur soal
-kenapa tier ini kemungkinan besar tetap kena WAF block di kondisi produksi
-saat ini (worker Cloudflare ini SUDAH TERBUKTI diblokir Binance secara
-langsung) -- tetap berguna untuk `wrangler dev` lokal (IP pool beda dari
-edge Cloudflare produksi) dan sebagai jaring pengaman kalau kebijakan block
-berubah.
+If primary AND secondary (if configured) both fail, the worker
+automatically tries hitting `fapi.binance.com`/`api.binance.com` directly,
+with no proxy at all, as a last resort. No setup needed (ON by default) --
+set `DISABLE_DIRECT_FALLBACK=true` as a worker environment variable (a
+plain var, not a secret) to turn it off. See the "DIRECT FALLBACK" comment
+in `src/binanceProxyClient.ts` for details and an honest note on why this
+tier will likely still hit the WAF block in current production conditions
+(this Cloudflare Worker is ALREADY CONFIRMED to be blocked by Binance
+directly) -- it's still useful for local `wrangler dev` (different IP pool
+than the production Cloudflare edge) and as a safety net if the block
+policy ever changes.
 
-## Setup Workers KV (wajib, sekali saja — kalau fork/deploy repo ini sendiri)
+## Setup: Workers KV (required, one-time — if you fork/deploy this repo yourself)
 
-`id` KV namespace di `wrangler.toml` repo ini terikat ke akun Cloudflare
-yang bikin — kalau kamu fork/clone dan deploy ke akun sendiri, wajib bikin
-namespace baru:
+The KV namespace `id` in this repo's `wrangler.toml` is tied to the
+Cloudflare account that created it — if you fork/clone and deploy to your
+own account, you must create a new namespace:
 
 ```bash
 npx wrangler kv namespace create WHALESCOPE_CONFIG
 ```
 
-Copy `id` yang muncul ke `[[kv_namespaces]]` di `wrangler.toml`, ganti value
-`id` yang lama (binding-nya biarkan tetap `CONFIG_KV`, kode worker rujuk
-nama binding itu, bukan id). Tanpa ini, `binance_set_pair_threshold` dan
-`binance_get_pair_threshold` akan gagal dengan error jelas ("CONFIG_KV
-belum ke-bind di worker").
+Copy the resulting `id` into `[[kv_namespaces]]` in `wrangler.toml`,
+replacing the old `id` value (leave the binding name as `CONFIG_KV` — the
+worker code refers to that binding name, not the id). Without this,
+`binance_set_pair_threshold` and `binance_get_pair_threshold` will fail
+with a clear error ("CONFIG_KV belum ke-bind di worker").
 
-## Setup Workers D1 (wajib, sekali saja — kalau fork/deploy repo ini sendiri)
+## Setup: Workers D1 (required, one-time — if you fork/deploy this repo yourself)
 
-Sama seperti KV di atas, `database_id` D1 di `wrangler.toml` repo ini
-terikat ke akun Cloudflare yang bikin. Kalau fork/deploy ke akun sendiri:
+Same as KV above, the D1 `database_id` in this repo's `wrangler.toml` is
+tied to the Cloudflare account that created it. If you fork/deploy to your
+own account:
 
 ```bash
 npx wrangler d1 create binance-future-hunter-db
 ```
 
-Copy `database_id` yang muncul ke `[[d1_databases]]` di `wrangler.toml`
-(binding biarkan tetap `DB`), lalu jalankan migration:
+Copy the resulting `database_id` into `[[d1_databases]]` in
+`wrangler.toml` (leave the binding as `DB`), then run the migration:
 
 ```bash
 npx wrangler d1 migrations apply binance-future-hunter-db --remote
 ```
 
-Tanpa ini, `binance_get_basis_history` dan `binance_backtest_signal` akan
-gagal dengan error jelas ("D1 database (binding DB) belum ke-bind di
-worker"), dan Cron Trigger snapshot basis+sinyal MM (tiap 5 menit) akan
-gagal silent tiap tick (ke-log ke Workers Logs, tidak menggagalkan endpoint
-`/mcp` lain).
+Without this, `binance_get_basis_history` and `binance_backtest_signal`
+will fail with a clear error ("D1 database (binding DB) belum ke-bind di
+worker"), and the basis+MM-signal Cron Trigger (every 5 min) will fail
+silently each tick (logged to Workers Logs, doesn't break the `/mcp`
+endpoint).
 
-## Admin: Usage Log (OPSIONAL)
+## Admin: Usage Log (OPTIONAL)
 
-Worker publik gampang ditemuin (terdaftar di [MCP Server Registry](https://registry.modelcontextprotocol.io/))
-— jadi ada endpoint kecil buat liat siapa aja yang connect. **Ini BUKAN
-MCP tool** (sengaja HTTP endpoint terpisah, gak pernah muncul di
-`tools/list`) — kalau dibikin tool biasa, SIAPA AJA yang connect ke server
-ini bisa liat IP visitor lain, kontradiksi sama tujuannya.
+A public worker is easy to find (listed on the [MCP Server Registry](https://registry.modelcontextprotocol.io/))
+-- so there's a small endpoint to see who's connecting. **This is NOT an
+MCP tool** (deliberately a separate HTTP endpoint, never shows up in
+`tools/list`) -- if it were a regular tool, ANYONE connected to this
+server could see other visitors' IPs, which defeats the purpose.
 
-1. Set secret (tanpa ini, endpoint SELALU balik 403 — fitur nonaktif by
-   default, aman):
+1. Set the secret (without it, the endpoint always returns 403 -- the
+   feature is off by default, safe):
    ```bash
    npx wrangler secret put ADMIN_SECRET
    ```
-2. Akses:
+2. Access it:
    ```bash
    curl "https://<worker-url>/admin/usage?key=<ADMIN_SECRET>&hours=24"
    ```
-   Balikin JSON: total request, jumlah IP unik, top 20 IP (+ negara,
-   count), 20 request terakhir mentah. Default window 24 jam, bisa
-   diubah lewat `hours`.
+   Returns JSON: total requests, distinct IP count, top 20 IPs (with
+   country + count), and the last 20 raw requests. Default window is 24
+   hours, adjustable via `hours`.
+
+Data is stored in D1 (`request_log`), auto-pruned every Cron tick for
+rows older than 30 days (unlike `market_snapshots`/`signal_history`,
+this table isn't bounded by the fixed watchlist, so it can grow if there's
+real outside traffic).
 
 ## Monitoring & Alerting
 
-Backend ini punya beberapa titik gagal diam-diam (proxy relay mati, WS
-stream gateway putus, Cron Trigger di-Cancel platform). Yang ada sekarang,
-semua lewat **Telegram** (butuh `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`
-di-set — kalau tidak, alert cuma ke Workers Logs):
+This backend has several silent failure points (relay proxy down, stream
+gateway WS dropped, Cron Trigger Cancel'd platform-side). What exists today
+all goes through **Telegram** (needs `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`
+set — otherwise alerts only reach Workers Logs):
 
-| Cek | Cron | Alert kalau |
+| Check | Cron | Alerts when |
 |---|---|---|
-| `checkHeartbeat` (`heartbeatCron.ts`) | 3×/hari (07/15/23 WIB) | 8 jam nol sinyal TRADE/WATCH — 1 pesan yang bedain "market sepi + backend normal" vs ">30% pair gagal tiap tick = backend bermasalah" vs "nol data = cron mati" |
-| `checkEntryAlertCronFreshness` (`heartbeatCron.ts`) | nempel di `*/5` | nol tick entry-alert SELESAI dalam 40 menit (deteksi tick di-Cancel platform) — cooldown 1 jam |
-| `checkStreamGatewayHealth` (`infraHealthCron.ts`) | nempel di `*/5` | VPS stream gateway `:8081/health` unreachable, WS ke Binance putus, atau buffer basi >5 menit — cooldown 1 jam |
-| `checkMarketSnapshotFreshness` (`infraHealthCron.ts`) | nempel di `*/5` | nol baris `market_snapshots` baru dalam 20 menit (cron snapshot `*/5` berhenti nulis) — cooldown 1 jam |
-| `checkRelayHealth` (`infraHealthCron.ts`) | nempel di `*/5` | `/health` salah satu REST relay (`PROXY_URL`/`PROXY_URL_2`) down/timeout — pesan bedakan "1 dari N down (failover nutup, tapi weight per-IP balik ke 1 IP)" vs "semua down" — cooldown 1 jam |
-| `checkD1Capacity` (`infraHealthCron.ts`) | 3×/hari (piggyback `HEARTBEAT_CRON`) | `market_snapshots` + `signal_history` (di-prune 90 hari) gabungan lewat 5 juta baris = backstop kalau prune telat — cooldown 24 jam |
+| `checkHeartbeat` (`heartbeatCron.ts`) | 3×/day | 8h with zero TRADE/WATCH signals — one message distinguishing "quiet market + backend healthy" vs ">30% of pairs failing each tick = backend problem" vs "no data = cron dead" |
+| `checkEntryAlertCronFreshness` (`heartbeatCron.ts`) | piggybacks `*/5` | no entry-alert tick COMPLETED within 40 min (detects platform-Cancel'd ticks) — 1h cooldown |
+| `checkStreamGatewayHealth` (`infraHealthCron.ts`) | piggybacks `*/5` | VPS stream gateway `:8081/health` unreachable, WS to Binance down, or buffer stale >5 min — 1h cooldown |
+| `checkMarketSnapshotFreshness` (`infraHealthCron.ts`) | piggybacks `*/5` | zero new `market_snapshots` rows in 20 min (the `*/5` snapshot cron stopped writing) — 1h cooldown |
+| `checkRelayHealth` (`infraHealthCron.ts`) | piggybacks `*/5` | a REST relay's `/health` (`PROXY_URL`/`PROXY_URL_2`) is down/timing out — message distinguishes "1 of N down (failover holds, but per-IP weight is back on one IP)" from "all down" — 1h cooldown |
+| `checkD1Capacity` (`infraHealthCron.ts`) | 3×/day (piggybacks `HEARTBEAT_CRON`) | `market_snapshots` + `signal_history` (pruned at 90 days) combined past 5M rows = a backstop if pruning lags — 24h cooldown |
 
-Semua cek KV-gated (maks 1 alert per cooldown selagi kondisi persist), aman
-dijalanin tiap 5 menit.
+All checks are KV-gated (at most one alert per cooldown while the condition
+persists), safe to run every 5 minutes.
 
-### Notifikasi Multi-Channel (OPSIONAL)
+### Multi-channel notifications (OPTIONAL)
 
-`src/notify.ts` fan-out tiap alert ke SEMUA channel yang dikonfigurasi
-(`Promise.allSettled` — satu channel gagal tidak menggagalkan yang lain
-atau cron). Telegram tetap default; channel lain opt-in via secret:
+`src/notify.ts` fans every alert out to ALL configured channels
+(`Promise.allSettled` — one channel failing never fails the others or the
+cron). Telegram stays the default; the rest are opt-in via secrets:
 
-| Secret | Channel | Kalau kosong |
+| Secret | Channel | If unset |
 |---|---|---|
-| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | Telegram (`sendMessage`, Markdown) | di-skip |
-| `DISCORD_WEBHOOK_URL` | Discord webhook (`{content}`, cap 2000 char) | di-skip |
-| `NOTIFY_WEBHOOK_URL` | Generic — POST JSON `{text}` ke endpoint apa pun | di-skip |
+| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | Telegram (`sendMessage`, Markdown) | skipped |
+| `DISCORD_WEBHOOK_URL` | Discord webhook (`{content}`, 2000-char cap) | skipped |
+| `NOTIFY_WEBHOOK_URL` | Generic — POST JSON `{text}` to any endpoint | skipped |
 
 ```bash
-npx wrangler secret put DISCORD_WEBHOOK_URL   # opsional
-npx wrangler secret put NOTIFY_WEBHOOK_URL     # opsional
+npx wrangler secret put DISCORD_WEBHOOK_URL   # optional
+npx wrangler secret put NOTIFY_WEBHOOK_URL     # optional
 ```
 
-Isi/format pesan identik di semua channel. Kalau tidak ada satu pun channel
-di-set, alert cuma masuk Workers Logs (tidak menggagalkan cron).
+Message content/format is identical across channels. With no channel set,
+alerts go to Workers Logs only (the cron never fails).
 
-**Yang MASIH belum ada** (kerjaan dashboard, bukan kode):
+**Still missing** (dashboard work, not code):
 
-- **Uptime monitor eksternal** ke worker `/` (independen dari worker itu
-  sendiri) — pakai UptimeRobot / Cloudflare Health Checks (gratis, 5-menit).
-  Relay `/health` sekarang sudah di-cek `checkRelayHealth` di atas, tapi itu
-  DARI worker — kalau worker sendiri mati (bukan cuma cron), gak ada yang
-  lapor. Monitor eksternal nutup itu.
-- **Cloudflare notification** untuk spike error-rate Workers / CPU-limit —
-  observability (`[observability] enabled = true`) cuma ngumpulin data, gak
-  ada rule alert.
+- **External uptime monitor** on the worker `/` (independent of the worker
+  itself) — UptimeRobot / Cloudflare Health Checks (free, 5-min). Relay
+  `/health` is now covered by `checkRelayHealth` above, but that runs FROM
+  the worker — if the worker itself dies (not just a cron), nothing reports.
+  An external monitor closes that.
+- **Cloudflare notification** for Workers error-rate spikes / CPU-limit hits —
+  observability (`[observability] enabled = true`) only collects data, no
+  alerting rule.
 
-## Dashboard read-only (OPSIONAL)
+## Read-only dashboard (OPTIONAL)
 
-Dashboard sederhana di-serve dari worker yang SAMA (bukan Cloudflare Pages
-terpisah). Gated `?key=<ADMIN_SECRET>` persis seperti `/admin/usage` —
-punya kamu sendiri, bukan publik. Tanpa `ADMIN_SECRET` di-set, SELALU 403.
+A simple dashboard served from the SAME worker (no separate Cloudflare
+Pages project). Gated `?key=<ADMIN_SECRET>` exactly like `/admin/usage` —
+yours, not public. Without `ADMIN_SECRET` set it is always 403.
 
-- **Halaman:** `https://<worker-url>/dashboard?key=<ADMIN_SECRET>` — 1 file
-  HTML+JS inline (vanilla `fetch`, no build step), auto-refresh 60 detik.
-- **API (JSON, gated sama):**
+- **Page:** `https://<worker-url>/dashboard?key=<ADMIN_SECRET>` — one inline
+  HTML+JS file (vanilla `fetch`, no build step), auto-refreshes every 60s.
+- **API (JSON, same gate):**
   - `GET /api/dashboard/pipeline-decisions?hours=24&limit=100&symbol=<opt>`
   - `GET /api/dashboard/signals?symbol=BTCUSDT&hours=24&type=<opt>`
   - `GET /api/dashboard/whales?coin=BTC`
   - `GET /api/dashboard/circuit-breaker` — daily-loss + macro-risk KV state
 
-Semua reuse query `d1Client` yang sudah ada (tidak ada query D1 baru).
+Everything reuses existing `d1Client` queries (no new D1 queries).
 
-## Keamanan: DNS Rebinding Protection (OPSIONAL)
+## Security: DNS Rebinding Protection (OPTIONAL)
 
-Endpoint `/mcp` memvalidasi header `Origin` sebelum memproses request --
-default izinkan `https://claude.ai`/`https://claude.com` (dan request TANPA
-header `Origin` sama sekali, yang mencakup mayoritas MCP client
-server-to-server, termasuk cara worker ini dipakai sebagai custom
-connector). Request dengan `Origin` LAIN yang tidak diizinkan dibalas 403.
-Ini pengganti opsi bawaan SDK (`enableDnsRebindingProtection`/
-`allowedHosts`/`allowedOrigins`) yang sudah `@deprecated` di
-`@modelcontextprotocol/sdk` -- SDK sekarang merekomendasikan middleware
-eksternal, itu yang dilakukan di sini.
+The `/mcp` endpoint validates the `Origin` header before processing a
+request -- by default it allows `https://claude.ai`/`https://claude.com`
+(and requests with NO `Origin` header at all, which covers the majority of
+server-to-server MCP clients, including how this worker is actually used
+as a custom connector). Requests with a disallowed `Origin` are rejected
+with 403. This replaces the SDK's built-in options
+(`enableDnsRebindingProtection`/`allowedHosts`/`allowedOrigins`), which are
+`@deprecated` in `@modelcontextprotocol/sdk` -- the SDK now recommends
+external middleware, which is what this is.
 
-Kalau kamu punya web app sendiri yang perlu manggil `/mcp` langsung dari
-browser, tambahkan origin-nya:
+If you have your own web app that needs to call `/mcp` directly from the
+browser, add its origin:
 ```bash
 npx wrangler secret put ALLOWED_ORIGINS
-# contoh value: https://app-kamu.com,https://staging.app-kamu.com
+# example value: https://your-app.com,https://staging.your-app.com
 ```
-(comma-separated, tanpa spasi setelah koma juga OK -- di-trim otomatis.)
+(comma-separated, spaces after commas are fine too -- auto-trimmed.)
 
-Data disimpan di D1 (`request_log`), di-prune otomatis tiap Cron tick
-buat row lebih dari 30 hari (tabel ini gak dibatasi watchlist tetap kayak
-`market_snapshots`/`signal_history`, jadi bisa growth kalau ada traffic
-asing beneran).
+## Setup: Automated Deploy (GitHub Actions → Cloudflare Workers)
 
-## Setup Deploy Otomatis (GitHub Actions → Cloudflare Workers)
+This repo already has a workflow at `.github/workflows/deploy.yml` that
+automatically runs `wrangler deploy` on every push to the `main` branch.
 
-Repo ini sudah punya workflow di `.github/workflows/deploy.yml` yang otomatis
-menjalankan `wrangler deploy` setiap kali ada push ke branch `main`.
+### Setup steps (one-time)
 
-### Langkah setup (sekali saja)
+**1. Create a Cloudflare API Token**
 
-**1. Buat Cloudflare API Token**
+1. Open https://dash.cloudflare.com/profile/api-tokens
+2. Click "Create Token"
+3. Use the **"Edit Cloudflare Workers"** template
+4. Scope it to your account, then create the token
+5. Copy the token shown (only displayed once)
 
-1. Buka https://dash.cloudflare.com/profile/api-tokens
-2. Klik "Create Token"
-3. Gunakan template **"Edit Cloudflare Workers"**
-4. Scope ke akun kamu, lalu buat token
-5. Salin token yang muncul (hanya ditampilkan sekali)
+**2. Add the token as a GitHub Secret**
 
-**2. Tambahkan token sebagai GitHub Secret**
-
-1. Buka repo ini di GitHub → **Settings** → **Secrets and variables** → **Actions**
-2. Klik **New repository secret**
+1. Open this repo on GitHub → **Settings** → **Secrets and variables** →
+   **Actions**
+2. Click **New repository secret**
 3. Name: `CLOUDFLARE_API_TOKEN`
-4. Value: token dari langkah 1
-5. Simpan
+4. Value: the token from step 1
+5. Save
 
-**3. Trigger deploy**
+**3. Trigger a deploy**
 
-Deploy akan otomatis jalan begitu ada push baru ke `main`. Untuk trigger
-manual tanpa push baru, buka tab **Actions** di GitHub repo → pilih workflow
-"Deploy to Cloudflare Workers" → **Run workflow**.
+Deploy runs automatically as soon as there's a new push to `main`. To
+trigger manually without a new push, open the **Actions** tab on the
+GitHub repo → select the "Deploy to Cloudflare Workers" workflow →
+**Run workflow**.
 
-**4. Cek hasil deploy**
+**4. Check the deploy result**
 
-Setelah workflow selesai (cek tab Actions), worker akan live di:
+Once the workflow finishes (check the Actions tab), the worker will be
+live at:
 ```
-https://binance-future-hunter.<subdomain-cloudflare-kamu>.workers.dev
+https://binance-future-hunter.<your-cloudflare-subdomain>.workers.dev
 ```
 
-Buka URL tersebut — harus muncul JSON status `"ok"`.
+Open that URL — it should show a JSON status of `"ok"`.
 
-## Setup Custom Domain (binance-future-hunter.jaringan.dev)
+## Setup: Custom Domain (binance-future-hunter.jaringan.dev)
 
-Ini **tidak** bisa dilakukan lewat GitHub Actions — perlu langkah manual satu
-kali di dashboard Cloudflare:
+This **cannot** be done via GitHub Actions — it needs a one-time manual
+step in the Cloudflare dashboard:
 
-1. Buka https://dash.cloudflare.com → pilih akun kamu
-2. Buka **Workers & Pages** → pilih worker `binance-future-hunter`
-3. Buka tab **Settings** → **Domains & Routes**
-4. Klik **Add** → **Custom Domain**
-5. Masukkan `binance-future-hunter.jaringan.dev`
-6. Cloudflare akan otomatis membuat DNS record yang diperlukan **jika**
-   domain `jaringan.dev` sudah berada di zona Cloudflare akun yang sama.
-   Kalau domain itu terdaftar di akun/registrar lain, kamu perlu tambahkan
-   CNAME record secara manual mengarah ke target yang ditampilkan Cloudflare.
+1. Open https://dash.cloudflare.com → select your account
+2. Open **Workers & Pages** → select the `binance-future-hunter` worker
+3. Open the **Settings** tab → **Domains & Routes**
+4. Click **Add** → **Custom Domain**
+5. Enter `binance-future-hunter.jaringan.dev`
+6. Cloudflare will automatically create the needed DNS record **if** the
+   `jaringan.dev` domain is already in the same account's Cloudflare zone.
+   If that domain is registered under a different account/registrar,
+   you'll need to add a CNAME record manually pointing to the target
+   Cloudflare shows you.
 
-Setelah custom domain aktif, worker bisa diakses di
-`https://binance-future-hunter.jaringan.dev` (bukan lagi domain `.workers.dev`).
+Once the custom domain is active, the worker is reachable at
+`https://binance-future-hunter.jaringan.dev` (no longer the `.workers.dev`
+domain).
 
-## Daftarkan sebagai Custom Connector di Claude
+## Register as a Custom Connector in Claude
 
-1. Buka Claude (claude.ai) → **Settings** → **Connectors**
-2. Pilih **Add custom connector**
-3. Masukkan URL: `https://binance-future-hunter.jaringan.dev/mcp`
-   (atau `https://binance-future-hunter.<subdomain>.workers.dev/mcp` jika belum
-   setup custom domain — perhatikan path `/mcp` di akhir, wajib)
-4. Simpan, lalu aktifkan connector tersebut untuk percakapan yang kamu mau
+1. Open Claude (claude.ai) → **Settings** → **Connectors**
+2. Choose **Add custom connector**
+3. Enter the URL: `https://binance-future-hunter.jaringan.dev/mcp`
+   (or `https://binance-future-hunter.<subdomain>.workers.dev/mcp` if you haven't
+   set up the custom domain yet — note the `/mcp` path at the end, it's
+   required)
+4. Save, then enable the connector for whichever conversations you want
 
-### Contoh Penggunaan
+### Example Usage
 
-Setelah connector aktif, tinggal minta lewat percakapan biasa — Claude yang
-menentukan tool mana yang dipanggil (dan berapa kali) berdasarkan pertanyaan:
+Once the connector is active, just ask in normal conversation — Claude
+decides which tool(s) to call, and how many times, based on the question:
 
-- *"Funding rate BTCUSDT sekarang gimana, ada indikasi crowded?"* →
+- *"What's BTCUSDT's funding rate right now, any sign of crowding?"* →
   `binance_get_funding_rate`
-- *"Pair apa yang funding-nya paling ekstrem sekarang di seluruh market?"* →
-  `binance_scan_funding_extremes`
-- *"Cek overview lengkap ETHUSDT — funding, OI, order book, bias harga"* →
-  `binance_analyze_pair` (composite, 1 call ganti 6 tool terpisah)
-- *"Ada tanda-tanda aktivitas market maker di SOLUSDT belakangan ini?"* →
-  kombinasi beberapa tool (order book, agg trades, OI, klines)
-  mengikuti [Framework Analisis](#framework-analisis-deteksi-market-maker--whale)
-  di atas — sebutkan pair-nya, Claude yang menjalankan workflow deteksinya
-- *"Bandingin funding rate BTC, ETH, SOL, sama BNB"* →
+- *"Which pair has the most extreme funding rate across the whole market
+  right now?"* → `binance_scan_funding_extremes`
+- *"Give me a full overview of ETHUSDT — funding, OI, order book, price
+  bias"* → `binance_analyze_pair` (composite, 1 call instead of 6 separate
+  ones)
+- *"Any signs of market maker activity in SOLUSDT lately?"* → a combination
+  of tools (order book, agg trades, OI, liquidation, klines) following the
+  [Analysis Framework](#analysis-framework-market-maker--whale-detection)
+  above — just name the pair, Claude runs the detection workflow
+- *"Compare the funding rate of BTC, ETH, SOL, and BNB"* →
   `binance_compare_symbols`
-- *"Layak gak buka Grid Bot Futures di BTCUSDT dan ETHUSDT sekarang, budget
-  rugi $20?"* → `whalescope_full_pipeline` (composite tertinggi, 1 call
-  jalanin hard screen → Tier-1 intel → grid bounds → risk sizing →
-  keputusan TRADE/WATCH/NO_TRADE + parameter Grid Bot siap copy-paste untuk
-  kedua pair sekaligus)
+- *"Is it worth opening a Futures Grid Bot on BTCUSDT and ETHUSDT right now,
+  $20 loss budget?"* → `whalescope_full_pipeline` (highest-level composite,
+  1 call runs hard screen → Tier-1 intel → grid bounds → risk sizing →
+  TRADE/WATCH/NO_TRADE decision + copy-paste-ready Grid Bot config for both
+  pairs at once)
 
-Karena semua tool read-only, aman dicoba tanya apapun soal data pasar tanpa
-risiko memicu order/trading — worker ini tidak punya kemampuan itu sama
-sekali.
+Since every tool is read-only, it's safe to ask anything about market data
+without risking triggering an order/trade — this worker has no such
+capability at all.
 
-## Uji coba manual sebelum daftar ke Claude (disarankan)
+## Manual testing before registering with Claude (recommended)
 
-`npm test` (vitest) + `npm run typecheck` adalah automated check di repo ini
-— tapi keduanya cuma nge-cover pure logic (scoring functions, D1/KV
-wrapper, tool handler lewat fake `McpServer`), BUKAN Workers `fetch`/
-`scheduled` handler beneran (gak ada `@cloudflare/vitest-pool-workers`).
-Verifikasi tool baru/berubah TETAP butuh manual lewat `wrangler dev` + curl
-JSON-RPC buat itu.
+`npm test` (vitest) + `npm run typecheck` are the automated checks in this
+repo — but both only cover pure logic (scoring functions, D1/KV wrappers,
+tool handlers via a fake `McpServer`), NOT the real Workers `fetch`/
+`scheduled` handlers (no `@cloudflare/vitest-pool-workers` setup). New/
+changed tools still need manual verification via `wrangler dev` + curl
+JSON-RPC for that.
 
 ```bash
 npm install
 npx wrangler dev
 ```
 
-Di terminal lain, contoh untuk tool Binance native:
+In another terminal, an example for a Binance-native tool:
 ```bash
 curl -X POST http://localhost:8787/mcp \
   -H "Content-Type: application/json" \
@@ -728,105 +766,114 @@ curl -X POST http://localhost:8787/mcp \
   }'
 ```
 
-Kalau ini mengembalikan data funding rate + basis BTCUSDT yang valid, jalur
-proxy relay bekerja.
+If this returns valid funding rate + basis data for BTCUSDT, the relay
+proxy path works.
 
-## Audit & Hasil
+## Audit & Results
 
-### Efisiensi Token
+### Token Efficiency
 
-Response tool MCP masuk langsung ke context window Claude — beda dari REST
-API biasa di mana ukuran response relatif "gratis". Repo ini pernah punya
-beberapa tool yang boros token tanpa disadari; sudah diperbaiki dan
-diverifikasi ke worker live (2026-08-12):
+MCP tool responses go straight into Claude's context window — unlike a
+normal REST API, where response size is comparatively free. This repo used
+to have a few tools that quietly wasted tokens; they've since been fixed
+and verified against the live worker (2026-08-12):
 
-| Temuan | Sebelum | Sesudah |
+| Finding | Before | After |
 |---|---|---|
-| `binance_get_klines`/`spot_klines` — `structuredContent.candles` selalu ikut full array | ~14.400 token di `limit=500` (57,7KB), sampai ~43.000 token di limit maksimal 1500 | Opt-in lewat parameter `includeCandles` (default `false`) — default cuma summary (bias, swing high/low, 15 candle terakhir) |
-| 6 tool histori (OI history, long/short ratio, top trader ratio, funding rate history, taker volume ratio, liquidation history) — tabel teks tanpa batas baris | 20-29KB (~5.000-7.250 token) per call di `limit=500` | Truncate ke 15 baris terakhir di teks — summary (avg/tren/dominance) tetap dihitung dari SEMUA data yang di-fetch, bukan cuma yang ditampilkan |
-| 5 deskripsi tool terpanjang (funding_rate, top_trader_ratio, spot_price, klines, spot_klines) | 16.869 karakter total | 15.671 karakter (~7%, ~300 token dihemat di one-time tool-list load per sesi) |
-| `binance_scan_funding_extremes` — `structuredContent.crowdedLong/crowdedShort` duplikat array yang sudah ada di tabel teks | ~2,9KB di `limit=50` (maks) | Cuma `topSymbolLong`/`topSymbolShort` (1 simbol paling ekstrem tiap sisi) — tabel lengkap tetap di teks |
+| `binance_get_klines`/`spot_klines` — `structuredContent.candles` always included the full array | ~14,400 tokens at `limit=500` (57.7KB), up to ~43,000 tokens at the max limit of 1500 | Opt-in via the `includeCandles` parameter (default `false`) — default returns only a summary (bias, swing high/low, last 15 candles) |
+| 6 history tools (OI history, long/short ratio, top trader ratio, funding rate history, taker volume ratio, liquidation history) — unbounded text table rows | 20-29KB (~5,000-7,250 tokens) per call at `limit=500` | Truncated to the last 15 rows in text — summary stats (avg/trend/dominance) are still computed from the FULL fetched set, not just what's displayed |
+| The 5 longest tool descriptions (funding_rate, top_trader_ratio, spot_price, klines, spot_klines) | 16,869 characters total | 15,671 characters (~7%, ~300 tokens saved on the one-time tool-list load per session) |
+| `binance_scan_funding_extremes` — `structuredContent.crowdedLong/crowdedShort` duplicated the array already shown in the text table | ~2.9KB at `limit=50` (max) | Just `topSymbolLong`/`topSymbolShort` (the single most extreme symbol per side) — the full ranked list stays in the text table |
 
-Verifikasi ulang kapan saja:
+Re-verify anytime:
 
 ```bash
 npm run token-audit
 ```
 
-Manggil worker deployed langsung, ukur ukuran skema tool, ukuran response
-lintas skala `limit`, dan "Information Density Ratio" (data vs boilerplate)
-buat beberapa tool representatif, plus simulasi 1 percakapan multi-turn
-realistis. Bukan bagian `npm test`/CI (hit worker live via itu) — dipakai
-manual pas mau cek dampak perubahan tool description/
-format response terhadap konsumsi token. Estimasi token pakai heuristik
-chars/4 (gak ada tokenizer resmi Claude yang di-publish sebagai package),
-jadi angkanya approximate, berguna buat perbandingan relatif (sebelum vs
-sesudah perubahan), bukan angka token exact.
+Calls the deployed worker directly, measures tool schema size, response
+size across `limit` scales, and an "Information Density Ratio" (data vs.
+boilerplate) for a few representative tools, plus a simulated realistic
+multi-turn conversation. Not part of `npm test`/CI (hits the live worker +
+Binance through it) — used manually to check the token impact of
+tool description or response format changes. Token estimation uses a
+chars/4 heuristic (no publicly published Claude tokenizer package exists),
+so the numbers are approximate — useful for relative comparison
+(before vs. after a change), not exact token counts.
 
-### Keamanan
+### Security
 
-- **Validasi input simbol pair.** `symbolSchema` (dipakai semua tool yang
-  butuh parameter `symbol`) dibatasi maksimal 20 karakter dan hanya
-  menerima `[A-Z0-9_]`. Sebelumnya tidak ada batasan — karena simbol dipakai
-  langsung sebagai bagian key Workers KV (`threshold:${symbol}`,
-  `basis_history:${symbol}`), input tanpa batas panjang/karakter berisiko
-  melebihi limit 512-byte key KV atau menyisipkan karakter (titik dua,
-  newline) yang mengacaukan konstruksi key. Batas 20 karakter divalidasi ke
-  data riil (simbol terpanjang di Binance Futures saat ini 17 karakter),
-  dan regex sengaja mengizinkan underscore supaya kontrak dated/quarterly
-  (contoh `BTCUSDT_260925`) tetap valid.
-- **Read-only terhadap akun.** Tidak ada tool yang melakukan order/trading
-  atau mengakses data akun pribadi — satu-satunya tool yang menulis state
-  (`binance_set_pair_threshold`) cuma menyimpan preferensi threshold di
-  Workers KV milik worker sendiri.
-- **Kredensial selalu lewat Wrangler secret**, tidak pernah di-hardcode atau
-  masuk `wrangler.toml`/git — lihat peringatan eksplisit di bagian
-  [Setup Proxy Relay](#setup-proxy-relay-wajib-sekali-saja) soal cara
-  aman set secret.
-- Repo ini di-scan manual untuk memastikan tidak ada API key, secret, atau
-  kredensial nyata yang ter-commit — hanya placeholder/contoh (misal URL
-  proxy `whale-pearl.vercel.app` di dokumentasi setup adalah nama contoh,
-  bukan endpoint nyata).
+- **Symbol input validation.** `symbolSchema` (used by every tool that
+  takes a `symbol` parameter) is capped at 20 characters and only accepts
+  `[A-Z0-9_]`. There was previously no bound — since the symbol is used
+  directly as part of Workers KV keys (`threshold:${symbol}`,
+  `basis_history:${symbol}`), unbounded input risked exceeding KV's
+  512-byte key limit or injecting characters (colons, newlines) that could
+  corrupt key construction. The 20-character bound was validated against
+  real data (the longest symbol on Binance Futures today is 17 characters),
+  and the regex deliberately allows underscores so dated/quarterly
+  contracts (e.g. `BTCUSDT_260925`) stay valid.
+- **Read-only with respect to accounts.** No tool places orders or trades,
+  or accesses private account data — the one tool that writes state
+  (`binance_set_pair_threshold`) only stores a threshold preference in the
+  worker's own Workers KV.
+- **Credentials always go through Wrangler secrets**, never hardcoded or
+  committed to `wrangler.toml`/git — see the explicit warning in the
+  [Proxy Relay setup](#setup-proxy-relay-required-one-time) section about
+  setting secrets safely.
+- This repo was manually scanned to confirm no real API key, secret, or
+  credential is committed anywhere — only placeholders/examples (e.g. the
+  proxy URL `whale-pearl.vercel.app` in the setup docs is an example name,
+  not a real endpoint).
 
-## Biaya
+## Cost
 
-- Cloudflare Workers: free tier 100.000 request/hari — untuk pemakaian
-  personal trading analysis ini jauh dari cukup.
-- Proxy relay (`proxy-standalone/`): host gratis (Fly.io free tier, Deno
-  Deploy) cukup untuk pemakaian personal; VPS kecil ~$5/bln kalau mau
-  kontrol penuh / relay kedua. Vercel Hobby lama sudah tidak dipakai
-  (di-pause untuk commercial use).
-  Perhatikan: `PROXY_SECRET` wajib dijaga kerahasiaannya, karena siapapun
-  yang tahu URL + secret bisa memakai quota proxy ini atas nama kamu.
+- Cloudflare Workers: free tier of 100,000 requests/day — far more than
+  enough for personal trading-analysis use.
+- Proxy relay (`proxy-standalone/`): free hosts (Fly.io free tier, Deno
+  Deploy) are enough for personal use; a small ~$5/mo VPS if you want full
+  control or a second relay. The old Vercel Hobby deploy is no longer used
+  (paused for commercial use). Note: `PROXY_SECRET` must be kept
+  confidential, since anyone who knows the URL + secret can use this
+  proxy's quota on your behalf.
 
-Kemungkinan besar kamu tidak akan pernah kena biaya di kedua platform untuk
-pemakaian personal.
+You will most likely never be charged on either platform for personal use.
+
+## Sponsors
+
+<a href="https://jaringan.co.id/">
+  <img src="docs/assets/jaringan-semesta-raya-logo.png" alt="PT Jaringan Semesta Raya" width="64" height="64" />
+</a>
+
+This project is sponsored by
+**[PT. Jaringan Semesta Raya](https://jaringan.co.id/)**.
 
 ## Disclaimer
 
-**Project ini open source dan publik** — source code, arsitektur, dan
-dokumentasi (termasuk framework analisis di `docs/`) bisa dilihat, di-clone,
-dan dimodifikasi siapa saja lewat repo GitHub ini. Tidak ada data akun
-pribadi yang disimpan atau diproses — semua tool bersifat read-only terhadap
-API publik Binance.
+**This project is open source and public** — the source code, architecture,
+and documentation (including the analysis framework in `docs/`) can be
+viewed, cloned, and modified by anyone through this GitHub repo. No private
+account data is stored or processed — every tool is read-only against
+Binance's public API.
 
-- **Bukan saran finansial.** Semua data dan interpretasi (funding rate, OI,
-  order book, framework deteksi MM, dll) bersifat informational — hasil
-  pengolahan data publik, BUKAN rekomendasi trading. Tidak ada jaminan
-  akurasi, kelengkapan, atau ketepatan waktu data — cek [Keterbatasan yang
-  jujur perlu diketahui](#keterbatasan-yang-jujur-perlu-diketahui) untuk
-  batasan spesifik tiap tool sebelum mengambil keputusan berdasarkan data ini.
-- **Tanggung jawab pengguna.** Siapapun yang deploy, memakai, atau
-  memodifikasi worker ini bertanggung jawab penuh atas hasil dan konsekuensi
-  pemakaiannya sendiri — termasuk keputusan trading yang diambil berdasarkan
-  output tool-tool ini.
-- **Kepatuhan ke Binance API Terms of Use.** Worker ini memanggil endpoint
-  publik Binance (Futures & Spot). Pemakaian personal/non-komersial sejalan
-  dengan ketentuan Binance yang berlaku umum; redistribusi ulang data secara
-  komersial atau pemakaian skala besar sebaiknya dicek dulu terhadap
-  [Binance API Terms of Use](https://www.binance.com/en/terms) — di luar
-  tanggung jawab project ini.
-- **Lisensi: [MIT](LICENSE).** Bebas dipakai, dimodifikasi, dan
-  didistribusikan ulang (termasuk untuk keperluan komersial), selama notice
-  copyright & lisensi MIT tetap disertakan. Software disediakan "as is",
-  tanpa jaminan apapun — sejalan dengan disclaimer di atas.
+- **Not financial advice.** All data and interpretations (funding rate, OI,
+  order book, MM-detection framework, etc.) are informational — the output
+  of processing public data, NOT trading recommendations. There is no
+  guarantee of accuracy, completeness, or timeliness of the data — check
+  [Honest limitations you should know](#honest-limitations-you-should-know)
+  for each tool's specific limitations before making decisions based on
+  this data.
+- **User responsibility.** Anyone who deploys, uses, or modifies this
+  worker is fully responsible for the outcomes and consequences of their
+  own use of it — including any trading decisions made based on these
+  tools' output.
+- **Compliance with Binance API Terms of Use.** This worker calls
+  Binance's public endpoints (Futures & Spot). Personal/non-commercial use
+  aligns with Binance's generally applicable terms; commercial
+  redistribution of data or large-scale use should be checked separately
+  against the [Binance API Terms of Use](https://www.binance.com/en/terms)
+  — outside this project's responsibility.
+- **License: [MIT](LICENSE).** Free to use, modify, and redistribute
+  (including for commercial purposes), as long as the copyright notice and
+  MIT license text are included. The software is provided "as is", with
+  no warranty of any kind — consistent with the disclaimer above.

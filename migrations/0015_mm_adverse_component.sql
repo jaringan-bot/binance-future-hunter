@@ -1,0 +1,26 @@
+-- K6 (2026-09-04, Stage 3 signal-integrity): persist sub-skor MM yang
+-- MENAIKKAN RISIKO grid, terpisah dari yang mendukungnya.
+--
+-- LATAR: scoreTier1Signals() dulu menjumlahkan KEENAM sinyal
+-- detectMmActivity jadi satu komponen POSITIF berbobot 35% (bobot terbesar).
+-- Padahal empat dari enam (spoofing, stopHunt, fundingExtreme, basisArb)
+-- adalah PERINGATAN untuk grid mean-reversion, bukan dukungan. Efeknya
+-- terbalik: makin banyak manipulasi terdeteksi, makin tinggi rankingScore,
+-- makin mudah lolos ambang TRADE 55.
+--
+-- Sejak Stage 3, `mm_component` HANYA berisi sinyal supportive (absorption +
+-- oiDivergence) dan kolom baru di bawah berisi yang adverse (dikurangkan
+-- dari rankingScore dengan bobot MM_ADVERSE_PENALTY_WEIGHT).
+--
+-- SENGAJA additive ALTER TABLE + nullable, pola PERSIS 0013/0014.
+-- KONSEKUENSI YANG HARUS DIPAHAMI KONSUMEN:
+--   * Baris SEBELUM migration ini punya mm_adverse_component NULL, DAN
+--     mm_component-nya bersemantik LAMA (gabungan keenam sinyal).
+--   * Jadi `mm_component` TIDAK sebanding lintas batas deploy ini.
+--   * scripts/calibrate-ranking-weights.mjs WAJIB memfilter
+--     `mm_adverse_component IS NOT NULL` supaya tidak mencampur dua
+--     semantik dalam satu kolom. NULL != "nilainya 0".
+--
+-- TIDAK ada backfill: nilai adverse historis tidak bisa direkonstruksi dari
+-- mm_component gabungan (informasinya sudah hilang saat dijumlah).
+ALTER TABLE pipeline_decision_log ADD COLUMN mm_adverse_component REAL;

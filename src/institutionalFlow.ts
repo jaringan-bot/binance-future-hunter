@@ -8,6 +8,7 @@
 //   - findCrossVenueWalls       (src/tools/crossVenueDepth.ts)
 //   - aggregateWhaleDeltas      (src/tools/hyperliquidWhale.ts)
 //   - computeCftcTrend          (src/cftcClient.ts)
+//   - computeOptionsPositioning (src/deribitClient.ts)
 //
 // DESAIN: kenapa BUKAN satu angka -100..+100 weighted-average tunggal --
 // funding divergence antar-exchange (Binance vs Bybit vs OKX vs Hyperliquid)
@@ -15,7 +16,7 @@
 // bukan "ke arah mana" -- memaksanya jadi 1 vote directional akan
 // overclaim presisi yang gak ada di data ini. Jadi funding divergence
 // dipakai sebagai FLAG confidence (exchange yang gak sepakat = sinyal
-// gabungan kurang reliable), bukan vote ke-4. Skema "N dari M sinyal align"
+// gabungan kurang reliable), bukan vote directional. Skema "N dari M sinyal align"
 // ini pola yang SAMA dengan binance_detect_mm_activity (checklist tier,
 // bukan probabilitas terkalibrasi) -- konsisten dengan budaya repo ini:
 // jujur soal apa yang bisa diklaim dari data heterogen kayak gini.
@@ -27,11 +28,12 @@ import type { DivergenceResult } from "./tools/crossExchange.js";
 import type { CrossVenueWall } from "./tools/crossVenueDepth.js";
 import type { WhaleAggregate } from "./tools/hyperliquidWhale.js";
 import type { CftcTrend } from "./cftcClient.js";
+import type { OptionsPositioning } from "./deribitClient.js";
 
 export type FlowDirection = "LONG" | "SHORT" | "NEUTRAL";
 
 export interface FlowComponent {
-  name: "hyperliquid_whale" | "cftc_trend" | "cross_venue_walls";
+  name: "hyperliquid_whale" | "cftc_trend" | "cross_venue_walls" | "deribit_options";
   available: boolean;
   unavailableReason: string | null;
   direction: FlowDirection;
@@ -54,6 +56,10 @@ const CFTC_TREND_STRENGTH_SCALE_POINTS = 10;
 // Selisih funding >0.1% antar-exchange dianggap "gak sepakat" -- heuristik,
 // bukan dari backtest divergence vs reliability sinyal gabungan.
 const FUNDING_DIVERGENCE_FLAG_THRESHOLD = 0.001;
+// Put/call OI: PCR > 1 => lebih banyak put (bias SHORT), PCR < 1 => call-heavy
+// (bias LONG). Strength = min(1, |log2(PCR)|). PCR=2 atau 0.5 => strength 1.
+// BELUM dikalibrasi.
+const OPTIONS_PCR_NEUTRAL_BAND = 0.05; // |PCR-1| di bawah ini = NEUTRAL
 
 function whaleComponent(aggregate: WhaleAggregate | null): FlowComponent {
   if (!aggregate || aggregate.totalWallets === 0) {
@@ -116,16 +122,40 @@ function crossVenueWallComponent(walls: CrossVenueWall[] | null): FlowComponent 
   return { name: "cross_venue_walls", available: true, unavailableReason: null, direction, strength };
 }
 
+function deribitOptionsComponent(positioning: OptionsPositioning | null): FlowComponent {
+  if (!positioning || positioning.instrumentCount === 0 || positioning.putCallRatio === null) {
+    return {
+      name: "deribit_options",
+      available: false,
+      unavailableReason:
+        positioning?.putCallRatio === null && (positioning?.instrumentCount ?? 0) > 0
+          ? "Call OI = 0 -- put/call ratio tidak terdefinisi."
+          : "Options Deribit tidak tersedia (coin bukan BTC/ETH, atau fetch gagal/kosong).",
+      direction: "NEUTRAL",
+      strength: 0,
+    };
+  }
+  const pcr = positioning.putCallRatio;
+  if (Math.abs(pcr - 1) < OPTIONS_PCR_NEUTRAL_BAND) {
+    return { name: "deribit_options", available: true, unavailableReason: null, direction: "NEUTRAL", strength: 0 };
+  }
+  const direction: FlowDirection = pcr > 1 ? "SHORT" : "LONG";
+  const strength = Math.min(1, Math.abs(Math.log2(pcr)));
+  return { name: "deribit_options", available: true, unavailableReason: null, direction, strength };
+}
+
 export function computeInstitutionalFlowScore(inputs: {
   fundingDivergence: DivergenceResult | null;
   crossVenueWalls: CrossVenueWall[] | null;
   hyperliquidWhale: WhaleAggregate | null;
   cftcTrend: CftcTrend | null;
+  deribitOptions?: OptionsPositioning | null;
 }): InstitutionalFlowScore {
   const components: FlowComponent[] = [
     whaleComponent(inputs.hyperliquidWhale),
     cftcComponent(inputs.cftcTrend),
     crossVenueWallComponent(inputs.crossVenueWalls),
+    deribitOptionsComponent(inputs.deribitOptions ?? null),
   ];
 
   const available = components.filter((c) => c.available);

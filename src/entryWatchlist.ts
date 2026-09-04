@@ -34,7 +34,12 @@ import * as binanceProxy from "./binanceProxyClient.js";
 // buffer wall-clock + weight. Dipasangkan dengan MAX_REQUESTS_PER_WINDOW
 // 1800->1400 (rateLimiter.ts) + pacing 4000->5500ms (entryAlertCron.ts).
 // Mitigasi sementara -- solusi proper = relay IP kedua (PROXY_URL_2).
-export const ENTRY_WATCHLIST_SIZE = 250;
+//
+// 250 -> 350 (2026-09-03): relay IP kedua (Oracle `146.235.17.228.sslip.io`)
+// online sebagai PROXY_URL_2. Weight Binance sekarang round-robin ~50/50
+// dua IP, setiap IP efektif ~700/menit -- aman balik ke 350. Dipasangkan
+// dengan MAX_REQUESTS_PER_WINDOW 1400->1800 (rateLimiter.ts).
+export const ENTRY_WATCHLIST_SIZE = 350;
 
 // Bagian MURNI (tanpa fetch) dari pemilihan watchlist -- dipisah supaya
 // runEntryAlertCheck (entryAlertCron.ts) bisa reuse hasil
