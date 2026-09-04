@@ -176,6 +176,7 @@ function sample(partial: Partial<PipelineDecisionLogRow> = {}): PipelineDecision
     upperPrice: 110,
     stopLoss: 95,
     mmComponent: 55,
+    mmAdverseComponent: 20,
     smartMoneyComponent: 50,
     regimeComponent: 60,
     buyPressureComponent: 45,

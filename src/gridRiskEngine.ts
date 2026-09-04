@@ -15,6 +15,14 @@ export interface GridInputParams {
   leverage: number;
   gridType: "ARITHMETIC" | "GEOMETRIC";
   feeRate?: number;
+  /**
+   * G3 (Stage 3): estimasi jumlah SIKLUS grid per hari, dari
+   * computeGridVelocity() (gridVelocity.ts). Dipakai untuk mengubah funding
+   * bleed HARIAN jadi funding per siklus dengan satuan yang benar.
+   * Undefined -> asumsi paling konservatif 1 siklus/hari (funding penuh
+   * dibebankan ke satu siklus).
+   */
+  estimatedCyclesPerDay?: number;
 }
 
 export interface GridRiskAnalysisResult {
@@ -261,8 +269,49 @@ export async function calculateGridRisk(
     const fromBracket = await fetchMaintMarginRatio(params.symbol, notionalUsd);
     if (fromBracket !== undefined) mmrBufferPct = fromBracket;
   }
+  // ─────────────────────────────────────────────────────────────
+  // G4 (2026-09-04, Stage 3) -- LIKUIDASI DARI EXPOSURE YANG BENAR-BENAR
+  // TERISI, bukan dari leverage nominal.
+  //
+  // CACAT LAMA: `avgEntryPrice * (1 - 1/leverage + mmr)`. Rumus itu
+  // mengasumsikan posisi memakai SELURUH leverage, yaitu notional =
+  // initialCapital * leverage. Padahal grid cuma mengisi `m` dari
+  // `gridCount + 1` level yang ada di bawah harga saat ini -- sisanya belum
+  // jadi posisi. Exposure riil bisa jauh lebih kecil dari capital*leverage,
+  // artinya margin yang menopangnya JAUH lebih tebal dan likuidasi
+  // sesungguhnya jauh LEBIH JAUH dari harga.
+  //
+  // Konsekuensinya bukan sekadar angka display: `liquidationPrice >=
+  // stopLossPrice` adalah kondisi **REJECT**, dan fullPipeline juga memakai
+  // `finalRun.liquidationPrice < stopLossPrice` sebagai syarat memilih
+  // leverage. Jadi rumus lama MENOLAK setup yang sebenarnya aman.
+  //
+  // Rumus baru diturunkan dari definisi likuidasi isolated margin:
+  //     rugi saat liq = margin - maintenance margin
+  //     qty*(entry - liq)  =  margin - qty*liq*mmr
+  //     liq = entry * (1 - margin/notional) / (1 - mmr)
+  // dengan margin = initialCapital (isolated: seluruh capital menopang grid
+  // ini) dan notional = totalQuantity * avgEntryPrice, yaitu exposure saat
+  // SELURUH level di bawah harga terisi -- itu memang skenario di SL, jadi
+  // inilah exposure yang relevan.
+  //
+  // mmr lebih tinggi -> liq lebih DEKAT ke entry (pembagi mengecil), sesuai
+  // intuisi maintenance margin.
+  //
+  // Kalau margin >= notional (leverage efektif < 1x) hasilnya <= 0 dan
+  // di-floor ke 0: likuidasi memang TIDAK MUNGKIN dari posisi ini sendiri.
+  // Itu bukan bug -- itu konsekuensi jujur dari grid yang cuma memakai
+  // sebagian kecil capital yang dialokasikan. Rumus LAMA menyembunyikan
+  // fakta ini dan memalsukan harga likuidasi, lalu memakainya untuk MENOLAK
+  // setup yang sebenarnya aman.
+  //
+  // TETAP APPROKSIMASI ala isolated margin (lihat MARGIN_MODE_CAVEAT):
+  // untuk CROSSED, likuidasi bergantung TOTAL saldo akun yang tidak
+  // diketahui worker.
+  // ─────────────────────────────────────────────────────────────
+  const marginToNotional = notionalUsd > 0 ? params.initialCapital / notionalUsd : 1;
   const liquidationPrice =
-    avgEntryPrice * (1 - 1 / params.leverage + mmrBufferPct);
+    mmrBufferPct < 1 ? Math.max(0, (avgEntryPrice * (1 - marginToNotional)) / (1 - mmrBufferPct)) : 0;
 
   const fundingRate = Number.isFinite(marketData.predictedFundingRate)
     ? marketData.predictedFundingRate
@@ -280,7 +329,31 @@ export async function calculateGridRisk(
     }
   }
 
-  const fundingPerCycleUSD = dailyFundingBleedUSD / params.gridCount;
+  // ─────────────────────────────────────────────────────────────
+  // G3 (2026-09-04, Stage 3) -- SATUAN funding per siklus.
+  //
+  // CACAT LAMA: `dailyFundingBleedUSD / params.gridCount`. `gridCount` adalah
+  // JUMLAH LEVEL grid, BUKAN jumlah siklus per hari. Membagi bleed HARIAN
+  // dengan jumlah level tidak punya arti dimensional -- lalu hasilnya
+  // dikurangkan dari `rawProfitPerCycleUSD` yang satuannya "profit satu
+  // round-trip seluruh level". Dua besaran berbeda satuan dikurangkan, dan
+  // hasilnya (`netProfitPerCycleUSD <= 0`) adalah kondisi **REJECT** -- jadi
+  // ini bukan angka kosmetik, ia benar-benar menolak setup.
+  //
+  // Contoh betapa jauhnya: grid 150 level pada pair dengan bleed $3/hari
+  // dulu dihitung $0.02/siklus. Kalau siklus riilnya ~4x/hari, angka yang
+  // benar adalah $0.75 -- 37x lebih besar.
+  //
+  // SEKARANG: pakai estimasi siklus/hari dari computeGridVelocity()
+  // (gridVelocity.ts) -- fungsi yang SUDAH ADA dan selama ini cuma dipakai
+  // sebagai informasi tampilan. Tanpa estimasi, fallback ke 1 siklus/hari
+  // (konservatif: seluruh bleed harian dibebankan ke satu siklus).
+  // ─────────────────────────────────────────────────────────────
+  const cyclesPerDay =
+    Number.isFinite(params.estimatedCyclesPerDay) && (params.estimatedCyclesPerDay ?? 0) > 0
+      ? (params.estimatedCyclesPerDay as number)
+      : 1;
+  const fundingPerCycleUSD = dailyFundingBleedUSD / cyclesPerDay;
   const netProfitPerCycleUSD = rawProfitPerCycleUSD - fundingPerCycleUSD;
   const minBreakevenCycles =
     netProfitPerCycleUSD > 0

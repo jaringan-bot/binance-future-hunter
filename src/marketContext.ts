@@ -6,6 +6,7 @@ import {
   type KlineCandle,
 } from "./toolHelpers.js";
 import { classifyRegime, type MarketRegime } from "./tools/marketRegime.js";
+import { computeRealizedVolatility } from "./shared.js";
 
 export interface GridContextualRisk {
   contextAvailable: boolean;
@@ -55,22 +56,27 @@ export interface MarketContextInputs {
   topTrader: Awaited<ReturnType<typeof binanceProxy.getTopTraderPositionRatio>>;
 }
 
+// ─────────────────────────────────────────────────────────────
+// G5 (2026-09-04, Stage 3) -- SATU DEFINISI REALIZED VOLATILITY.
+//
+// CACAT LAMA: file ini punya implementasi SENDIRI yang memakai sample
+// variance (kurangi mean, bagi n-1), sementara fullPipeline.ts memakai
+// sqrt(Σr²/n) (TANPA kurang mean) dan shared.ts punya versi ketiga.
+// Keduanya memberi makan volatilitySpikeRatio -> classifyRegime, jadi
+// `hardScreen.regime1h` (dari fullPipeline) dan
+// `contextualRisk.marketRegime` (dari sini) bisa memberi LABEL BERBEDA
+// untuk pair dan candle yang SAMA -- padahal keduanya dipakai sebagai gate:
+//   - evaluateHardScreen() menolak BREAKOUT
+//   - calculateGridRisk() REJECT saat marketRegime BREAKOUT && priceChange<0
+//
+// Sekarang keduanya memanggil computeRealizedVolatility() di shared.ts.
+// Konvensi yang dipilih: sqrt(Σr²/n) tanpa kurang mean -- itu yang dipakai
+// binance_market_regime (tool publik) dan fullPipeline, jadi menyatukan ke
+// sana mengubah paling sedikit perilaku yang sudah diamati.
+// ─────────────────────────────────────────────────────────────
 function realizedVolPct(candles: KlineCandle[]): number {
   const closes = candles.map((candle) => candle.close);
-  const periodsPerYear = 24 * 365;
-  const returns = closes.slice(1).map((close, index) => {
-    const previous = closes[index];
-    return previous > 0 ? Math.log(close / previous) : 0;
-  });
-
-  if (returns.length < 2) return 0;
-
-  const mean = returns.reduce((sum, value) => sum + value, 0) / returns.length;
-  const variance =
-    returns.reduce((sum, value) => sum + (value - mean) ** 2, 0) /
-    (returns.length - 1);
-
-  return Math.sqrt(Math.max(variance, 0) * periodsPerYear) * 100;
+  return computeRealizedVolatility(closes, 24 * 365).periodPct;
 }
 
 export async function fetchMarketContext(

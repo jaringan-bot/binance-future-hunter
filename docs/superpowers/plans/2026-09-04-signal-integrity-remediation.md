@@ -7,7 +7,7 @@
 > | 0 | Plan file ini | ✅ [Semeru] 2026-09-04 | — | — |
 > | 1 | Blocker: uang, uptime, buta (K1, K2, I1, I2, B1/B2) | ✅ **KODE SELESAI** [Semeru] 2026-09-04 — menunggu commit + acc deploy | — | ⏳ |
 > | 2 | Reachability (K4/D3, K5, G1, I6, D1/D2, G6) + **K10 baru** | ✅ **KODE SELESAI** [Semeru] 2026-09-04 | — | ⏳ |
-> | 3 | Kualitas sinyal / anti-halu (K8, K3, K6, K9, G3-G5, K7) + migration 0015 | ⏳ belum | — | — |
+> | 3 | Kualitas sinyal / anti-halu (K8, K3, K6, K9, G3-G5, K7) + migration 0015 | ✅ **KODE SELESAI** [Semeru] 2026-09-04 | — | ⏳ |
 > | 4 | Backtest valid + observability + kalibrasi (B3, B4, backfill, I7) | ⏳ belum | — | — |
 >
 > **Keputusan user 2026-09-04:** legacy DCA jadi pre-gate wajib · fidelitas data
@@ -105,6 +105,71 @@
 >
 > **Sisa untuk Krakatau:** `wrangler deploy`. **Tidak ada migration di Stage 2.**
 > Opsional KV tuning: `entry_alert:daily_alert_limit`, `entry_alert:extremity_frac`.
+>
+> ─────────────────────────────────────────────────────────────────────
+>
+> ### ✅ Stage 3 — kode selesai [Semeru] 2026-09-04
+>
+> Branch `claude/stage-3-signal-quality` (dicabang dari Stage 1+2 supaya PR #12
+> yang sedang direview tidak berubah isi). `tsc --noEmit` bersih ·
+> **919 test hijau**.
+>
+> | Task | Status | File |
+> |---|---|---|
+> | 3.1 K8 buang candle belum-close di batas fetch | ✅ | `src/toolHelpers.ts`, `src/tools/fullPipeline.ts` |
+> | 3.2 K3 buang `slopeSpot` palsu + rename jujur → flow alignment | ✅ | `src/cron/smartMoneyPipelineEngine.ts`, `dcaSmartMoneyAdapter.ts` |
+> | 3.3 K6 pisah MM supportive vs adverse + **migration 0015** | ✅ | `src/pipelineEngine.ts`, `migrations/0015_*.sql`, `d1Client.ts`, `pipelineDecisionLog.ts` |
+> | 3.4 K9 CVD confidence dari lebar sampel tape | ✅ | `src/pipelineEngine.ts`, `src/tools/fullPipeline.ts` |
+> | 3.5 G3 funding/siklus · G4 likuidasi dari exposure riil · G5 satu definisi RV | ✅ | `src/gridRiskEngine.ts`, `src/marketContext.ts`, `fullPipeline.ts` |
+> | 3.6 K7 konflik regime diselesaikan + dead code dihapus | ✅ | `src/pipelineEngine.ts`, `gridSmartMoneyAdapter.ts`, `smartMoneyPipelineEngine.ts` |
+>
+> **Dead code yang dihapus (K7):** `evaluateSmartMoneyEntry()` (Smart Money Core
+> V2, 3 skenario) dan `evaluateGridSmartMoney()` + `computeGridSafetyScore()` +
+> `regimeSafetyScore()` + `oiGuardScore()` — semuanya lengkap dengan test tapi
+> **tidak pernah dipanggil produksi**. Dua file test ikut dihapus (−330 baris).
+> Itu sebabnya jumlah test turun dari 925 → 919 meski Stage 3 menambah 18 test
+> baru: **test yang menguji kode mati memberi ilusi cakupan.**
+>
+> **Konflik regime (K7) — putusan:** `REGIME_FAVORABILITY` ACCUMULATION
+> 0.9→0.6, DISTRIBUTION 0.7→0.5. Alasannya bukan selera: definisi
+> `classifyRegime()` sendiri untuk kedua regime itu adalah "OI membangun
+> sementara harga flat" = pola **pra-breakout**, yang untuk grid range-bound
+> berarti risiko keluar range. Nilai baru KOMPROMI dan **belum dikalibrasi** —
+> Stage 4 yang menyelesaikan dengan data.
+>
+> **Mutation-test:**
+> | Mutasi | Hasil |
+> |---|---|
+> | K6: adverse kembali menaikkan skor | 1 test **merah** |
+> | G4: likuidasi kembali ke `1/leverage` | 1 test **merah** |
+> | K8: `dropUnclosedKlines` → identity (percobaan 1) | ⚠️ **hijau — celah ketahuan** |
+> | K8: setelah ditambah wiring guard di `fullPipeline.test.ts` | 1 test **merah** ✅ |
+>
+> Percobaan K8 pertama LOLOS: helper-nya punya unit test, tapi tidak ada yang
+> membuktikan pipeline benar-benar MEMAKAINYA. Ditambal dengan test yang
+> menyuntik lilin berjalan ber-`high` absurd dan memastikan bound grid tidak
+> meledak.
+>
+> **Perubahan perilaku yang DIHARAPKAN setelah deploy:**
+> 1. **Distribusi `rankingScore` bergeser TURUN** (K6 penalti adverse + K7
+>    favorability ACC/DIST turun). Ambang TRADE 55 jadi lebih ketat tanpa
+>    mengubah ambangnya. Ini tujuan utama Stage 3.
+> 2. Label regime **konsisten lintas menit cron** (:07 vs :52) untuk pair yang
+>    sama — efek langsung K8.
+> 3. Sinyal tertunda maksimal 1 candle (tukar-tambah K8: hilang repaint).
+> 4. `liquidationPrice` bisa **0** untuk grid ber-leverage efektif < 1x. Itu
+>    benar (likuidasi memang tidak mungkin), dan berarti gate
+>    `liquidationPrice >= stopLossPrice` lebih jarang menolak. Rumus lama
+>    memalsukan harga likuidasi lalu memakainya untuk menolak setup aman.
+> 5. `netProfitPerCycleUSD` naik untuk pair yang siklusnya sering — pembagi
+>    funding tidak lagi `gridCount`.
+>
+> ⚠️ **`mm_component` TIDAK sebanding lintas batas deploy ini.** Baris lama =
+> gabungan 6 sinyal; baris baru = supportive saja. Skrip kalibrasi WAJIB
+> memfilter `mm_adverse_component IS NOT NULL`.
+>
+> **Sisa untuk Krakatau (GATED):** `d1 migrations apply --remote` (0015)
+> **LALU** `wrangler deploy` — urutan ini wajib.
 
 ---
 

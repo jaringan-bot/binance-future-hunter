@@ -9,6 +9,7 @@ import {
   computeDynamicIntervalPct,
   evaluateDcaSmartMoney,
   DCA_TIMING_TRADE_MIN,
+  DCA_TIMING_WATCH_MIN,
   type DcaSmartMoneyInput,
 } from "./dcaSmartMoneyAdapter.js";
 import type { KlineCandle } from "../toolHelpers.js";
@@ -18,7 +19,7 @@ function baseInput(over: Partial<DcaSmartMoneyInput> = {}): DcaSmartMoneyInput {
     symbol: "BTCUSDT",
     side: "LONG",
     currentPrice: 100,
-    scenarioC: { slopeSpot: 3, slopeFutures: 1, takerSpotNorm: 80, multiTfAlign: 100 },
+    flowAlignment: { takerFlowNorm: 80, multiTfAlign: 100 },
     fundingRate: -0.0002,
     fundingHistory30d: Array.from({ length: 30 }, (_, i) => -0.0001 + i * 0.00001),
     oiVelocityPerHour: 50,
@@ -110,7 +111,7 @@ describe("evaluateDcaSmartMoney", () => {
   it("1. valid accumulation -> DCA_TRADE when timing high and pause NONE", () => {
     const r = evaluateDcaSmartMoney(
       baseInput({
-        scenarioC: { slopeSpot: 5, slopeFutures: 1, takerSpotNorm: 90, multiTfAlign: 100 },
+        flowAlignment: { takerFlowNorm: 90, multiTfAlign: 100 },
         fundingHistory30d: Array.from({ length: 20 }, () => -0.0005),
         fundingRate: -0.001,
         oiVelocityPerHour: 80,
@@ -125,14 +126,14 @@ describe("evaluateDcaSmartMoney", () => {
   it("2. PAUSE_SOFT during distribution (S_C < 25)", () => {
     const r = evaluateDcaSmartMoney(
       baseInput({
-        scenarioC: { slopeSpot: 0, slopeFutures: 1, takerSpotNorm: 0, multiTfAlign: 0 },
+        flowAlignment: { takerFlowNorm: 0, multiTfAlign: 0 },
         fundingRate: 0,
         fundingHistory30d: [-0.0001, -0.00005, 0, 0.00005, 0.0001],
         liqSpikeUsd: 50_000,
         liqMean24hUsd: 500_000,
       }),
     );
-    expect(r.scenarioCScore).toBeLessThan(25);
+    expect(r.flowAlignmentScore).toBeLessThan(25);
     expect(r.safetyScore).toBeGreaterThanOrEqual(20);
     expect(r.decision).toBe("DCA_PAUSE_SOFT");
     expect(r.pauseLevel).toBe("PAUSE_SOFT");
@@ -141,7 +142,7 @@ describe("evaluateDcaSmartMoney", () => {
   it("3. PAUSE_HARD during Long Squeeze Risk > 80", () => {
     const r = evaluateDcaSmartMoney(
       baseInput({
-        scenarioC: { slopeSpot: 3, slopeFutures: 1, takerSpotNorm: 50, multiTfAlign: 50 },
+        flowAlignment: { takerFlowNorm: 50, multiTfAlign: 50 },
         fundingRate: 0.001,
         fundingHistory30d: Array.from({ length: 10 }, (_, i) => i * 0.00001),
       }),
@@ -155,7 +156,7 @@ describe("evaluateDcaSmartMoney", () => {
       baseInput({
         liqSpikeUsd: 10_000_000,
         liqMean24hUsd: 1_000_000,
-        scenarioC: { slopeSpot: 3, slopeFutures: 1, takerSpotNorm: 80, multiTfAlign: 100 },
+        flowAlignment: { takerFlowNorm: 80, multiTfAlign: 100 },
       }),
     );
     expect(r.decision).toBe("DCA_STOP");
@@ -167,7 +168,7 @@ describe("evaluateDcaSmartMoney", () => {
     const r = evaluateDcaSmartMoney(
       baseInput({
         gridSmDecision: "GRID_NO_TRADE",
-        scenarioC: { slopeSpot: 2, slopeFutures: 1, takerSpotNorm: 60, multiTfAlign: 50 },
+        flowAlignment: { takerFlowNorm: 60, multiTfAlign: 50 },
         fundingRate: -0.0001,
         fundingHistory30d: [-0.0002, -0.0001, 0, 0.0001, 0.0002],
       }),
@@ -187,11 +188,10 @@ describe("evaluateDcaSmartMoney", () => {
 // karena histori funding cuma ada untuk 50 pair SNAPSHOT_WATCHLIST.
 // ─────────────────────────────────────────────────────────────
 describe("K4: reachability head DCA Smart Money", () => {
-  // Mereplikasi apa yang benar-benar dibangun buildAndEvaluateDcaSmartMoney:
-  // slopeSpot = slopeFutures * 0.85 (K3 -- masih dikarang sampai Stage 3).
-  function scenarioC(takerSpotNorm: number, multiTfAlign: number) {
-    const slopeFutures = 1;
-    return { slopeSpot: slopeFutures * 0.85, slopeFutures, takerSpotNorm, multiTfAlign };
+  // K3 (Stage 3): komponen slopeSpot yang dikarang SUDAH DIHAPUS, jadi
+  // helper ini kini persis sama dengan yang dibangun produksi.
+  function flowAlignment(takerFlowNorm: number, multiTfAlign: number) {
+    return { takerFlowNorm, multiTfAlign };
   }
 
   function candles(n = 40) {
@@ -210,7 +210,7 @@ describe("K4: reachability head DCA Smart Money", () => {
       symbol: "TESTUSDT",
       side: "LONG",
       currentPrice: 100,
-      scenarioC: scenarioC(100, 100), // S_C maksimum yang mungkin
+      flowAlignment: flowAlignment(100, 100), // S_C maksimum yang mungkin
       fundingRate: -0.0009,
       fundingHistory30d: [],
       oiVelocityPerHour: 1000,
@@ -223,11 +223,17 @@ describe("K4: reachability head DCA Smart Money", () => {
     };
   }
 
-  it("REGRESSION: with an EMPTY funding history, timing is capped below the WATCH floor -- DCA is unreachable", () => {
-    // Ini kondisi lama untuk mayoritas pair. Percentile jatuh ke 50 netral:
-    // shortSqueezeBoost = 0 DAN longSqueezeRisk = 0 sekaligus.
-    //   timing_LONG = 0.4*S_C + 0.3*0 + 0.2*oi + 0.1*100
-    //               <= 0.4*64.025 + 0 + 20 + 10 = 55.61  <  60
+  // Dua perbaikan menyusun di sini:
+  //   K4 (Stage 2) memberi histori funding NYATA untuk semua perp.
+  //   K3 (Stage 3) membuang komponen slopeSpot palsu, sehingga S_C tidak
+  //   lagi ter-cap di 64.
+  // Sebelum KEDUANYA, timing LONG maksimum = 0.4*64.025 + 0 + 20 + 10 =
+  // 55.61 -- di bawah WATCH floor 60, jadi head DCA TIDAK PERNAH bisa
+  // keluar dari PAUSE_SOFT untuk mayoritas pair.
+  it("tanpa histori funding: WATCH terjangkau, tapi TRADE tetap butuh konteks funding", () => {
+    // Percentile jatuh ke 50 netral -> shortSqueezeBoost 0 DAN
+    // longSqueezeRisk 0 sekaligus. Maksimum yang bisa dicapai:
+    //   0.4*100 + 0.3*0 + 0.2*100 + 0.1*100 = 70   (>= WATCH 60, < TRADE 75)
     const r = evaluateDcaSmartMoney(
       input({
         fundingHistory30d: [],
@@ -237,9 +243,10 @@ describe("K4: reachability head DCA Smart Money", () => {
     );
 
     expect(r.fundingPercentile).toBe(50);
-    expect(r.timingScore).toBeLessThan(60);
-    expect(r.decision).toBe("DCA_PAUSE_SOFT");
-    // Dan alasannya sekarang TERLIHAT, bukan senyap.
+    expect(r.timingScore).toBeGreaterThanOrEqual(DCA_TIMING_WATCH_MIN);
+    expect(r.timingScore).toBeLessThan(DCA_TIMING_TRADE_MIN);
+    expect(r.decision).toBe("DCA_WATCH");
+    // Tipisnya histori tetap TERLIHAT, bukan senyap seperti dulu.
     expect(r.reasons.join(" ")).toContain("Histori funding tipis");
   });
 
@@ -268,7 +275,7 @@ describe("K4: reachability head DCA Smart Money", () => {
     const r = evaluateDcaSmartMoney(
       input({
         side: "SHORT",
-        scenarioC: scenarioC(0, 0), // S_C minimum -> (100 - S_C) maksimum untuk SHORT
+        flowAlignment: flowAlignment(0, 0), // S_C minimum -> (100 - S_C) maksimum untuk SHORT
         fundingRate: 0.001,
         fundingHistory30d: history,
         oiVelocityHistory: [1, 2, 3],

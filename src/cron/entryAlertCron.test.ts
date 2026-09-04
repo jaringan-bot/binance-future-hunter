@@ -128,7 +128,7 @@ function stubDcaSm(decision: DcaSmDecision, over: Partial<DcaSmartMoneyResult> =
     maxEntries: 6,
     fundingPercentile: 40,
     oiVelocityPercentile: 50,
-    scenarioCScore: 40,
+    flowAlignmentScore: 40,
     reasons: [],
     ...over,
   };

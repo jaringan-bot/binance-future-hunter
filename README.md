@@ -344,6 +344,31 @@ Detail penuh (termasuk raw data test per klaim): Section 10,
 - **Migrasi KV→D1 (basis history) TIDAK backfill data lama** — histori basis
   yang sempat tersimpan di Workers KV sebelum migrasi ini hilang, window 24
   jam baru keisi ulang natural beberapa jam setelah deploy.
+- **CVD di `whalescope_full_pipeline` berasal dari 100 aggTrades TERAKHIR,
+  bukan window waktu** — `getAggTrades(symbol, 100)` mengambil 100 trade
+  terakhir apa adanya. Di pair sangat likuid itu bisa cuma **2–10 detik
+  tape**, bukan gambaran order flow satu jam. Sejak Stage 3 (2026-09-04)
+  lebar sampel diukur (`cvdSampleSeconds`) dan komponen buy-pressure
+  **ditarik ke netral** kalau sampelnya terlalu sempit (`< 10 detik` = tidak
+  dipercaya sama sekali, `>= 60 detik` = dipercaya penuh, linear di
+  antaranya). Window yang benar-benar berbasis waktu butuh
+  `aggTradesPaginator` — terukur **~115 halaman per 60 menit** di BTCUSDT,
+  jadi tidak dipakai di cron 40-symbol karena akan langsung memicu
+  weight-ban. Ambang 10/60 detik **belum dikalibrasi**.
+- **Sub-skor MM dipisah menurut arah pengaruhnya (sejak Stage 3)** —
+  `absorption` + `oiDivergence` MENDUKUNG long-grid dan menaikkan skor;
+  `spoofing` + `stopHunt` + `fundingExtreme` + `basisArb` menaikkan RISIKO
+  dan **mengurangi** skor. Sebelumnya keenamnya dijumlah jadi satu komponen
+  positif berbobot 35%, sehingga makin banyak manipulasi terdeteksi makin
+  tinggi ranking-nya. Bobot penalti (`MM_ADVERSE_PENALTY_WEIGHT`) **belum
+  dikalibrasi**.
+- **Semua indikator dihitung dari candle yang SUDAH CLOSE (sejak Stage 3)** —
+  `dropUnclosedKlines()` membuang lilin berjalan di batas fetch. Sebelumnya
+  ADX/ATR/realized-vol/volume-spike/bound-grid/sweep membaca lilin setengah
+  jadi, sehingga klasifikasi regime bergantung pada **menit ke berapa cron
+  jalan** (:07 vs :52). Konsekuensinya sinyal tertunda maksimal 1 candle,
+  ditukar dengan hilangnya repaint. `currentPrice` tetap real-time
+  (mark price).
 - **`binance_backtest_signal`: forward return DIHITUNG ON-DEMAND dari klines
   historis** (close candle 1h terdekat ke waktu target), BUKAN simulasi
   eksekusi order riil — slippage/fee/partial fill tidak dihitung. Sample

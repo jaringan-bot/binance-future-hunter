@@ -17,8 +17,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import * as binanceProxy from "../binanceProxyClient.js";
 import type { KlineTuple } from "../binanceProxyClient.js";
-import { symbolSchema, errorResult } from "../shared.js";
-import { computeCvdFromTrades, summarizeKlines, calculateADX, type KlineCandle } from "../toolHelpers.js";
+import { symbolSchema, errorResult, computeRealizedVolatility } from "../shared.js";
+import { computeCvdFromTrades, summarizeKlines, calculateADX, dropUnclosedKlines, type KlineCandle } from "../toolHelpers.js";
 import { computeOiVelocity } from "./oiVelocity.js";
 import { classifyRegime, type MarketRegime, type RegimeResult } from "./marketRegime.js";
 import { analyzeSmartMoneyDivergence, type MarketStructureCondition } from "../smartMoneyAnalysis.js";
@@ -51,6 +51,8 @@ import {
   scoreTier1Signals,
   scaleCapitalForTargetLoss,
   decidePipelineOutcome,
+  MM_SUPPORTIVE_SIGNALS,
+  MM_ADVERSE_SIGNALS,
   type HardScreenInput,
   type Tier1ScoreInput,
   type Tier1ScoreComponents,
@@ -225,18 +227,14 @@ export interface PrefetchedTickerFunding {
 // re-fetch OI/CVD sendiri) -- efisiensi sengaja karena pipeline ini SATU
 // composite tool call, bukan bug.
 // ─────────────────────────────────────────────────────────────
+// G5 (Stage 3): SATU sumber kebenaran -- computeRealizedVolatility()
+// (shared.ts), sama dengan marketRegime.ts dan marketContext.ts. Dulu file
+// ini menyalin rumusnya inline sementara marketContext.ts memakai varian
+// LAIN (sample variance), sehingga dua gate bisa melabeli regime berbeda
+// untuk candle yang sama. `periodPct` (bukan `annualizedPct`) dipakai
+// karena volatilitySpikeRatio itu RASIO -- anualisasi saling meniadakan.
 function realizedVolPct(candles: KlineCandle[]): number {
-  // Duplikat kecil dari helper privat marketRegime.ts (tidak diekspor) --
-  // cuma memanggil computeRealizedVolatility (shared.ts) dengan anualisasi
-  // 24*365 yang sama, bukan reimplementasi logic baru.
-  const closes = candles.map((c) => c.close);
-  const periodsPerYear = 24 * 365;
-  if (closes.length < 2) return 0;
-  const logReturns: number[] = [];
-  for (let i = 1; i < closes.length; i++) logReturns.push(Math.log(closes[i] / closes[i - 1]));
-  const sumSq = logReturns.reduce((acc, r) => acc + r * r, 0);
-  const periodVol = Math.sqrt(sumSq / logReturns.length);
-  return periodVol * Math.sqrt(periodsPerYear) * 100;
+  return computeRealizedVolatility(candles.map((c) => c.close), 24 * 365).periodPct;
 }
 
 // EMERGENCY PATCH (2026-08-27, lihat pipelineEngine.ts ADX_FALLBACK_MIN/
@@ -401,7 +399,9 @@ async function runPipelineInternal(
     // lookbackBars + 2). Tanpa ini head trad selalu short-circuit "Candle tidak
     // cukup" untuk lookbackBars >= 39 (mis. default 50 -> butuh 52, dulu cuma
     // fetch 50). Lihat src/cron/entryAlertFuturesAudit.test.ts.
-    const klineLimit = Math.max(opts.lookbackBars + 2, 40);
+    // +3 (bukan +2): lookbackBars + excludeLast + 1 untuk head trad, PLUS 1
+    // lagi karena K8 membuang candle yang belum close (Stage 3).
+    const klineLimit = Math.max(opts.lookbackBars + 3, 41);
     const upperSymbol = symbol.toUpperCase();
 
     // Ticker: bulk-map miss diperlakukan SAMA PERSIS kayak fetch per-symbol
@@ -430,15 +430,25 @@ async function runPipelineInternal(
         ? Promise.resolve(prefetched.funding.get(upperSymbol)!)
         : binanceProxy.getCurrentFundingRateNative(symbol);
 
-    const [tickerResult, funding, klines1h, klines4h, oiCurrent, oiHist2, aggTrades] = await Promise.all([
+    const [tickerResult, funding, klines1hRaw, klines4hRaw, oiCurrent, oiHist2, aggTrades] = await Promise.all([
       tickerPromise,
       fundingPromise,
       binanceProxy.getKlinesNative(symbol, "1h", klineLimit),
-      binanceProxy.getKlinesNative(symbol, "4h", 40),
+      binanceProxy.getKlinesNative(symbol, "4h", 41),
       binanceProxy.getOpenInterestNative(symbol),
       binanceProxy.getOpenInterestHistNative(symbol, "1h", 2),
       binanceProxy.getAggTrades(symbol, 100),
     ]);
+
+    // ── K8 (Stage 3): buang candle yang BELUM CLOSE, SEKALI, di sini ──
+    // Semua konsumen hilir (regime/ADX/ATR/realized-vol/volume-spike, grid
+    // bound HH-LL, MM stop-hunt, sweep C_0, swing 4h DCA, fetchMarketContext)
+    // menerima array HASIL ini, jadi tidak ada satu pun indikator yang masih
+    // membaca lilin setengah jadi. `currentPrice` TETAP real-time (markPrice
+    // dari premiumIndex, di bawah) -- yang dibekukan cuma HISTORINYA.
+    // Limit fetch dinaikkan 1 supaya window efektif tidak menyusut.
+    const klines1h = dropUnclosedKlines(klines1hRaw);
+    const klines4h = dropUnclosedKlines(klines4hRaw);
 
     // "not tradable" DIDERIVASI dari ticker24hr, BUKAN fetch exchangeInfo
     // status terpisah -- lihat JSDoc HardScreenInput.tradable di pipelineEngine.ts.
@@ -463,6 +473,19 @@ async function runPipelineInternal(
     const oiChangePct = oiPrevVal !== 0 ? ((oiCurrentVal - oiPrevVal) / oiPrevVal) * 100 : 0;
 
     const cvd = computeCvdFromTrades(aggTrades);
+    // ── K9 (Stage 3): seberapa lebar window yang diwakili CVD ini ──
+    // `getAggTrades(symbol, 100)` mengambil 100 trade TERAKHIR, bukan window
+    // waktu. Di BTCUSDT itu bisa 2-10 detik tape. Angka itu lalu memberi
+    // makan komponen buyPressure (15%), klasifikasi ACCUMULATION/DISTRIBUTION,
+    // absorption, takerMatch DCA, dan flow-alignment. Memperlakukannya setara
+    // dengan sinyal berbasis jam adalah sumber "sinyal halu" yang nyata.
+    //
+    // Repo punya aggTradesPaginator.fetchAggTradesForWindow() untuk window
+    // waktu sungguhan, TAPI terukur ~115 halaman per 60 menit di BTCUSDT --
+    // 40 symbol/tick akan langsung memicu ban. Jadi sampelnya tidak
+    // diperlebar; yang diperbaiki adalah BOBOT KEPERCAYAANNYA.
+    const cvdSampleSeconds =
+      aggTrades.length >= 2 ? Math.max(0, (aggTrades[aggTrades.length - 1].T - aggTrades[0].T) / 1000) : 0;
 
     const regime1h = safeComputeRegime(klines1h, oiChangePct, cvd.buyPct);
     const regime4h = safeComputeRegime(klines4h, oiChangePct, cvd.buyPct);
@@ -589,7 +612,7 @@ async function runPipelineInternal(
       binanceProxy.getOrderBookDepth(symbol, 50),
       getPairThreshold(symbol),
       binanceProxy.getSpotPrice(symbol).catch(() => null),
-      dcaOpts ? binanceProxy.getKlinesNative(symbol, "1d", 30).catch(() => null) : Promise.resolve(null),
+      dcaOpts ? binanceProxy.getKlinesNative(symbol, "1d", 31).catch(() => null) : Promise.resolve(null),
     ]);
 
     // fetchMarketContext SEBELUMNYA di Wave 1 Promise.all dengan fetch
@@ -738,14 +761,28 @@ async function runPipelineInternal(
       .filter(([, s]) => s.score >= 0.6)
       .map(([k]) => k);
 
+    // K6 (Stage 3): sinyal MM dipisah menurut ARAH pengaruhnya ke long-grid
+    // mean-reversion. Yang supportive menaikkan skor, yang adverse
+    // menguranginya -- dulu keenamnya dijumlah jadi satu komponen positif,
+    // sehingga makin banyak manipulasi terdeteksi makin tinggi skornya.
+    const mmSupportivePct =
+      (MM_SUPPORTIVE_SIGNALS.reduce((sum, k) => sum + mmSignals[k].score, 0) / MM_SUPPORTIVE_SIGNALS.length) * 100;
+    const mmAdversePct =
+      (MM_ADVERSE_SIGNALS.reduce((sum, k) => sum + mmSignals[k].score, 0) / MM_ADVERSE_SIGNALS.length) * 100;
+
     const tier1ScoreInput: Tier1ScoreInput = {
-      mmTotalScore,
+      mmSupportivePct,
+      mmAdversePct,
       smartMoneyCondition: smartMoney.condition,
       smartMoneyConfidenceScore: effectiveSmartMoneyConfidence,
       regime1h,
       regime4h,
       obiBidPct20: obi.depth20,
       cvdBuyPct: cvd.buyPct,
+      // K9 (Stage 3): berapa DETIK tape yang benar-benar diwakili 100
+      // aggTrades ini. Di pair likuid bisa cuma 2-10 detik -- itu noise,
+      // bukan order flow, dan tidak boleh dipercaya seolah setara.
+      cvdSampleSeconds,
     };
     const tier1Score = scoreTier1Signals(tier1ScoreInput);
 
@@ -759,6 +796,26 @@ async function runPipelineInternal(
       lookbackBars: opts.lookbackBars,
     };
     const gridSetup = computeGridBounds(candles1h, currentPrice, gridBoundOpts);
+
+    // G3 (Stage 3): estimasi siklus/hari HARUS dihitung SEBELUM leverage
+    // loop, karena calculateGridRisk memakainya untuk membagi funding bleed
+    // harian dengan satuan yang benar. `matchesNeeded: 0` di sini disengaja
+    // -- crossingRate/estHoursPerMatch tidak bergantung padanya; yang
+    // bergantung cuma estimasi waktu-ke-breakeven (dihitung ulang di bawah
+    // setelah minBreakevenCycles diketahui).
+    const gridVelocityPreview = computeGridVelocity({
+      candles: candles1h,
+      lowerPrice: gridSetup.lowerPrice,
+      upperPrice: gridSetup.upperPrice,
+      gridCount: gridSetup.gridCount,
+      gridType: gridSetup.gridType,
+      matchesNeeded: 0,
+      candleDurationHours: 1,
+    });
+    const estimatedCyclesPerDay =
+      gridVelocityPreview.estHoursPerMatch != null && gridVelocityPreview.estHoursPerMatch > 0
+        ? 24 / gridVelocityPreview.estHoursPerMatch
+        : undefined;
 
     // ─── Leverage loop: capital-solve exact per leverage, descending ───
     const sortedLeverages = [...opts.maxLeverageOptions].sort((a, b) => b - a);
@@ -792,6 +849,7 @@ async function runPipelineInternal(
         stopLossPrice: gridSetup.stopLossPrice,
         leverage,
         gridType: gridSetup.gridType,
+        ...(estimatedCyclesPerDay !== undefined ? { estimatedCyclesPerDay } : {}),
       };
 
       const referenceRun = await calculateGridRisk(referenceParams, marketData, contextualRisk as GridContextualRisk);
@@ -946,7 +1004,10 @@ async function runPipelineInternal(
       const swing4hWindow = candles4h.slice(-40);
       const swingHigh4h = swing4hWindow.length ? Math.max(...swing4hWindow.map((c) => c.high)) : currentPrice;
       const swingLow4h = swing4hWindow.length ? Math.min(...swing4hWindow.map((c) => c.low)) : currentPrice;
-      const regime1dFull = klines1d ? safeComputeRegime(klines1d, oiChangePct, cvd.buyPct) : null;
+      // K8: candle 1D berjalan bisa berumur beberapa menit saja -- ADX/regime
+      // 1D dari lilin itu tidak bermakna. Dibuang seperti 1h/4h.
+      const klines1dClosed = klines1d ? dropUnclosedKlines(klines1d) : null;
+      const regime1dFull = klines1dClosed ? safeComputeRegime(klines1dClosed, oiChangePct, cvd.buyPct) : null;
       dca = evaluateDcaEntry({
         symbol,
         currentPrice,
