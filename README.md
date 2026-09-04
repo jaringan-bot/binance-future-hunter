@@ -814,6 +814,10 @@ so the numbers are approximate — useful for relative comparison
 
 You will most likely never be charged on either platform for personal use.
 
+## Sponsors
+
+This project is sponsored by **PT. Jaringan Semesta Raya**.
+
 ## Disclaimer
 
 **This project is open source and public** — the source code, architecture,
