@@ -7,7 +7,7 @@
 // tidak kena block WAF itu DAN tidak kena geo-restriction Binance (yang
 // memblokir region US/iad1, region default Vercel).
 
-import { fetchWithRetry } from "./retry.js";
+import { fetchWithRetry, parseRetryAfterMs } from "./retry.js";
 import { withCache } from "./cache.js";
 import { checkAndRecordRequest } from "./rateLimiter.js";
 import { signBinanceParams } from "./binanceHmac.js";
@@ -162,6 +162,9 @@ export function setProxyConfig(
   secondaryEndpoint = secondaryUrl && secondarySecret ? { url: secondaryUrl, secret: secondarySecret } : undefined;
   directFallbackEnabled = enableDirectFallback;
   roundRobinCursor = 0;
+  // Endpoint bisa berubah antar-invocation (secret di-rotate, relay diganti)
+  // -- cooldown yang tercatat untuk URL lama tidak relevan lagi.
+  resetTierCooldowns();
 }
 
 export function setBinanceApiCredentials(
@@ -203,6 +206,13 @@ export class BinanceProxyError extends Error {
     // baru) menyembuhkan gejalanya di kebanyakan kasus -- lihat pemanggil
     // parseProxyResponse() di callProxyEndpoint/callProxyDirect.
     public readonly kind: "http" | "parse" = "http",
+    /**
+     * Epoch ms sampai kapan tier yang menghasilkan error ini sebaiknya
+     * TIDAK dipakai lagi (diisi cuma untuk 418/429 -- lihat
+     * computeCooldownUntilMs). `undefined` = tidak ada info cooldown;
+     * caller pakai default. Lihat blok "per-relay cooldown" di bawah.
+     */
+    public readonly cooldownUntilMs?: number,
   ) {
     super(message);
     this.name = "BinanceProxyError";
@@ -236,6 +246,77 @@ const FAILOVER_STATUS = new Set([401, 402, 403, 404, 418, 429, 451, 500, 502, 50
 // status asli yang ke-surface.
 const DIRECT_UNHELPFUL_STATUS = new Set([404, 418, 451]);
 
+// ─────────────────────────────────────────────────────────────
+// PER-RELAY COOLDOWN (2026-09-04, Stage 1 signal-integrity)
+//
+// MASALAH yang ditutup: 418/429 ada di FAILOVER_STATUS, jadi begitu relay-1
+// kena IP weight-ban Binance, SELURUH beban langsung pindah ke relay-2 --
+// yang lalu ikut kena ban dengan beban dua kali lipat. Tidak ada memori
+// bahwa sebuah relay baru saja diberitahu "berhenti dulu", jadi tiap call
+// berikutnya mengetuk pintu yang sama lagi.
+//
+// Sekarang: relay yang membalas 418/429 di-SKIP sampai cooldown-nya lewat.
+// Durasi diambil (prioritas menurun) dari:
+//   1. `banned until <epoch-ms>` di body `-1003` Binance  -- angka ASLI
+//   2. header `Retry-After` (parseRetryAfterMs, retry.ts)
+//   3. default 60 detik
+// di-cap RELAY_COOLDOWN_MAX_MS supaya satu balasan aneh tidak mematikan
+// relay berjam-jam.
+//
+// KETERBATASAN JUJUR (sama seperti rateLimiter.ts): Map di bawah ini
+// module-level, jadi efektif SELAMA isolate yang sama dipakai ulang. Worker
+// stateless per-request -- ini proteksi best-effort, BUKAN state global.
+// Cukup untuk kasus yang dituju (satu invocation cron memproses puluhan
+// symbol berturut-turut di isolate yang sama).
+// ─────────────────────────────────────────────────────────────
+const COOLDOWN_STATUS = new Set([418, 429]);
+export const RELAY_COOLDOWN_DEFAULT_MS = 60_000;
+export const RELAY_COOLDOWN_MAX_MS = 15 * 60_000;
+export const DIRECT_TIER_KEY = "direct";
+
+const relayCooldownUntil = new Map<string, number>();
+
+/** `banned until 1751234567890` dari body `-1003` Binance -> epoch ms. */
+function parseBannedUntilMs(bodyText: string): number | undefined {
+  const match = /banned until (\d{10,})/i.exec(bodyText);
+  if (!match) return undefined;
+  const ms = Number(match[1]);
+  return Number.isFinite(ms) && ms > 0 ? ms : undefined;
+}
+
+function computeCooldownUntilMs(response: Response, bodyText: string, now: number): number | undefined {
+  if (!COOLDOWN_STATUS.has(response.status)) return undefined;
+  const bannedUntil = parseBannedUntilMs(bodyText);
+  if (bannedUntil !== undefined && bannedUntil > now) {
+    return Math.min(bannedUntil, now + RELAY_COOLDOWN_MAX_MS);
+  }
+  const retryAfterMs = parseRetryAfterMs(response, now);
+  const waitMs = retryAfterMs !== undefined && retryAfterMs > 0 ? retryAfterMs : RELAY_COOLDOWN_DEFAULT_MS;
+  return now + Math.min(waitMs, RELAY_COOLDOWN_MAX_MS);
+}
+
+export function isTierCoolingDown(key: string, now: number = Date.now()): boolean {
+  const until = relayCooldownUntil.get(key);
+  if (until === undefined) return false;
+  if (until <= now) {
+    relayCooldownUntil.delete(key);
+    return false;
+  }
+  return true;
+}
+
+export function recordTierCooldown(key: string, untilMs: number | undefined, now: number = Date.now()): void {
+  const until = untilMs !== undefined && untilMs > now ? Math.min(untilMs, now + RELAY_COOLDOWN_MAX_MS) : now + RELAY_COOLDOWN_DEFAULT_MS;
+  const existing = relayCooldownUntil.get(key);
+  // Jangan pernah MEMPERPENDEK cooldown yang sudah tercatat.
+  relayCooldownUntil.set(key, existing !== undefined && existing > until ? existing : until);
+}
+
+/** Dipakai test + `setProxyConfig` (config berubah -> state lama tidak relevan). */
+export function resetTierCooldowns(): void {
+  relayCooldownUntil.clear();
+}
+
 const DIRECT_BASE_BY_MARKET: Record<"futures" | "spot", string> = {
   futures: "https://fapi.binance.com",
   spot: "https://api.binance.com",
@@ -262,6 +343,8 @@ async function parseProxyResponse<T>(response: Response, path: string, authError
         (response.status === 401 ? authErrorHint : "Cek symbol/parameter, atau kemungkinan geo-restriction Binance."),
       response.status,
       path,
+      "http",
+      computeCooldownUntilMs(response, bodyText, Date.now()),
     );
   }
   try {
@@ -388,6 +471,8 @@ async function callProxyDirect<T>(
 
 interface ProxyTier {
   label: string;
+  /** Kunci cooldown -- URL relay, atau DIRECT_TIER_KEY untuk tier direct. */
+  key: string;
   run: () => Promise<unknown>;
 }
 
@@ -427,31 +512,61 @@ async function callProxy<T>(
     const b = primaryFirst ? secondaryEndpoint : primaryEndpoint!;
     const aLabel = primaryFirst ? "primary" : "secondary";
     const bLabel = primaryFirst ? "secondary" : "primary";
-    tiers.push({ label: aLabel, run: () => callProxyEndpoint<T>(a, path, params, market, options) });
-    tiers.push({ label: bLabel, run: () => callProxyEndpoint<T>(b, path, params, market, options) });
+    tiers.push({ label: aLabel, key: a.url, run: () => callProxyEndpoint<T>(a, path, params, market, options) });
+    tiers.push({ label: bLabel, key: b.url, run: () => callProxyEndpoint<T>(b, path, params, market, options) });
   } else {
     tiers.push({
       label: "primary",
+      key: primaryEndpoint.url,
       run: () => callProxyEndpoint<T>(primaryEndpoint!, path, params, market, options),
     });
   }
   if (directFallbackEnabled) {
-    tiers.push({ label: "direct", run: () => callProxyDirect<T>(path, params, market, options) });
+    tiers.push({ label: "direct", key: DIRECT_TIER_KEY, run: () => callProxyDirect<T>(path, params, market, options) });
   }
+
+  // Tier yang masih dalam cooldown (baru kena 418/429) di-SKIP sebelum
+  // dicoba -- ini yang mencegah beban pindah bulat-bulat ke relay lain dan
+  // ikut membakarnya. Kalau SEMUA tier cooling down, jangan diam-diam
+  // sukses/gagal ambigu: lempar error eksplisit yang menyebut kapan bisa
+  // dicoba lagi.
+  const now = Date.now();
+  const usableTiers = tiers.filter((tier) => !isTierCoolingDown(tier.key, now));
+  if (usableTiers.length === 0) {
+    const soonest = Math.min(...tiers.map((tier) => relayCooldownUntil.get(tier.key) ?? now));
+    throw new BinanceProxyError(
+      `Semua tier proxy sedang cooldown setelah rate-limit/ban Binance (418/429). Coba lagi dalam ~${Math.max(0, Math.ceil((soonest - now) / 1000))} detik.`,
+      429,
+      path,
+    );
+  }
+  if (usableTiers.length < tiers.length) {
+    console.log(
+      `[proxy-cooldown] skip ${tiers.length - usableTiers.length} tier yang masih cooldown untuk ${path} (sisa: ${usableTiers.map((t) => t.label).join(", ")})`,
+    );
+  }
+
   let lastErr: unknown;
-  for (let i = 0; i < tiers.length; i++) {
+  for (let i = 0; i < usableTiers.length; i++) {
     try {
-      return (await tiers[i].run()) as T;
+      return (await usableTiers[i].run()) as T;
     } catch (err) {
       lastErr = err;
       const status = err instanceof BinanceProxyError ? err.status : undefined;
+      if (status !== undefined && COOLDOWN_STATUS.has(status)) {
+        const until = err instanceof BinanceProxyError ? err.cooldownUntilMs : undefined;
+        recordTierCooldown(usableTiers[i].key, until);
+        console.log(
+          `[proxy-cooldown] ${usableTiers[i].label} kena ${status} -> cooldown sampai ${new Date(relayCooldownUntil.get(usableTiers[i].key)!).toISOString()}`,
+        );
+      }
       const isFailoverWorthy = status === undefined || FAILOVER_STATUS.has(status);
-      let nextTier = tiers[i + 1];
+      let nextTier = usableTiers[i + 1];
       if (status !== undefined && DIRECT_UNHELPFUL_STATUS.has(status) && nextTier?.label === "direct") {
         nextTier = undefined as unknown as ProxyTier;
       }
       if (!isFailoverWorthy || !nextTier) throw err;
-      console.log(`[proxy-failover] ${tiers[i].label} gagal (${status ?? "network error"}), coba ${nextTier.label} untuk ${path}`);
+      console.log(`[proxy-failover] ${usableTiers[i].label} gagal (${status ?? "network error"}), coba ${nextTier.label} untuk ${path}`);
     }
   }
   throw lastErr;

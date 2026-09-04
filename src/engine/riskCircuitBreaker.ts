@@ -7,8 +7,10 @@
 //   state:daily_loss_circuit  -- { count, total_loss, window_start, last_notified_at? }
 //   state:macro_risk_circuit  -- { active, reason?, at?, last_notified_at? }
 //
-// Daily trip: count >= 3 ATAU total_loss >= 60 dalam window ~24 jam
-// (KV expirationTtl 25 jam, jadi window roll-off otomatis).
+// Daily trip: count >= limit ATAU total_loss >= DAILY_LOSS_USD_LIMIT dalam
+// window ~24 jam (KV expirationTtl 25 jam, jadi window roll-off otomatis).
+// PENTING: `count`/`total_loss` menghitung ALERT TERKIRIM, bukan kerugian
+// nyata -- lihat blok I6 di bawah sebelum menafsirkan angkanya.
 // Macro: active === true -> cron skip Phase 2 (deep pipeline).
 
 import * as kvConfig from "../kvConfig.js";
@@ -16,8 +18,32 @@ import * as kvConfig from "../kvConfig.js";
 export const DAILY_LOSS_KEY = "state:daily_loss_circuit";
 export const MACRO_RISK_KEY = "state:macro_risk_circuit";
 
-export const DAILY_LOSS_COUNT_LIMIT = 3;
-export const DAILY_LOSS_USD_LIMIT = 60;
+// ─────────────────────────────────────────────────────────────
+// I6 (2026-09-04, Stage 2) -- INI ALERT BUDGET, BUKAN CIRCUIT BREAKER RUGI.
+//
+// Nama lama menyesatkan dan menyebabkan salah baca operasional.
+// recordTradeAlert() menaikkan `count` dan `total_loss` SETIAP ALERT
+// TERKIRIM, tanpa hubungan apa pun dengan hasil trade -- worker tidak punya
+// akses posisi/PnL user. Dengan limit 3, cukup TIGA head-alert TRADE dalam
+// window 25 jam untuk mematikan SEMUA alert TRADE. Kalau alert terasa
+// "hilang setelah beberapa sinyal", ini penyebabnya -- bukan pasar sepi.
+//
+// Yang berubah di Stage 2:
+//  1. Semantiknya dijelaskan apa adanya di sini + di pesan notifikasi.
+//  2. Limit bisa di-tune lewat KV TANPA redeploy (default dinaikkan dari 3).
+//  3. Nama KEY KV TIDAK diubah (`state:daily_loss_circuit`) supaya state
+//     yang sedang berjalan di produksi tidak putus.
+//
+// Circuit berbasis kerugian NYATA (dari forward_return_* yang di-backfill)
+// dijadwalkan Stage 4 -- itu butuh backtest yang valid dulu.
+//
+// ANGKA DI BAWAH BELUM DIKALIBRASI. 12 head-alert/hari dipilih sebagai
+// "cukup longgar untuk tidak memotong hari normal, cukup ketat untuk
+// menangkap alert-storm akibat bug" -- bukan hasil analisis data.
+// ─────────────────────────────────────────────────────────────
+export const DAILY_ALERT_COUNT_LIMIT_KV_KEY = "entry_alert:daily_alert_limit";
+export const DAILY_LOSS_COUNT_LIMIT = 12;
+export const DAILY_LOSS_USD_LIMIT = 240;
 export const CIRCUIT_NOTIFY_COOLDOWN_MS = 60 * 60 * 1000;
 export const DAILY_LOSS_TTL_SECONDS = 25 * 60 * 60;
 
@@ -72,9 +98,19 @@ export async function getMacroRiskCircuit(): Promise<MacroRiskCircuitState | nul
   }
 }
 
-export function isDailyLossTripped(state: DailyLossCircuitState | null): boolean {
+/** Limit efektif: KV override kalau ada, kalau tidak default di atas. */
+export async function resolveDailyAlertLimit(): Promise<number> {
+  try {
+    const raw = await kvConfig.getJson<number>(DAILY_ALERT_COUNT_LIMIT_KV_KEY);
+    return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : DAILY_LOSS_COUNT_LIMIT;
+  } catch {
+    return DAILY_LOSS_COUNT_LIMIT;
+  }
+}
+
+export function isDailyLossTripped(state: DailyLossCircuitState | null, countLimit: number = DAILY_LOSS_COUNT_LIMIT): boolean {
   if (!state) return false;
-  return state.count >= DAILY_LOSS_COUNT_LIMIT || state.total_loss >= DAILY_LOSS_USD_LIMIT;
+  return state.count >= countLimit || state.total_loss >= DAILY_LOSS_USD_LIMIT;
 }
 
 export async function isMacroRiskActive(): Promise<boolean> {
@@ -83,7 +119,8 @@ export async function isMacroRiskActive(): Promise<boolean> {
 }
 
 export async function isDailyLossCircuitOpen(): Promise<boolean> {
-  return isDailyLossTripped(await getDailyLossCircuit());
+  const [state, limit] = await Promise.all([getDailyLossCircuit(), resolveDailyAlertLimit()]);
+  return isDailyLossTripped(state, limit);
 }
 
 export async function recordTradeAlert(
@@ -110,8 +147,8 @@ export async function recordTradeAlert(
   }
 }
 
-export function shouldNotifyDailyLoss(state: DailyLossCircuitState | null, now: number): boolean {
-  if (!isDailyLossTripped(state)) return false;
+export function shouldNotifyDailyLoss(state: DailyLossCircuitState | null, now: number, countLimit: number = DAILY_LOSS_COUNT_LIMIT): boolean {
+  if (!isDailyLossTripped(state, countLimit)) return false;
   if (state?.last_notified_at != null && now - state.last_notified_at < CIRCUIT_NOTIFY_COOLDOWN_MS) {
     return false;
   }

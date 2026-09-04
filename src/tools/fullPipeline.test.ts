@@ -22,6 +22,7 @@ import * as d1Client from "../d1Client.js";
 // ─────────────────────────────────────────────────────────────
 vi.mock("../d1Client.js", () => ({
   insertPipelineDecisionLogs: vi.fn().mockResolvedValue(undefined),
+  getDcaActivePlan: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock("../binanceProxyClient.js", () => ({
@@ -518,5 +519,80 @@ describe("runPipelineForSymbol -- prefetched ticker/funding (bulk-fetch opsional
     // No allForceOrders fetch exists on the proxy mock -> the head must run
     // liquidation-free (fault-tolerant path).
     expect(result.trad.sweep.liquidations.available).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// K5 REACHABILITY GUARD (2026-09-04, Stage 2 signal-integrity)
+//
+// calculateTraditionalBracket() skenario B mensyaratkan regime === "BREAKOUT",
+// tapi evaluateHardScreen() me-REJECT regime BREAKOUT dan runPipelineInternal
+// dulu men-stub head trad jadi TRAD_NO_TRADE di jalur reject itu. Hasilnya
+// TREND_BREAKOUT tidak pernah bisa terbit -- dead code, sementara komentar di
+// fullPipeline.ts justru menyatakan skenario itu "jalan penuh".
+//
+// Test ini menanyakan hal yang tidak pernah ditanyakan 849 test lama:
+// APAKAH cabang ini PUNYA JALUR HIDUP sama sekali?
+// ─────────────────────────────────────────────────────────────
+describe("K5: head Traditional tetap dievaluasi saat hard-screen menolak KARENA REGIME", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    defaultMockSetup();
+  });
+
+  function mockBreakoutMarket(): void {
+    vi.mocked(binanceProxy.getKlinesNative).mockImplementation(async (_s, _i, limit) => makeBreakoutKlines(limit));
+    vi.mocked(binanceProxy.getOpenInterestNative).mockResolvedValue({ symbol: "BTCUSDT", openInterest: "1500", time: 0 });
+    vi.mocked(binanceProxy.getOpenInterestHistNative).mockImplementation(async (_s, _p, limit) => {
+      if (limit === 24) return [];
+      return [
+        { symbol: "BTCUSDT", sumOpenInterest: "1000", sumOpenInterestValue: "0", timestamp: 0 },
+        { symbol: "BTCUSDT", sumOpenInterest: "1000", sumOpenInterestValue: "0", timestamp: 1 },
+      ];
+    });
+  }
+
+  it("grid tetap NO_TRADE, tapi head trad TIDAK lagi di-stub 'hard_screen_reject'", async () => {
+    mockBreakoutMarket();
+
+    const r = await runTriplePipelineForSymbol("BTCUSDT", TEST_OPTS, { modalAvailableUsd: 200 });
+
+    expect(r.grid.decision).toBe("NO_TRADE");
+    expect(r.grid.hardScreen.passed).toBe(false);
+    // REGRESSION: dulu SELALU persis string ini.
+    expect(r.trad.reasons.join(" ")).not.toContain("hard_screen_reject");
+    // Head trad benar-benar dievaluasi (punya geometri sweep, bukan stub kosong).
+    expect(r.trad.sweep).toBeDefined();
+  });
+
+  it("tetap mematikan SEMUA head kalau penolakannya bukan soal regime (volume terlalu tipis)", async () => {
+    // low_volume bukan soal cocok-tidaknya strategi -- pair-nya memang tidak
+    // layak disentuh head mana pun.
+    vi.mocked(binanceProxy.getTicker24hrNative).mockResolvedValue({
+      symbol: "BTCUSDT",
+      lastPrice: "100",
+      priceChange: "0",
+      priceChangePercent: "0",
+      highPrice: "101",
+      lowPrice: "99",
+      volume: "1",
+      quoteVolume: "1000",
+    } as never);
+
+    const r = await runTriplePipelineForSymbol("BTCUSDT", TEST_OPTS, { modalAvailableUsd: 200 });
+
+    expect(r.grid.decision).toBe("NO_TRADE");
+    expect(r.trad.reasons.join(" ")).toContain("hard_screen_reject");
+    expect(r.trad.decision).toBe("TRAD_NO_TRADE");
+  });
+
+  it("tidak menambah subrequest Wave 2 di jalur regime-reject", async () => {
+    mockBreakoutMarket();
+
+    await runTriplePipelineForSymbol("BTCUSDT", TEST_OPTS, { modalAvailableUsd: 200 });
+
+    expect(binanceProxy.getGlobalAccountRatio).not.toHaveBeenCalled();
+    expect(binanceProxy.getOrderBookDepth).not.toHaveBeenCalled();
+    expect(binanceProxy.getOpenInterestHistNative).not.toHaveBeenCalledWith("BTCUSDT", "1h", 24);
   });
 });

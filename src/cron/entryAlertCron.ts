@@ -28,7 +28,12 @@ import * as d1Client from "../d1Client.js";
 import { escapeMarkdown, formatTraditionalFuturesAlert } from "../telegram.js";
 import { dispatchNotification, type NotifyEnv } from "../notify.js";
 import { selectUsdtPerpetualWatchlist } from "../entryWatchlist.js";
-import { rankEntryCandidates, DEFAULT_ENTRY_TOP_N, type EntryRankingInput } from "../entryRanking.js";
+import {
+  selectEntryCandidates,
+  DEFAULT_ENTRY_TOP_N,
+  DEFAULT_EXTREMITY_FRACTION,
+  type EntryRankingInput,
+} from "../entryRanking.js";
 import * as kvConfig from "../kvConfig.js";
 import { mapWithConcurrency } from "../concurrency.js";
 import { TRADE_RANKING_SCORE_THRESHOLD } from "../pipelineEngine.js";
@@ -44,6 +49,8 @@ const ENTRY_TOP_N_KV_KEY = "entry_alert:top_n";
 // Alert tidak punya konteks saldo akun -- ini cuma angka acuan yang
 // user-scale. Unset -> DCA_MODAL_DEFAULT_USD ($200).
 const ENTRY_DCA_MODAL_KV_KEY = "entry_alert:dca_modal_usd";
+// KV key buat rasio kuota extremity Phase 1 (G6). Unset -> default.
+const ENTRY_EXTREMITY_FRAC_KV_KEY = "entry_alert:extremity_frac";
 
 async function resolveEntryTopN(): Promise<number> {
   try {
@@ -51,6 +58,15 @@ async function resolveEntryTopN(): Promise<number> {
     return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : DEFAULT_ENTRY_TOP_N;
   } catch {
     return DEFAULT_ENTRY_TOP_N;
+  }
+}
+
+async function resolveExtremityFraction(): Promise<number> {
+  try {
+    const raw = await kvConfig.getJson<number>(ENTRY_EXTREMITY_FRAC_KV_KEY);
+    return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 && raw <= 1 ? raw : DEFAULT_EXTREMITY_FRACTION;
+  } catch {
+    return DEFAULT_EXTREMITY_FRACTION;
   }
 }
 
@@ -118,9 +134,13 @@ const DEFAULT_PIPELINE_OPTS: PipelineOpts = {
 
 const ALERTABLE_DECISIONS = new Set(["TRADE", "WATCH"]);
 
-// High-quality WATCH only: rankingScore 50-54. TRADE sudah dijamin
-// score >= 55 AND SAFE/MODERATE di decidePipelineOutcome. HIGH_RISK
-// tidak lagi bypass -- WATCH lemah (termasuk HIGH_RISK skor < 50) di-mute.
+// G1 (2026-09-04, Stage 2). Ambang bawah WATCH; TIDAK ada batas atas.
+//
+// CACAT LAMA: `score >= 50 && score < 55`. decidePipelineOutcome() memberi
+// WATCH untuk gridRiskStatus HIGH_RISK BERAPA PUN skornya, jadi setup skor
+// 72 + HIGH_RISK jatuh di luar pita [50,55) dan HILANG DIAM-DIAM --
+// sementara setup skor 51 + SAFE tetap dikirim. Justru kombinasi
+// "skor tinggi tapi risiko tinggi" yang paling perlu dilihat manusia.
 export const WATCH_MIN_ALERT_SCORE = 50;
 // Dispatch floor terpisah dari engine DCA_WATCH_MIN_ALERT_SCORE (50) --
 // engine tetap boleh WATCH dari 50, Telegram cuma kirim >= 65.
@@ -129,23 +149,87 @@ export const DCA_WATCH_TELEGRAM_MIN_SCORE = 65;
 function isGridAlertWorthy(result: SymbolPipelineResult): boolean {
   if (!ALERTABLE_DECISIONS.has(result.decision)) return false;
   if (result.decision === "TRADE") return true;
-  return result.rankingScore >= WATCH_MIN_ALERT_SCORE && result.rankingScore < TRADE_RANKING_SCORE_THRESHOLD;
+  return result.rankingScore >= WATCH_MIN_ALERT_SCORE;
+}
+
+/** WATCH karena risiko (bukan karena skor kurang) -- ditandai beda di alert. */
+function isHighRiskWatch(result: SymbolPipelineResult): boolean {
+  return (
+    result.decision === "WATCH" &&
+    result.rankingScore >= TRADE_RANKING_SCORE_THRESHOLD &&
+    result.risk?.gridRisk?.status === "HIGH_RISK"
+  );
 }
 
 function dcaWatchScore(dca: DcaHeadResult, dcaSm?: DcaSmartMoneyResult | null): number {
   return dcaSm ? dcaSm.timingScore : dca.confidence;
 }
 
-// DCA_TRADE selalu alert. DCA_WATCH hanya kalau skor Telegram >= 65.
-// PAUSE_HARD / STOP / PAUSE_SOFT di-mute (bukan actionable entry).
+// ─────────────────────────────────────────────────────────────
+// K1 (2026-09-04, Stage 1 signal-integrity) -- LEGACY ENGINE ADALAH PRE-GATE
+// WAJIB, V3 ADAPTER CUMA BOLEH MENURUNKAN.
+//
+// CACAT YANG DITUTUP: versi lama fungsi ini berbentuk
+//     if (dcaSm) { ...lihat dcaSm.decision saja...; return false; }
+// sehingga begitu DCA Smart Money V3 aktif (dan dia SELALU aktif, karena
+// `dca.direction` tidak pernah null -- `base()` di dcaPipelineEngine.ts
+// selalu mengisi direction bahkan di jalur reject), `dca.decision` TIDAK
+// PERNAH dibaca. Delapan hard gate keselamatan di evaluateDcaEntry() jadi
+// mati total:
+//     liquidity ($8M) · dead_market (ADX4H<12) · strong_trend_4h ·
+//     macro_overextended · macro_trend_opposing · funding_extreme (>0.03%) ·
+//     Hard Neutral Cap (NEUTRAL tak pernah TRADE) · capital_solve_infeasible
+// Artinya DCA bisa alert LONG melawan downtrend 1D, di pair tipis, dengan
+// funding ekstrem, tanpa solusi sizing yang muat di budget rugi $20.
+//
+// Sekarang: keputusan efektif = SEVERITY MINIMUM dari kedua engine.
+// V3 tidak pernah bisa menaikkan legacy; legacy tidak pernah bisa menaikkan
+// V3. Konsekuensi yang DIHARAPKAN: volume alert DCA turun tajam -- itu
+// tujuannya, bukan regresi. Jangan "perbaiki" dengan melonggarkan gate.
+// ─────────────────────────────────────────────────────────────
+export type EffectiveDcaDecision = "DCA_TRADE" | "DCA_WATCH" | "DCA_BLOCKED";
+
+/** Rank severity: 2 = boleh entry, 1 = boleh watch, 0 = blokir. */
+function dcaRank(decision: string): 0 | 1 | 2 {
+  if (decision === "DCA_TRADE") return 2;
+  if (decision === "DCA_WATCH") return 1;
+  return 0;
+}
+
+/**
+ * Keputusan DCA efektif + siapa yang membatasi. `blockedBy` dipakai untuk
+ * pesan alert supaya alasan penolakan tidak hilang (mis. legacy menolak
+ * `funding_extreme` sementara V3 bilang TRADE).
+ */
+export function effectiveDcaDecision(
+  dca: DcaHeadResult,
+  dcaSm?: DcaSmartMoneyResult | null,
+): { decision: EffectiveDcaDecision; blockedBy: "legacy" | "smart_money" | null } {
+  const legacyRank = dcaRank(dca.decision);
+  const smRank = dcaSm ? dcaRank(dcaSm.decision) : 2; // tanpa V3, legacy yang menentukan
+  const rank = Math.min(legacyRank, smRank) as 0 | 1 | 2;
+
+  let blockedBy: "legacy" | "smart_money" | null = null;
+  if (rank < legacyRank || rank < smRank) blockedBy = legacyRank <= smRank ? "legacy" : "smart_money";
+  else if (rank === 0) blockedBy = legacyRank <= smRank ? "legacy" : "smart_money";
+
+  if (rank === 2) return { decision: "DCA_TRADE", blockedBy: null };
+  if (rank === 1) return { decision: "DCA_WATCH", blockedBy };
+  return { decision: "DCA_BLOCKED", blockedBy };
+}
+
+// DCA_TRADE alert HANYA kalau parameter risiko lengkap (K2 fail-closed --
+// lihat komentar di formatEntryAlert). DCA_WATCH alert kalau skor Telegram
+// >= 65; WATCH sengaja TIDAK butuh dcaBotConfig karena memang bukan ajakan
+// entry -- tapi teksnya wajib jelas menyatakan itu.
 function isDcaAlertWorthy(dca: DcaHeadResult, dcaSm?: DcaSmartMoneyResult | null): boolean {
-  if (dcaSm) {
-    if (dcaSm.decision === "DCA_TRADE") return true;
-    if (dcaSm.decision === "DCA_WATCH") return dcaWatchScore(dca, dcaSm) >= DCA_WATCH_TELEGRAM_MIN_SCORE;
-    return false;
+  const { decision } = effectiveDcaDecision(dca, dcaSm);
+  if (decision === "DCA_TRADE") {
+    // K2: tanpa dcaBotConfig, alert "LAYAK ENTRY" tidak punya SL / leverage /
+    // sizing / proyeksi max-loss. Fail-closed.
+    return dca.dcaBotConfig != null;
   }
-  if (dca.decision === "DCA_TRADE") return true;
-  if (dca.decision === "DCA_WATCH") return dca.confidence >= DCA_WATCH_TELEGRAM_MIN_SCORE;
+  if (decision === "DCA_WATCH") return dcaWatchScore(dca, dcaSm) >= DCA_WATCH_TELEGRAM_MIN_SCORE;
   return false;
 }
 
@@ -157,14 +241,23 @@ function isTradAlertWorthy(trad: TraditionalFuturesResult): boolean {
   return trad.decision === "TRAD_TRADE";
 }
 
+// Slot DCA untuk composite dedup -- SENGAJA mempertahankan keputusan MENTAH
+// tiap engine (bukan yang efektif) supaya transisi internal (mis. V3
+// PAUSE_SOFT -> WATCH selagi legacy tetap NO_TRADE) tetap terlihat sebagai
+// perubahan state dan tidak tertelan cooldown 4 jam.
 function dcaHeadDecision(r: TriplePipelineResult): string {
-  return r.dcaSm?.decision ?? r.dca.decision;
+  return r.dcaSm ? `${r.dca.decision}+${r.dcaSm.decision}` : r.dca.decision;
+}
+
+/** Keputusan yang DITAMPILKAN ke user -- hasil pre-gate, bukan mentah. */
+function dcaDisplayDecision(r: TriplePipelineResult): EffectiveDcaDecision {
+  return effectiveDcaDecision(r.dca, r.dcaSm).decision;
 }
 
 function countTradeHeads(r: TriplePipelineResult): number {
   let n = 0;
   if (r.grid.decision === "TRADE" && isGridAlertWorthy(r.grid)) n += 1;
-  if (dcaHeadDecision(r) === "DCA_TRADE" && isDcaAlertWorthy(r.dca, r.dcaSm)) n += 1;
+  if (dcaDisplayDecision(r) === "DCA_TRADE" && isDcaAlertWorthy(r.dca, r.dcaSm)) n += 1;
   if (isTradAlertWorthy(r.trad)) n += 1;
   return n;
 }
@@ -176,9 +269,42 @@ function classifyAlertHeads(r: TriplePipelineResult, muteTrade: boolean): {
   alertable: boolean;
 } {
   const gridOn = isGridAlertWorthy(r.grid) && !(muteTrade && r.grid.decision === "TRADE");
-  const dcaOn = isDcaAlertWorthy(r.dca, r.dcaSm) && !(muteTrade && dcaHeadDecision(r) === "DCA_TRADE");
+  const dcaOn = isDcaAlertWorthy(r.dca, r.dcaSm) && !(muteTrade && dcaDisplayDecision(r) === "DCA_TRADE");
   const tradOn = isTradAlertWorthy(r.trad) && !muteTrade;
   return { gridOn, dcaOn, tradOn, alertable: gridOn || dcaOn || tradOn };
+}
+
+// ─────────────────────────────────────────────────────────────
+// K2 (2026-09-04, Stage 1) -- INVARIANT GUARD SEBELUM KIRIM.
+//
+// CACAT YANG DITUTUP: alert bisa terkirim bertuliskan "🔵 DCA LAYAK ENTRY"
+// tanpa satu pun parameter risiko, karena `dcaBotConfig` hanya terisi saat
+// LEGACY engine bilang DCA_TRADE, sementara gate lama cuma melihat V3.
+// Ketiga cabang blok DCA di formatEntryAlert() meleset, jadi tidak ada blok
+// yang tercetak sama sekali -- user menerima ajakan entry tanpa SL.
+//
+// isDcaAlertWorthy() sudah fail-closed, tapi guard ini adalah jaring kedua
+// yang tidak bergantung pada satu fungsi: SETIAP head yang mengaku
+// actionable WAJIB membawa stop-loss, apa pun jalur kodenya. Kalau tidak,
+// alert dibatalkan dan dicatat -- lebih baik kehilangan satu notifikasi
+// daripada mengirim ajakan entry tanpa batas rugi.
+// ─────────────────────────────────────────────────────────────
+export function findMissingRiskParams(r: TriplePipelineResult, heads: { gridOn: boolean; dcaOn: boolean; tradOn: boolean }): string | null {
+  if (heads.gridOn && r.grid.decision === "TRADE") {
+    const sl = r.grid.gridBotConfig?.stopLoss;
+    if (sl == null || !Number.isFinite(sl) || sl <= 0) return "grid TRADE tanpa stopLoss valid";
+  }
+  if (heads.dcaOn && dcaDisplayDecision(r) === "DCA_TRADE") {
+    const cfg = r.dca.dcaBotConfig;
+    if (cfg == null) return "DCA TRADE tanpa dcaBotConfig";
+    if (!Number.isFinite(cfg.stopLossPrice) || cfg.stopLossPrice <= 0) return "DCA TRADE tanpa stopLossPrice valid";
+    if (!Number.isFinite(cfg.leverage) || cfg.leverage <= 0) return "DCA TRADE tanpa leverage valid";
+  }
+  if (heads.tradOn) {
+    const sl = r.trad.stopLoss;
+    if (sl == null || !Number.isFinite(sl) || sl <= 0) return "Traditional TRADE tanpa stopLoss valid";
+  }
+  return null;
 }
 
 // Penanda Telegram: 🟢/🟡 grid (tak berubah), 🔵/🟠 DCA.
@@ -191,6 +317,7 @@ const GRID_LABEL: Record<string, string> = {
 const DCA_LABEL: Record<string, string> = {
   DCA_TRADE: "DCA LAYAK ENTRY",
   DCA_WATCH: "DCA TUNGGU",
+  DCA_BLOCKED: "DCA DITOLAK",
   DCA_PAUSE_SOFT: "DCA PAUSE SOFT",
   DCA_PAUSE_HARD: "DCA PAUSE HARD",
   DCA_STOP: "DCA PLAN INVALIDATED",
@@ -201,13 +328,22 @@ function formatEntryAlert(r: TriplePipelineResult, muteTrade = false): string {
   const { gridOn, dcaOn, tradOn } = classifyAlertHeads(r, muteTrade);
   const sm = grid.tier1?.smartMoney;
   const dcaDir = dca.direction ? ` (${dca.direction})` : "";
-  const dcaHeadDecision = dcaSm?.decision ?? dca.decision;
+  // K1: yang ditampilkan adalah keputusan EFEKTIF (hasil pre-gate legacy x
+  // V3), bukan `dcaSm.decision` mentah -- kalau tidak, alert bisa berbunyi
+  // "DCA LAYAK ENTRY" padahal legacy engine menolaknya.
+  const dcaHeadDecision = dcaDisplayDecision(r);
   const dcaHeadLabel = DCA_LABEL[dcaHeadDecision] ?? dcaHeadDecision;
 
   const headMarkers =
     `${gridOn ? GRID_ICON[grid.decision] ?? "" : ""}${dcaOn ? DCA_ICON[dcaHeadDecision] ?? "" : ""}${tradOn ? "⚡" : ""}` || "ℹ️";
   const headParts: string[] = [];
-  if (gridOn) headParts.push(escapeMarkdown(GRID_LABEL[grid.decision] ?? grid.decision));
+  if (gridOn) {
+    headParts.push(
+      isHighRiskWatch(grid)
+        ? escapeMarkdown(`GRID WATCH ⚠️ HIGH RISK (skor ${grid.rankingScore.toFixed(0)} tinggi, tapi risk engine HIGH_RISK — jangan entry mentah)`)
+        : escapeMarkdown(GRID_LABEL[grid.decision] ?? grid.decision),
+    );
+  }
   if (dcaOn) headParts.push(`${escapeMarkdown(dcaHeadLabel)}${dcaDir}`);
   if (tradOn) headParts.push(`TRADITIONAL FUTURES (${escapeMarkdown(`[SCENARIO: ${trad.scenario}]`)})`);
 
@@ -250,6 +386,14 @@ function formatEntryAlert(r: TriplePipelineResult, muteTrade = false): string {
       lines.push("   🚨 \\[DCA PLAN INVALIDATED \\- MANUAL REVIEW REQUIRED\\]");
     }
   }
+  // K2: cabang di bawah WAJIB total (setiap kemungkinan tercetak). Versi
+  // lama punya lubang -- `dcaOn && dca.decision === "DCA_WATCH" && !dcaSm`
+  // tidak pernah benar saat dcaSm ada, jadi kombinasi (dcaOn = true,
+  // dcaBotConfig = null, dcaSm != null) jatuh ke antara semua cabang dan
+  // TIDAK mencetak apa pun: header berbunyi "DCA LAYAK ENTRY" tanpa satu
+  // baris parameter risiko. Sekarang: kalau ada config -> cetak penuh;
+  // kalau tidak dan head aktif -> cetak WATCH eksplisit ("bukan ajakan
+  // entry"); kalau head mati -> cetak alasan tolak.
   if (dcaOn && d) {
     lines.push(
       "",
@@ -261,9 +405,15 @@ function formatEntryAlert(r: TriplePipelineResult, muteTrade = false): string {
       `   Total accumulation Base→Max DCA: ${d.totalAccumulationDistPct}%`,
       "   ⚠️ taker-ratio & wall-persistence di-proxy; " + (dca.effCapAdx1d ? `1D cap ${dca.effCapAdx1d}` : "1D cap n/a"),
     );
-  } else if (dcaOn && dca.decision === "DCA_WATCH" && !dcaSm) {
-    lines.push("", `🟠 DCA TUNGGU${dcaDir} — confidence ${dca.confidence}/100${dca.rejectReason ? ` (${escapeMarkdown(dca.rejectReason)})` : ""}`);
-  } else if (!dcaOn) {
+  } else if (dcaOn) {
+    // WATCH: sengaja TANPA parameter entry. Teksnya harus menyatakan itu
+    // supaya tidak terbaca sebagai ajakan entry yang kebetulan tidak lengkap.
+    lines.push(
+      "",
+      `🟠 DCA TUNGGU${dcaDir} — skor ${dcaWatchScore(dca, dcaSm).toFixed(0)}/100. BUKAN sinyal entry: belum ada SL/leverage/sizing.` +
+        (dca.rejectReason ? ` (${escapeMarkdown(dca.rejectReason)})` : ""),
+    );
+  } else {
     lines.push(`DCA: Tolak${dca.rejectReason ? ` (${escapeMarkdown(dca.rejectReason)})` : ""}`);
   }
 
@@ -311,7 +461,15 @@ export async function checkEntryAlertForSymbol(
   if (muteTrade && tradeHeads > 0) {
     await maybeNotifyDailyCircuit(env, now);
   }
-  const { alertable } = classifyAlertHeads(r, muteTrade);
+  const heads = classifyAlertHeads(r, muteTrade);
+  // K2 jaring kedua: apa pun jalur kodenya, head yang mengaku actionable
+  // WAJIB membawa stop-loss. Kalau tidak, alert DIBATALKAN (bukan dikirim
+  // sebagian) -- state tetap di-upsert supaya dedup/cooldown konsisten.
+  const missingRisk = findMissingRiskParams(r, heads);
+  if (missingRisk !== null) {
+    console.error(`[entry-alert] ${symbol}: alert DIBATALKAN -- ${missingRisk}. Ini bug, bukan kondisi pasar.`);
+  }
+  const alertable = heads.alertable && missingRisk === null;
   const isTransition = alertable && previous?.lastDecision !== composite;
   const cooldownExpired =
     alertable && previous?.lastAlertAt != null && now - previous.lastAlertAt > COOLDOWN_MS;
@@ -330,7 +488,7 @@ export async function checkEntryAlertForSymbol(
     if (!muteTrade && tradeHeads > 0) {
       await riskCircuit.recordTradeAlert(DEFAULT_PIPELINE_OPTS.riskUsd, tradeHeads, now);
     }
-    await persistDcaActivePlan(symbol, r);
+    await persistDcaActivePlan(symbol, r, now);
     return outcome;
   }
 
@@ -339,11 +497,48 @@ export async function checkEntryAlertForSymbol(
     lastDecision: composite,
     lastAlertAt: previous?.lastAlertAt ?? null,
   });
-  await persistDcaActivePlan(symbol, r);
+  await persistDcaActivePlan(symbol, r, now);
   return outcome;
 }
 
-async function persistDcaActivePlan(symbol: string, r: TriplePipelineResult): Promise<void> {
+// ─────────────────────────────────────────────────────────────
+// D1 (2026-09-04, Stage 2) -- "STATEFUL DCA PLAN" AKHIRNYA STATEFUL.
+//
+// CACAT LAMA: `entryCount: existing?.entryCount ?? dcaSm.entryCount` DITULIS
+// ke D1, tapi tidak pernah DIBACA balik ke evaluasi (fullPipeline tidak
+// pernah mengoper entryCount ke buildAndEvaluateDcaSmartMoney) dan tidak
+// pernah DINAIKKAN di mana pun. Akibatnya:
+//   - dcaSm.entryCount selalu 0
+//   - header alert selamanya berbunyi "(1/6)" berapa pun ronde yang jalan
+//   - guard `entryCount >= maxEntries` (freeze plan) dead code
+//   - avgEntryPrice / totalInvested / lastEntryAt selalu NULL
+// Header file adapter mengklaim "STATEFUL via dca_active_plans" -- tidak
+// benar sampai perbaikan ini.
+//
+// CARA MENAIKKAN: satu-satunya bukti yang worker punya adalah HARGA. Kalau
+// plan sebelumnya menyimpan nextTriggerPrice dan harga sekarang sudah
+// melewatinya ke arah akumulasi (LONG: turun menembus; SHORT: naik
+// menembus), ronde itu dianggap terisi.
+//
+// KETERBATASAN JUJUR -- WAJIB DIBACA SEBELUM PERCAYA ANGKA INI:
+// worker TIDAK PUNYA akses ke akun/fill user (relay read-only, tidak ada
+// endpoint order). entryCount adalah state plan yang DIINFERENSI dari
+// pergerakan harga, BUKAN konfirmasi eksekusi. Kalau user tidak memasang
+// order ronde itu, hitungan di sini tetap maju. Dipakai untuk pacing alert
+// (jangan spam ronde yang sama) dan guard maxEntries -- BUKAN untuk
+// akuntansi posisi.
+//
+// avgEntryPrice = rata-rata aritmetik harga trigger, valid karena engine
+// memakai sizing FLAT (dcaOrderSizeMultiplier = 1.0). totalInvested cuma
+// diisi kalau dcaBotConfig ada (WATCH tidak punya sizing).
+// ─────────────────────────────────────────────────────────────
+export function hasCrossedTrigger(side: "LONG" | "SHORT", currentPrice: number, prevTrigger: number | null): boolean {
+  if (prevTrigger == null || !Number.isFinite(prevTrigger) || prevTrigger <= 0) return false;
+  if (!Number.isFinite(currentPrice) || currentPrice <= 0) return false;
+  return side === "LONG" ? currentPrice <= prevTrigger : currentPrice >= prevTrigger;
+}
+
+async function persistDcaActivePlan(symbol: string, r: TriplePipelineResult, now: number): Promise<void> {
   const { dca, dcaSm } = r;
   if (!dcaSm || !dca.direction) return;
   try {
@@ -352,18 +547,40 @@ async function persistDcaActivePlan(symbol: string, r: TriplePipelineResult): Pr
       return;
     }
     const existing = await d1Client.getDcaActivePlan(symbol, dca.direction);
+
+    let entryCount = existing?.entryCount ?? 0;
+    let avgEntryPrice = existing?.avgEntryPrice ?? null;
+    let totalInvested = existing?.totalInvested ?? null;
+    let lastEntryAt = existing?.lastEntryAt ?? null;
+
+    const crossed = hasCrossedTrigger(dca.direction, dcaSm.currentPrice, existing?.nextTriggerPrice ?? null);
+    if (crossed && entryCount < dcaSm.maxEntries) {
+      const fillPrice = dcaSm.currentPrice;
+      // Sizing flat -> rata-rata aritmetik benar.
+      avgEntryPrice = avgEntryPrice == null ? fillPrice : (avgEntryPrice * entryCount + fillPrice) / (entryCount + 1);
+      const orderUsd = dca.dcaBotConfig?.dcaOrderMarginUsd;
+      if (orderUsd != null && Number.isFinite(orderUsd)) {
+        totalInvested = (totalInvested ?? 0) + orderUsd;
+      }
+      entryCount += 1;
+      lastEntryAt = now;
+      console.log(
+        `[entry-alert] ${symbol} ${dca.direction}: trigger ${existing?.nextTriggerPrice} terlampaui @ ${fillPrice} -> ronde ${entryCount}/${dcaSm.maxEntries} (state inferensi harga, bukan konfirmasi fill)`,
+      );
+    }
+
     await d1Client.upsertDcaActivePlan({
       symbol,
       side: dca.direction,
-      entryCount: existing?.entryCount ?? dcaSm.entryCount,
+      entryCount,
       maxEntries: dcaSm.maxEntries,
       nextTriggerPrice: dcaSm.nextTriggerPrice,
       intervalPct: dcaSm.intervalPct,
       pauseStatus: dcaSm.pauseLevel === "NONE" ? "NONE" : dcaSm.pauseLevel,
       pauseReason: dcaSm.pauseReason,
-      avgEntryPrice: existing?.avgEntryPrice ?? null,
-      totalInvested: existing?.totalInvested ?? null,
-      lastEntryAt: existing?.lastEntryAt ?? null,
+      avgEntryPrice,
+      totalInvested,
+      lastEntryAt,
     });
   } catch (err) {
     console.error(`[entry-alert] D1 dca_active_plans ${symbol}:`, (err as Error)?.message ?? String(err));
@@ -377,11 +594,16 @@ interface WatchlistBundle {
 }
 
 async function maybeNotifyDailyCircuit(env: NotifyEnv, now: number): Promise<void> {
-  const state = await riskCircuit.getDailyLossCircuit();
-  if (!riskCircuit.shouldNotifyDailyLoss(state, now)) return;
+  const [state, limit] = await Promise.all([riskCircuit.getDailyLossCircuit(), riskCircuit.resolveDailyAlertLimit()]);
+  if (!riskCircuit.shouldNotifyDailyLoss(state, now, limit)) return;
+  // I6: pesan lama menyebut "daily loss limit", yang membuatnya terbaca
+  // seolah ada kerugian nyata. Yang dihitung adalah JUMLAH ALERT terkirim.
   await dispatchNotification(
     env,
-    `🚨 *Circuit Breaker*: daily loss limit tercapai (count ${state?.count ?? 0} / ${riskCircuit.DAILY_LOSS_COUNT_LIMIT} atau total_loss $${state?.total_loss ?? 0} / $${riskCircuit.DAILY_LOSS_USD_LIMIT}). TRADE alert di-mute sampai window 24 jam roll-off atau \`whalescope_risk_circuit\` reset_daily. High-quality WATCH tetap boleh.`,
+    `🚦 *Alert budget harian tercapai* — ${state?.count ?? 0}/${limit} head\\-alert TRADE terkirim dalam 24 jam terakhir. ` +
+      `Ini penghitung ALERT, BUKAN kerugian nyata: worker tidak punya akses posisi/PnL kamu. ` +
+      `TRADE alert di\\-mute sampai window roll\\-off, atau reset lewat \`whalescope_risk_circuit\` reset\\_daily. ` +
+      `WATCH tetap jalan. Ubah ambang tanpa redeploy: KV \`${riskCircuit.DAILY_ALERT_COUNT_LIMIT_KV_KEY}\`.`,
   );
   await riskCircuit.markDailyLossNotified(now);
 }
@@ -467,14 +689,18 @@ async function runPhase1Prefilter(
     };
   });
 
-  const selected = rankEntryCandidates(candidates, topN);
+  // G6: kuota dibagi grid (F3) vs extremity (DCA/Trad). Total tetap topN.
+  const extremityFrac = await resolveExtremityFraction();
+  const { selected, gridPicks, extremityPicks } = selectEntryCandidates(candidates, topN, extremityFrac);
   const selectedSet = new Set(selected);
   const skipped = watchlist.filter((s) => !selectedSet.has(s));
 
   await d1Client
     .insertEntryAlertSkipLog({ runAt: now, skippedSymbols: skipped, topN })
     .catch((err) => console.error("[entry-prefilter] gagal insert entry_alert_skip_log:", (err as Error)?.message ?? String(err)));
-  console.log(`[entry-prefilter] phase1 top_n=${topN} analysed=${selected.length} skipped=${skipped.length} skipped_symbols=${skipped.join(",")}`);
+  console.log(
+    `[entry-prefilter] phase1 top_n=${topN} analysed=${selected.length} grid=${gridPicks.length} extremity=${extremityPicks.length} (frac=${extremityFrac}) skipped=${skipped.length} extremity_symbols=${extremityPicks.join(",")}`,
+  );
 
   return selected;
 }

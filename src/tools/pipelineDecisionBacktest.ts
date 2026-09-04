@@ -15,17 +15,41 @@ import { ToolResponseBuilder } from "../responseBuilder.js";
 import { fmtTime } from "../format.js";
 import { applyExecutionCost, DEFAULT_FEE_BPS, DEFAULT_SLIPPAGE_BPS } from "./backtest.js";
 
-const FORWARD_WINDOW_MS: Record<string, number> = {
-  "1h": 3_600_000,
-  "4h": 14_400_000,
-  "24h": 86_400_000,
+// ─────────────────────────────────────────────────────────────
+// B1 + B2 (2026-09-04, Stage 1 signal-integrity) -- FORWARD WINDOW DIHITUNG
+// DALAM CANDLE 5m, BUKAN KLINES 1h BER-startTime SEMBARANG.
+//
+// CACAT LAMA:
+//   getKlinesNative(sym, "1h", 2, runAt, runAt + 1h)
+// `runAt` adalah waktu tick cron (menit :07/:22/:37/:52), BUKAN batas jam.
+// Binance mengembalikan candle dengan openTime >= startTime, jadi rentang
+// [12:07, 13:07] cuma memuat SATU candle (openTime 13:00). Lalu:
+//   entry = close(candles[0]);  exit = close(candles[len-1]);
+// -> entry dan exit adalah candle YANG SAMA -> forwardReturn = 0 PERSIS,
+// untuk SETIAP baris. Setelah applyExecutionCost jadi -0.12% seragam:
+// win rate 0%, avg return -0.12%, selamanya. Window "1h" tidak pernah
+// mengukur apa pun.
+// Window 4h/24h tidak nol, tapi salah dua kali: candle pertama baru buka
+// s/d 1 jam SETELAH keputusan (melewatkan jam pertama -- jam paling
+// informatif), dan jumlah candle-nya kurang satu (4 candle = 3 jam dilabeli
+// "4h"; 24 candle = 23 jam dilabeli "24h").
+//
+// SEKARANG: satu fetch 5m, entry = OPEN candle pertama yang buka pada/di
+// atas runAt (lag <=5 menit, dan open bukan close -> TANPA look-ahead:
+// harga itu benar-benar bisa dieksekusi setelah keputusan), exit = close
+// candle ke-N. Jumlah subrequest TIDAK berubah (tetap 1 per row, di-slice
+// tiga kali).
+// ─────────────────────────────────────────────────────────────
+export const FORWARD_INTERVAL = "5m";
+const CANDLES_PER_HOUR = 12;
+export const FORWARD_WINDOW_CANDLES: Record<string, number> = {
+  "1h": 1 * CANDLES_PER_HOUR, // 12
+  "4h": 4 * CANDLES_PER_HOUR, // 48
+  "24h": 24 * CANDLES_PER_HOUR, // 288
 };
-
-const KLINE_LIMIT: Record<string, number> = {
-  "1h": 2,
-  "4h": 5,
-  "24h": 25,
-};
+/** Window terpanjang + 1 candle acuan -- satu fetch melayani ketiga window. */
+export const FORWARD_FULL_WINDOW_CANDLES = FORWARD_WINDOW_CANDLES["24h"] + 1; // 289
+export const FORWARD_FULL_WINDOW_MS = 24 * 3_600_000 + 5 * 60_000;
 
 // Dibatasi supaya 1 tool call tidak jadi puluhan kline lookup. Ambil
 // baris TERBARU dalam range (query sudah ORDER BY run_at DESC).
@@ -47,10 +71,23 @@ export interface BucketStats {
   slTouchSample: number;
 }
 
+/**
+ * Forward return dari deret candle 5m yang dimulai pada/di atas `runAt`.
+ *
+ * `candles` HARUS berisi tepat window yang mau diukur (caller yang
+ * meng-slice). Entry = OPEN candle pertama -- bukan close-nya: close candle
+ * pertama sudah memuat pergerakan setelah keputusan, memakainya sebagai
+ * entry adalah look-ahead halus yang membuat hasil terlihat lebih baik dari
+ * kenyataan. Exit = close candle terakhir.
+ *
+ * Butuh >= 2 candle: dengan 1 candle, entry dan exit berasal dari lilin yang
+ * sama dan hasilnya bukan "return 0", melainkan "tidak terukur". Itu persis
+ * cacat B1 yang lama -- return null, jangan pura-pura 0.
+ */
 export function evaluateDecisionForward(candles: KlineTuple[], stopLoss: number | null): PipelineForwardResult | null {
-  if (candles.length === 0) return null;
-  const entryPrice = parseFloat(candles[0][4]);
-  const exitPrice = parseFloat(candles[candles.length - 1][4]);
+  if (candles.length < 2) return null;
+  const entryPrice = parseFloat(candles[0][1]); // open
+  const exitPrice = parseFloat(candles[candles.length - 1][4]); // close
   if (!Number.isFinite(entryPrice) || !Number.isFinite(exitPrice) || entryPrice === 0) return null;
   const lows = candles.map((c) => parseFloat(c[3]));
   return {
@@ -192,8 +229,7 @@ export function registerPipelineDecisionBacktestTools(server: McpServer): void {
           };
         }
 
-        const windowMs = FORWARD_WINDOW_MS[forwardWindow];
-        const klineLimit = KLINE_LIMIT[forwardWindow];
+        const windowCandles = FORWARD_WINDOW_CANDLES[forwardWindow];
         const execCostRoundTrip = 2 * (fee_bps + slippage_bps) / 10_000;
         const evaluated: (PipelineDecisionLogRow &
           PipelineForwardResult & { grossReturn: number; scoreBucket: ScoreBucket })[] = [];
@@ -201,11 +237,23 @@ export function registerPipelineDecisionBacktestTools(server: McpServer): void {
         for (const row of rows) {
           let candles: KlineTuple[] = [];
           try {
-            candles = await binanceProxy.getKlinesNative(row.symbol, "1h", klineLimit, row.runAt, row.runAt + windowMs);
+            // Selalu ambil window 5m PENUH (289 candle, 1 subrequest) lalu
+            // slice -- sama seperti cron backfill, supaya angka on-demand di
+            // sini IDENTIK dengan kolom forward_return_* yang dipersist.
+            candles = await binanceProxy.getKlinesNative(
+              row.symbol,
+              FORWARD_INTERVAL,
+              FORWARD_FULL_WINDOW_CANDLES,
+              row.runAt,
+              row.runAt + FORWARD_FULL_WINDOW_MS,
+            );
           } catch {
             continue;
           }
-          const fwd = evaluateDecisionForward(candles, row.stopLoss);
+          // +1: entry diambil dari OPEN candle ke-0, jadi window N jam butuh
+          // N*12 candle SETELAH candle acuan itu tetap terhitung -- slice
+          // (0, N+1) memberi open[0] .. close[N].
+          const fwd = evaluateDecisionForward(candles.slice(0, windowCandles + 1), row.stopLoss);
           if (!fwd) continue;
           // evaluateDecisionForward TETAP mengembalikan gross (dipakai juga
           // oleh cron backfill yang mempersist angka mentah) -- biaya

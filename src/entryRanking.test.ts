@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { rankEntryCandidates, DEFAULT_ENTRY_TOP_N, type EntryRankingInput } from "./entryRanking.js";
+import { selectEntryCandidates, rankEntryCandidates, DEFAULT_ENTRY_TOP_N, type EntryRankingInput } from "./entryRanking.js";
 
 function mk(symbol: string, quoteVolumeUsd: number, fundingAbs: number, priceChangePct: number): EntryRankingInput {
   return { symbol, quoteVolumeUsd, fundingAbs, priceChangePct24h: priceChangePct };
@@ -75,5 +75,71 @@ describe("rankEntryCandidates (F3 cheap grid score)", () => {
 
   it("exposes a conservative default N", () => {
     expect(DEFAULT_ENTRY_TOP_N).toBe(40);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// G6 (2026-09-04, Stage 2) -- kuota hybrid grid vs extremity.
+// ─────────────────────────────────────────────────────────────
+describe("selectEntryCandidates (G6 hybrid quota)", () => {
+  // 20 pair likuid & tenang + 4 pair likuid tapi bergerak/funding ekstrem.
+  function universe(): EntryRankingInput[] {
+    const calm = Array.from({ length: 20 }, (_, i) => ({
+      symbol: `CALM${String(i).padStart(2, "0")}USDT`,
+      quoteVolumeUsd: 500_000_000 - i * 1_000_000,
+      fundingAbs: 0.00001,
+      priceChangePct24h: 0.1,
+    }));
+    const wild = [
+      { symbol: "WILD1USDT", quoteVolumeUsd: 400_000_000, fundingAbs: 0.0009, priceChangePct24h: 18 },
+      { symbol: "WILD2USDT", quoteVolumeUsd: 380_000_000, fundingAbs: 0.0008, priceChangePct24h: -16 },
+      { symbol: "WILD3USDT", quoteVolumeUsd: 360_000_000, fundingAbs: 0.0007, priceChangePct24h: 14 },
+      { symbol: "WILD4USDT", quoteVolumeUsd: 340_000_000, fundingAbs: 0.0006, priceChangePct24h: -12 },
+    ];
+    return [...calm, ...wild];
+  }
+
+  it("keeps the total EXACTLY n -- Phase 2 cost must not change", () => {
+    const { selected } = selectEntryCandidates(universe(), 12, 0.25);
+    expect(selected).toHaveLength(12);
+    expect(new Set(selected).size).toBe(12); // no duplicates
+  });
+
+  it("REGRESSION: pure F3 discards every extreme pair; the hybrid keeps some", () => {
+    const uni = universe();
+    // Perilaku lama: F3 murni.
+    const f3Only = rankEntryCandidates(uni, 12);
+    expect(f3Only.some((s) => s.startsWith("WILD"))).toBe(false);
+
+    // Perilaku baru: head DCA/Traditional akhirnya kebagian kandidatnya.
+    const { selected, extremityPicks } = selectEntryCandidates(uni, 12, 0.25);
+    expect(extremityPicks.length).toBeGreaterThan(0);
+    expect(selected.some((s) => s.startsWith("WILD"))).toBe(true);
+  });
+
+  it("grid still gets the majority of the quota", () => {
+    const { gridPicks, extremityPicks } = selectEntryCandidates(universe(), 12, 0.25);
+    expect(gridPicks).toHaveLength(9);
+    expect(extremityPicks).toHaveLength(3);
+    expect(gridPicks.every((s) => s.startsWith("CALM"))).toBe(true);
+  });
+
+  it("fraction 0 reproduces the old pure-F3 behaviour exactly", () => {
+    const uni = universe();
+    const { selected } = selectEntryCandidates(uni, 12, 0);
+    expect(selected).toEqual(rankEntryCandidates(uni, 12));
+  });
+
+  it("backfills from F3 when the market is too flat to fill the extremity quota", () => {
+    // Semua pair identik -> tidak ada extremity nyata; total harus tetap n.
+    const flat = Array.from({ length: 10 }, (_, i) => ({
+      symbol: `FLAT${i}USDT`,
+      quoteVolumeUsd: 100_000_000,
+      fundingAbs: 0,
+      priceChangePct24h: 0,
+    }));
+    const { selected } = selectEntryCandidates(flat, 6, 0.25);
+    expect(selected).toHaveLength(6);
+    expect(new Set(selected).size).toBe(6);
   });
 });

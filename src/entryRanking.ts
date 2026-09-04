@@ -56,6 +56,39 @@ function clamp01(x: number): number {
   return x < 0 ? 0 : x > 1 ? 1 : x;
 }
 
+// ─────────────────────────────────────────────────────────────
+// G6 (2026-09-04, Stage 2) -- SATU PRE-FILTER, TIGA HEAD DENGAN KEBUTUHAN
+// BERLAWANAN.
+//
+// F3 di atas memilih pair paling likuid dan paling TIDAK bergerak, dengan
+// funding paling netral. Untuk grid bot itu benar. Tapi Phase 1 ini
+// menggerbangi KETIGA head, dan dua head lain butuh kebalikannya:
+//   - head DCA hidup dari funding EKSTREM (short/long squeeze boost)
+//   - head Traditional hidup dari sweep / breakout, yaitu pergerakan besar
+// Jadi 310 dari 350 pair yang dibuang tiap tick justru memuat kandidat
+// terbaik untuk dua head itu, dan keduanya nyaris tidak pernah kebagian
+// symbol yang cocok.
+//
+// PERBAIKAN: kuota dibagi -- sebagian besar tetap F3 (grid), sisanya diambil
+// dari skor EXTREMITY (kebalikan F3: gerakan + funding paling ekstrem, tetap
+// disaring likuiditas supaya bukan sampah tak-tradable). TOTAL TIDAK BERUBAH,
+// jadi nol tambahan subrequest dan nol perubahan wall-clock.
+//
+// Rasio 0.75/0.25 BELUM DIKALIBRASI -- dipilih supaya grid (produk utama
+// saat ini) tetap dominan sambil memberi dua head lain pijakan. Bisa
+// di-tune lewat KV tanpa redeploy (entry_alert:extremity_frac).
+// ─────────────────────────────────────────────────────────────
+export const DEFAULT_EXTREMITY_FRACTION = 0.25;
+
+/**
+ * Skor "extremity": kebalikan F3 pada dua faktor gerak/funding, TAPI tetap
+ * mengalikan volNorm -- pair tidak likuid tidak boleh menang cuma karena
+ * funding-nya liar (di sana funding ekstrem justru sering artefak).
+ */
+function extremityScore(volNorm: number, pcNorm: number, fNorm: number): number {
+  return volNorm * Math.max(pcNorm, fNorm);
+}
+
 /**
  * Kembalikan symbol TOP-`n` menurut F3. Kalau `n` >= jumlah kandidat,
  * kembalikan semua (tetap terurut).
@@ -92,4 +125,64 @@ export function rankEntryCandidates(candidates: EntryRankingInput[], n: number):
   scored.sort((a, b) => b.score - a.score || a.symbol.localeCompare(b.symbol));
 
   return scored.slice(0, Math.max(0, n)).map((s) => s.symbol);
+}
+
+/**
+ * G6: pilih `n` symbol sebagai GABUNGAN dua tujuan yang berlawanan --
+ * mayoritas F3 (kondisi tenang, untuk grid) + sisanya extremity (gerakan /
+ * funding ekstrem, untuk head DCA & Traditional). Dedup dijaga, total
+ * TETAP `n` sehingga biaya Phase 2 tidak berubah sama sekali.
+ *
+ * `extremityFraction` 0 -> perilaku identik rankEntryCandidates() lama.
+ */
+export function selectEntryCandidates(
+  candidates: EntryRankingInput[],
+  n: number,
+  extremityFraction: number = DEFAULT_EXTREMITY_FRACTION,
+): { selected: string[]; gridPicks: string[]; extremityPicks: string[] } {
+  if (candidates.length === 0 || n <= 0) return { selected: [], gridPicks: [], extremityPicks: [] };
+
+  const frac = Number.isFinite(extremityFraction) ? Math.min(Math.max(extremityFraction, 0), 1) : DEFAULT_EXTREMITY_FRACTION;
+  const extremityQuota = Math.min(Math.floor(n * frac), n);
+  const gridQuota = n - extremityQuota;
+
+  const gridPicks = rankEntryCandidates(candidates, gridQuota);
+  if (extremityQuota === 0) {
+    return { selected: gridPicks, gridPicks, extremityPicks: [] };
+  }
+
+  // Normalisasi yang SAMA dengan F3 supaya dua skor sebanding.
+  const pcAbs = candidates.map((c) => Math.abs(c.priceChangePct24h));
+  const fAbs = candidates.map((c) => Math.abs(c.fundingAbs));
+  const logQv = candidates.map((c) => Math.log10(Math.max(c.quoteVolumeUsd, 1)));
+  const thrP = quantile([...pcAbs].sort((a, b) => a - b), 0.9);
+  const thrF = quantile([...fAbs].sort((a, b) => a - b), 0.9);
+  const qvMin = Math.min(...logQv);
+  const qvMax = Math.max(...logQv);
+  const qvRange = qvMax - qvMin;
+
+  const taken = new Set(gridPicks);
+  const extremityScored = candidates
+    .map((c, i) => {
+      const volNorm = qvRange > 0 ? (logQv[i] - qvMin) / qvRange : 1;
+      const pcNorm = thrP > 0 ? clamp01(pcAbs[i] / thrP) : 0;
+      const fNorm = thrF > 0 ? clamp01(fAbs[i] / thrF) : 0;
+      return { symbol: c.symbol, score: extremityScore(volNorm, pcNorm, fNorm) };
+    })
+    .filter((s) => !taken.has(s.symbol) && s.score > 0)
+    .sort((a, b) => b.score - a.score || a.symbol.localeCompare(b.symbol));
+
+  const extremityPicks = extremityScored.slice(0, extremityQuota).map((s) => s.symbol);
+
+  // Kalau kuota extremity tidak terisi penuh (mis. pasar sangat datar,
+  // semua skor 0), sisa slot dikembalikan ke F3 -- jangan sampai total
+  // turun di bawah n dan coverage malah berkurang.
+  const shortfall = extremityQuota - extremityPicks.length;
+  const filler =
+    shortfall > 0
+      ? rankEntryCandidates(candidates, gridQuota + shortfall).filter((s) => !taken.has(s) && !extremityPicks.includes(s))
+      : [];
+
+  const selected = [...gridPicks, ...extremityPicks, ...filler.slice(0, shortfall)];
+  return { selected, gridPicks, extremityPicks };
 }

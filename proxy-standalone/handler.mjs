@@ -50,8 +50,11 @@ function redactUrl(u) {
   }
 }
 
-// Kept byte-for-byte in sync with ../proxy/api/binance.ts. If you add a path
-// to the Vercel relay's whitelist, add it here too (and vice versa).
+// This whitelist is the live one. ../proxy/api/binance.ts (the Vercel relay)
+// is RETIRED and no longer deployed -- the two files stopped being kept in
+// sync as of 2026-09-04 (this file gained weight-header passthrough, an
+// upstream timeout, and a prototype-pollution fix that were not backported).
+// Adding a path here does NOT require touching the Vercel copy.
 const ALLOWED_PATHS_BY_MARKET = {
   futures: new Set([
     "/fapi/v1/ping",
@@ -107,7 +110,21 @@ const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, x-proxy-secret, x-binance-api-key",
+  // Tanpa ini browser/fetch tidak bisa membaca header di bawah pada
+  // response cross-origin. Worker Cloudflare tidak terikat CORS, tapi
+  // biarkan konsisten supaya tool debug dari browser juga bisa melihatnya.
+  "Access-Control-Expose-Headers": "x-mbx-used-weight-1m, x-mbx-used-weight, x-mbx-order-count-1m, retry-after",
 };
+
+// Header budget Binance yang diteruskan apa adanya ke pemanggil.
+const PASSTHROUGH_RESPONSE_HEADERS = [
+  "x-mbx-used-weight-1m",
+  "x-mbx-used-weight",
+  "x-mbx-order-count-1m",
+  "retry-after",
+];
+
+const UPSTREAM_TIMEOUT_MS = 10_000;
 
 /** Read an env var across Node / Deno / Bun without assuming a global. */
 export function getEnv(name) {
@@ -167,11 +184,15 @@ export async function handleBinanceProxy(request) {
 
   const marketParam = url.searchParams.get("market");
   const market = marketParam || "futures";
-  const binanceBase = BASE_BY_MARKET[market];
-  const allowedPaths = ALLOWED_PATHS_BY_MARKET[market];
-  if (!binanceBase || !allowedPaths) {
+  // Object.hasOwn, BUKAN lookup langsung: `?market=constructor` (atau
+  // `__proto__`) mengembalikan anggota Object.prototype yang truthy, lolos
+  // cek `!allowedPaths`, lalu `allowedPaths.has(...)` melempar TypeError
+  // yang tidak tertangkap -> 500 alih-alih 400.
+  if (!Object.hasOwn(BASE_BY_MARKET, market) || !Object.hasOwn(ALLOWED_PATHS_BY_MARKET, market)) {
     return json(400, { error: "Parameter 'market' tidak dikenali, harus salah satu dari: futures, spot." });
   }
+  const binanceBase = BASE_BY_MARKET[market];
+  const allowedPaths = ALLOWED_PATHS_BY_MARKET[market];
 
   const path = url.searchParams.get("path");
   if (typeof path !== "string" || !allowedPaths.has(path)) {
@@ -198,17 +219,33 @@ export async function handleBinanceProxy(request) {
     const outboundHeaders = { Accept: "application/json" };
     if (apiKeyHeader) outboundHeaders["X-MBX-APIKEY"] = apiKeyHeader;
 
-    const binanceRes = await fetch(targetUrl, { headers: outboundHeaders });
+    // Timeout eksplisit: tanpa ini satu koneksi Binance yang menggantung
+    // menahan slot relay tanpa batas, dan di sisi Worker menahan satu slot
+    // concurrency cron sampai batas invocation.
+    const binanceRes = await fetch(targetUrl, {
+      headers: outboundHeaders,
+      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+    });
     const contentType = binanceRes.headers.get("content-type") ?? "";
     const body = await binanceRes.text();
 
-    return new Response(body, {
-      status: binanceRes.status,
-      headers: {
-        "Content-Type": contentType.includes("application/json") ? "application/json" : "text/plain",
-        ...CORS,
-      },
-    });
+    const headers = {
+      "Content-Type": contentType.includes("application/json") ? "application/json" : "text/plain",
+      ...CORS,
+    };
+    // Teruskan header budget/rate-limit Binance. Relay ini SEBELUMNYA
+    // membuangnya, sehingga Worker tidak punya cara melihat seberapa dekat
+    // sebuah IP relay ke weight-ban -- satu-satunya sinyal yang bisa
+    // mencegah `-1003` / HTTP 418, dan alasan rateLimiter.ts terpaksa
+    // count-based dengan asumsi "weight rata-rata ~1.5" (padahal
+    // /fapi/v1/depth?limit=50 berbobot 5 dan /fapi/v1/ticker/24hr tanpa
+    // symbol berbobot 40).
+    for (const name of PASSTHROUGH_RESPONSE_HEADERS) {
+      const value = binanceRes.headers.get(name);
+      if (value !== null) headers[name] = value;
+    }
+
+    return new Response(body, { status: binanceRes.status, headers });
   } catch (err) {
     const msg = err && err.message ? err.message : String(err);
     // Server-side only, signed params stripped. Never returned to the caller.
