@@ -8,7 +8,13 @@
 > | 1 | Blocker: uang, uptime, buta (K1, K2, I1, I2, B1/B2) | ✅ **KODE SELESAI** [Semeru] 2026-09-04 — menunggu commit + acc deploy | — | ⏳ |
 > | 2 | Reachability (K4/D3, K5, G1, I6, D1/D2, G6) + **K10 baru** | ✅ **KODE SELESAI** [Semeru] 2026-09-04 | — | ⏳ |
 > | 3 | Kualitas sinyal / anti-halu (K8, K3, K6, K9, G3-G5, K7) + migration 0015 | ✅ **KODE SELESAI** [Semeru] 2026-09-04 | — | ⏳ |
-> | 4 | Backtest valid + observability + kalibrasi (B3, B4, backfill, I7) | ⏳ belum | — | — |
+> | 4 | Backtest valid + observability + kalibrasi (B3, B4, backfill, I7) | ✅ **KODE SELESAI** [Semeru] 2026-09-04 (4.5 terkunci — lihat di bawah) | — | ⏳ |
+>
+> ⚠️ **KOREKSI PENTING 2026-09-04 — Stage 1/2/3 TIDAK PERNAH DI-DEPLOY.**
+> Diperiksa langsung ke produksi; ketiganya masih hanya ada di branch.
+> Detail bukti di bagian "Verifikasi live" paling bawah. Semua "perubahan
+> perilaku yang DIHARAPKAN" di blok Stage 1/2/3 di bawah masih **prediksi
+> yang belum diuji**, bukan hasil.
 >
 > **Keputusan user 2026-09-04:** legacy DCA jadi pre-gate wajib · fidelitas data
 > tanpa call Binance tambahan · backtest fix aritmetika + metrik grid-native ·
@@ -170,6 +176,111 @@
 >
 > **Sisa untuk Krakatau (GATED):** `d1 migrations apply --remote` (0015)
 > **LALU** `wrangler deploy` — urutan ini wajib.
+>
+> ─────────────────────────────────────────────────────────────────────
+>
+> ### ✅ Stage 4 — kode selesai [Semeru] 2026-09-04
+>
+> Branch `claude/stage-3-signal-quality` (lanjut di atas Stage 3).
+> `tsc --noEmit` bersih · **946 test hijau** (naik dari 919; +29 baru,
+> −2 dihapus bersama `aggregateKeyedRows`).
+>
+> | Task | Status | File |
+> |---|---|---|
+> | 4.1 B3 agregasi di SQL atas seluruh rentang | ✅ | `src/d1Client.ts`, `src/tools/pipelineDecisionBacktest.ts`, `src/pipelineDecisionLog.ts` |
+> | 4.2 B4 metrik grid-native (tanpa migration) | ✅ | `src/tools/pipelineDecisionBacktest.ts`, `src/gridBoundEngine.ts` |
+> | 4.3 backfill head-of-line blocking + **migration 0016** | ✅ | `src/cron/pipelineDecisionOutcomeCron.ts`, `src/d1Client.ts`, `migrations/0016_*.sql` |
+> | 4.4 I7 `ADMIN_SECRET` | ⛔ Krakatau (gated) | — |
+> | 4.5 kalibrasi | ⛔ **terkunci data** — guard semantik ditambahkan | `scripts/calibrate-ranking-weights.mjs` |
+>
+> **4.1 — kenapa `MAX_ROWS = 80` bukan sekadar "sampel kecil".** Diverifikasi
+> di produksi 2026-09-04: satu panggilan `whalescope_backtest_pipeline_decisions`
+> untuk rentang **9 jam** mengembalikan 50 baris yang `runAt`-nya **identik
+> semua** (`1788511972896`) — satu tick, bukan sampel rentang. Sekarang
+> `queryPipelineDecisionAggregates()` melakukan COUNT/AVG/MIN/MAX/win-rate di
+> SQL atas seluruh rentang dari kolom `forward_return_*` yang sudah
+> di-backfill cron: **nol fetch klines untuk agregat**. Sampel detail tetap
+> fetch klines, tapi kini jujur dilabeli sampel dan dilaporkan terpisah
+> (`rowsInRange` / `rowsWithOutcome` / `outcomeCoveragePct` / `detailSampleSize`).
+>
+> **Dua batas yang SENGAJA diekspos, bukan disembunyikan:**
+> 1. `sl_touched_24h` adalah satu-satunya SL-touch yang dipersist. Pada jalur
+>    agregat, angka SL untuk `forwardWindow` 1h/4h **tetap angka 24 jam** —
+>    dilabeli "SL-touch 24h" di tabel dan di catatan. Jalur detail tetap
+>    menghitung sesuai window. Berbeda, dan dinyatakan berbeda.
+> 2. Baris yang belum matang (< 26 jam) tidak punya kolom outcome dan tidak
+>    ikut agregat. Karena itu cakupan dilaporkan sebagai angka, bukan
+>    diasumsikan 100%.
+>
+> **4.2 — `gridCount`/`gridType` tidak ada di `pipeline_decision_log`**, jadi
+> keduanya DIREKONSTRUKSI dari `lower_price`/`upper_price` lewat
+> `deriveGridShape()` yang baru diekstrak dari `computeGridBounds()` — satu
+> definisi, dipakai produksi dan backtest. Rekonstruksi bisa meleset satu
+> level kalau bound tersimpan sudah dibulatkan ke tick size; itu ditulis di
+> JSDoc dan di catatan output. `crossingCandles` memanggil
+> `computeGridVelocity()` **apa adanya**, bukan rumus crossing baru, jadi
+> definisinya sama dengan yang dilaporkan `whalescope_full_pipeline` dan
+> mewarisi caveat proxy-nya.
+>
+> **4.3 — head-of-line blocking: risiko LATEN, bukan kerusakan aktif.** Data
+> live 2026-09-04 diperiksa: `pending` = 79 baris, semuanya dari satu tick,
+> dan **nol** baris yang tertinggal NULL di luar jendela normal. Antrian
+> sehat *sekarang* — tapi strukturnya memang bisa macet total begitu ada
+> >= 30 baris gagal permanen, dan macetnya tidak terlihat (cron tetap
+> "sukses", `updated` cuma 0 selamanya). Migration 0016 menambah
+> `outcome_attempts` + partial index; urutannya jadi
+> `ORDER BY outcome_attempts ASC, run_at ASC`.
+>
+> Kegagalan dibedakan dua jenis, dan itu bukan kosmetik: **data-shape**
+> (candle kurang → vonis tentang baris itu) SELALU menaikkan attempt;
+> **transport** (fetch melempar) hanya menaikkan attempt kalau tidak SEMUA
+> baris di tick itu gagal transport — kalau semuanya gagal, itu relay yang
+> down, dan menghukum 30 baris sehat karenanya membuang data yang masih bisa
+> di-backfill. `MAX_OUTCOME_ATTEMPTS = 5` **belum dikalibrasi**.
+>
+> **4.5 terkunci, dan satu bug input diperbaiki lebih dulu.** Kalibrasi butuh
+> ">= 2 minggu data pasca-Stage-3"; jam nolnya belum mulai karena Stage 3
+> belum live. Tapi query export yang terdokumentasi di header
+> `calibrate-ranking-weights.mjs` **tidak** memfilter
+> `mm_adverse_component IS NOT NULL` — persis yang diwajibkan migration 0015.
+> Query itu diperbaiki, dan `assertSingleMmSemantics()` sekarang **menolak**
+> dataset campuran pra-/pasca-0015 alih-alih diam-diam mencocokkan satu bobot
+> untuk dua besaran berbeda di kolom `mm_component`.
+>
+> Yang SENGAJA belum dikerjakan: menambah `mmAdverse` sebagai fitur ke-5.
+> Model di script punya 4 fitur dan meng-clamp koefisien negatif ke 0 sebelum
+> normalisasi — bentuk itu **tidak bisa** merepresentasikan suku penalti yang
+> koefisiennya memang diharapkan negatif. Mengubah bentuk model adalah
+> keputusan yang harus diambil dengan data di tangan, bukan sebelumnya.
+>
+> **Mutation-test (bukti guard menggigit):**
+> | Mutasi | Hasil |
+> |---|---|
+> | 4.1: `overall` kembali diturunkan dari sampel detail | 1 test **merah** (sampleSize 3600 → 1) |
+> | 4.1: `sumAggregateGroups` jadi mean-of-means | 1 test **merah** |
+> | 4.3: hapus `ORDER BY outcome_attempts ASC` dari SQL | 1 test **merah** |
+> | 4.3: hapus `AND outcome_attempts < ?` dari SQL | 1 test **merah** |
+> | 4.3: hapus guard "outage total" | 2 test **merah** |
+> | 4.3: data-shape berhenti menaikkan attempt | 2 test **merah** |
+> | 4.5: guard semantik dilepas dari `parseDataset` | 1 test **merah** |
+> | 4.2: `exitedAbove` pakai `close` bukan `high` (percobaan 1) | ⚠️ **hijau — celah ketahuan** |
+> | 4.2: setelah ditambah test wick-pierce | 2 test **merah** ✅ |
+>
+> Celah 4.2 nyata dan bukan sekadar formalitas: order grid terisi di **wick**,
+> bukan di close. Candle yang menusuk `upper` lalu balik ke dalam band sudah
+> menjual di level teratas dan meninggalkan posisi flat — itu keluar range.
+> Seluruh fixture awal kebetulan punya close DAN high di sisi yang sama, jadi
+> mutasi `high → close` lolos. Ditambal dengan fixture yang close-nya kembali
+> ke dalam band.
+>
+> **Celah kedua yang diperbaiki:** fake D1 di
+> `d1Client.pipelineDecisionOutcomes.test.ts` semula MENIRU urutan
+> `outcome_attempts ASC` tanpa melihat SQL-nya — artinya menghapus klausa itu
+> dari produksi akan tetap hijau. Fake sekarang **membaca** string SQL dan
+> hanya menerapkan filter/urutan kalau klausanya benar-benar ada.
+>
+> **Sisa untuk Krakatau (GATED):** `d1 migrations apply --remote` (0015 **lalu**
+> 0016) → `wrangler deploy` → `wrangler secret put ADMIN_SECRET` (4.4).
 
 ---
 
@@ -685,6 +796,64 @@ bervariasi. Itu tes penerimaan paling tajam untuk B1.
 
 ---
 
+## Verifikasi live 2026-09-04 — Stage 1/2/3 TIDAK di-deploy
+
+Dibaca langsung dari D1 produksi (`3600a9bb-…`, SELECT saja) dan dari worker
+live lewat MCP connector, pukul ~10:20 UTC.
+
+### Tiga bukti independen
+
+| # | Uji | Kode `main` | Kode Stage 1-3 | Yang terlihat live |
+|---|---|---|---|---|
+| 1 | `git branch --contains` | — | — | `dd1d26c` & `81c9947` **tidak** ada di `origin/main` (`c6bd5ca`) |
+| 2 | `d1_migrations` | s/d 0014 | +0015 | berhenti di **0014** (2026-09-02); kolom `mm_adverse_component` **tidak ada** — padahal row terus masuk s/d 10:07:15, jadi kode Stage 3 mustahil sedang jalan |
+| 3 | `entry_alert_state.last_decision` slot tengah | `DCA_PAUSE_SOFT` | `NO_TRADE+DCA_PAUSE_SOFT` | **`DCA_PAUSE_SOFT`**, ditulis 09-04 08:07 |
+
+Ditambah tes penerimaan yang plan ini sebut sendiri paling tajam:
+`whalescope_backtest_pipeline_decisions` live dengan `forwardWindow=1h`
+mengembalikan `forwardReturn: 0` untuk **50 dari 50** baris, `winRate 0`,
+`avgReturn 0` — B1 masih utuh.
+
+### Salah atribusi yang harus dihindari
+
+Ada pergeseran perilaku NYATA di `entry_alert_run_log` sekitar **09-03
+15:00-16:00 UTC**: `watch_count` jatuh dari ~290/320 per jam ke ~165/280, dan
+`trad_watch`/`trad_trade` melonjak (25/17 di jam 15, 51/12 di jam 19). Itu
+**bukan** Stage 1-3 — itu commit `0a11d14` *"relay #2 online,
+ENTRY_WATCHLIST_SIZE 250→350"*, di-commit 09-03 15:52 UTC. Kolam kandidat
+Phase 1 melebar → campuran symbol yang masuk Phase 2 berubah.
+
+### Baseline pra-deploy (angka pembanding untuk sesudahnya)
+
+Semua gejala yang Stage 1-3 targetkan masih utuh dan sekarang **terukur**.
+Rentang 7 hari, `n = 7.323` row ber-`mm_component`:
+
+| Prediksi | Baseline 2026-09-04 |
+|---|---|
+| S3-1 distribusi `rankingScore` turun | mean **36,60** · `>= 55`: **1 dari 7.323** · max **55,6** · `mm_component` mean 16,89 |
+| S3-2 label regime konsisten lintas menit cron | **4,0%** symbol-jam flip `regime_1h`, **1,6%** flip `regime_4h` (n = 2.463 symbol-jam) |
+| S2-2 DCA SHORT terjangkau | 8 plan SHORT, **semuanya `PAUSE_SOFT`**, terbaru 09-03 05:22 — persis gejala K10 |
+| S2-6 `entry_count` bergerak | **0 dari 152** plan punya `entry_count > 0` |
+| 4.3 antrian backfill | 79 pending (satu tick), **nol** baris tertinggal di luar jendela normal — risiko laten, belum kejadian |
+
+### Koreksi ke prediksi Stage 1
+
+Prediksi Stage 1 nomor 3 menulis "`forward_return_1h` berhenti bernilai 0
+seragam" seolah berlaku untuk kolom D1 juga. **Tidak.** Data live: hanya 129
+dari 15.617 row yang persis 0 (avg |return| 1h = 0,65%). B1 hanya menyerang
+`pipelineDecisionBacktest.ts` (jalur tool on-demand), bukan
+`pipelineDecisionOutcomeCron.ts` (jalur kolom). Perbaikan Stage 1.5 tetap
+benar untuk KEDUANYA — yang salah cuma kalimat prediksinya.
+
+### Konsekuensi
+
+Urutan deploy Krakatau sekarang: **0015 → 0016 → `wrangler deploy`**, dan
+seluruh "perubahan perilaku yang DIHARAPKAN" di blok Stage 1/2/3 baru bisa
+diuji setelah itu. Jam nol untuk 4.5 (">= 2 minggu data pasca-Stage-3") juga
+baru mulai dari situ.
+
+---
+
 ## Yang sengaja TIDAK dikerjakan
 
 - **Wire `aggTradesPaginator` ke cron** — terukur ~115 halaman/60 menit untuk
@@ -695,3 +864,9 @@ bervariasi. Itu tes penerimaan paling tajam untuk B1.
   review manual, sesuai disiplin yang sudah ada di repo.
 - **Relay REST ketiga / `ENTRY_WATCHLIST_SIZE` naik lagi** — backlog Krakatau
   yang sudah ada, tidak dicampur ke rencana ini.
+- **`mmAdverse` sebagai fitur ke-5 di `calibrate-ranking-weights.mjs`** —
+  model 4-fitur di sana meng-clamp koefisien negatif ke 0 sebelum
+  normalisasi, jadi ia tidak bisa merepresentasikan suku penalti. Mengubah
+  bentuk model harus dilakukan dengan data pasca-Stage-3 di tangan (4.5),
+  bukan sebelumnya. Yang dikerjakan sekarang cuma guard supaya dataset-nya
+  tidak tercemar (`assertSingleMmSemantics`).
