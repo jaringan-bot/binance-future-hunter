@@ -20,6 +20,7 @@ import {
   checkMarketSnapshotFreshness,
   checkD1Capacity,
   checkRelayHealth,
+  checkWorkerPublicHealth,
 } from "./cron/infraHealthCron.js";
 
 interface Env {
@@ -54,6 +55,8 @@ interface Env {
   // webhook Discord. NOTIFY_WEBHOOK_URL: endpoint generic (POST JSON {text}).
   DISCORD_WEBHOOK_URL?: string;
   NOTIFY_WEBHOOK_URL?: string;
+  // OPSIONAL -- Bromo public uptime probe target (default workers.dev URL).
+  WORKER_PUBLIC_URL?: string;
 }
 
 const REQUEST_LOG_RETENTION_MS = 30 * 24 * 3600 * 1000; // 30 hari
@@ -424,6 +427,7 @@ export default {
       TELEGRAM_CHAT_ID: env.TELEGRAM_CHAT_ID,
       DISCORD_WEBHOOK_URL: env.DISCORD_WEBHOOK_URL,
       NOTIFY_WEBHOOK_URL: env.NOTIFY_WEBHOOK_URL,
+      WORKER_PUBLIC_URL: env.WORKER_PUBLIC_URL,
     };
     ctx.waitUntil(
       checkEntryAlertCronFreshness(defaultTickTelegramEnv).catch((err) =>
@@ -452,6 +456,12 @@ export default {
     ctx.waitUntil(
       checkRelayHealth(defaultTickTelegramEnv).catch((err) =>
         console.error("[cron] gagal checkRelayHealth:", (err as Error)?.message ?? String(err)),
+      ),
+    );
+    // Bromo: probe Worker public HTTPS (workers.dev). Optional WORKER_PUBLIC_URL secret/var.
+    ctx.waitUntil(
+      checkWorkerPublicHealth(defaultTickTelegramEnv).catch((err) =>
+        console.error("[cron] gagal checkWorkerPublicHealth (Bromo):", (err as Error)?.message ?? String(err)),
       ),
     );
 
