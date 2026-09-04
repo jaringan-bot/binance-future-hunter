@@ -1,80 +1,85 @@
-# Vercel Hobby — Catatan Kuota & Formula
+# Vercel Hobby — Quota Notes & Formula
 
-> **Status: RELAY VERCEL SUDAH RETIRED.** Dokumen ini catatan referensi
-> **kalau suatu saat Vercel dipertimbangkan lagi** sebagai host relay Binance.
-> Bukan setup aktif. Relay produksi sekarang = VPS AWS + `proxy-standalone/`
-> (lihat [`proxy-standalone/README.md`](../proxy-standalone/README.md)).
+> **Status: THE VERCEL RELAY IS RETIRED.** This document is a reference note
+> **in case Vercel is ever reconsidered** as a host for the Binance relay. It
+> is not an active setup. The production relay today is the AWS VPS running
+> `proxy-standalone/` (see
+> [`proxy-standalone/README.md`](../proxy-standalone/README.md)).
 
-## 0. Blocker utama BUKAN kuota
+## 0. The real blocker was NOT the quota
 
-Alasan sebenarnya `proxy/` (Vercel) ditinggalkan **bukan** karena kuota habis,
-tapi karena **Hobby plan melarang commercial use** — Vercel meng-*auto-pause*
-project-nya sendiri. Jadi:
+`proxy/` (Vercel) was abandoned **not** because the quota ran out, but because
+the Hobby plan **forbids commercial use** — Vercel auto-pauses the project
+itself. So:
 
-- Formula kuota di bawah relevan **HANYA** kalau pakai **plan berbayar (Pro)**
-  atau use-case yang jelas non-komersial.
-- **Jangan** simpulkan "kuota muat → aman pakai Hobby." Batasannya ToS, bukan
-  angka menit.
+- The quota formula below is relevant **ONLY** on a **paid plan (Pro)** or for
+  a clearly non-commercial use case.
+- **Do not** conclude "the quota fits → Hobby is safe." The constraint is the
+  ToS, not the minute count.
 
-## 1. Metrik: Vercel Hobby "Active CPU"
+## 1. The metric: Vercel Hobby "Active CPU"
 
-- **Kuota:** 4 jam/bulan = **240 menit/bulan** (metrik *Active CPU* = waktu
-  compute saat fungsi benar-benar eksekusi, BUKAN wall-clock).
-- **Baseline terukur** (diverifikasi dari dashboard usage **riil**, bukan
-  artikel pihak ketiga — lihat `src/shared.ts:22-26`):
-  **10 pair (SNAPSHOT cron `*/5`) ≈ 35 menit/bulan (~15% kuota).**
+- **Quota:** 4 hours/month = **240 minutes/month** (the *Active CPU* metric =
+  compute time while the function is actually executing, NOT wall-clock).
+- **Measured baseline** (verified from the **real** usage dashboard, not a
+  third-party article — see `src/shared.ts:22-26`):
+  **10 pairs (SNAPSHOT cron `*/5`) ≈ 35 minutes/month (~15% of quota).**
 
 ## 2. Formula
 
-Untuk workload **SNAPSHOT cron `*/5`** (~11 call/pair/run, 288 run/hari):
+For the **SNAPSHOT cron `*/5`** workload (~11 calls/pair/run, 288 runs/day):
 
 ```
-CPU_menit_per_bulan ≈ N_pair × 3.5
+CPU_minutes_per_month ≈ N_pairs × 3.5
 ```
 
-Turunannya: 10 pair = 35 menit → **3.5 menit / pair / bulan** (asumsi linear).
+Derived from: 10 pairs = 35 minutes → **3.5 minutes / pair / month** (assuming
+linearity).
 
-Sebagai persen kuota:
-
-```
-%kuota ≈ (N_pair × 3.5) / 240 × 100
-```
-
-Ceiling (batas sebelum 100% kuota):
+As a percentage of quota:
 
 ```
-N_pair_maks ≈ 240 / 3.5 ≈ 68 pair
+%quota ≈ (N_pairs × 3.5) / 240 × 100
 ```
 
-## 3. Contoh
+Ceiling (the limit before hitting 100% of quota):
 
-| N_pair | CPU menit/bulan | % dari 240 |
+```
+N_pairs_max ≈ 240 / 3.5 ≈ 68 pairs
+```
+
+## 3. Examples
+
+| N_pairs | CPU minutes/month | % of 240 |
 |---|---|---|
 | 10 | 35 | ~15% |
 | 50 | 175 | ~73% |
 | 68 | ~238 | ~99% (ceiling) |
 
-Di 50 pair headroom sudah **tidak longgar** (~73%) — angka ini yang jadi dasar
-catatan "monitor usage Vercel" di `src/shared.ts`.
+At 50 pairs the headroom is **already not comfortable** (~73%) — that figure is
+what the "monitor Vercel usage" note in `src/shared.ts` is based on.
 
-## 4. Batas validitas formula (WAJIB dibaca sebelum dipakai)
+## 4. Validity limits of the formula (READ BEFORE USING)
 
-- **Hanya untuk workload SNAPSHOT cron `*/5`** (~11 call/pair). **TIDAK**
-  termasuk `entryAlertCron` (250–500 pair, jauh lebih berat) — kalau entry-alert
-  ikut di Vercel, kuota jebol jauh lebih cepat dan formula ini **tidak berlaku**.
-- **Ekstrapolasi linear**, tervalidasi hanya di titik terukur (10 & 50 pair).
-  Overlap antar cron di window yang sama bisa bikin konsumsi **superlinear**.
-- Angka `3.5 menit/pair/bulan` **spesifik** ke konfigurasi call/pair saat itu.
-  Kalau jumlah call/pair, cadence cron, atau region berubah → **ukur ulang
-  baseline**, jangan pakai konstanta ini buta.
-- "Active CPU" ≠ wall-clock. Jangan campur dengan cap wall-clock cron (limit
-  terpisah, lihat komentar `[limits]`/cron di `wrangler.toml` untuk konteks
-  Cloudflare — bukan Vercel).
+- **Only for the SNAPSHOT cron `*/5` workload** (~11 calls/pair). Does **NOT**
+  include `entryAlertCron` (250–500 pairs, far heavier) — if entry-alert also
+  ran on Vercel the quota would blow far sooner and this formula **does not
+  apply**.
+- **Linear extrapolation**, validated only at the measured points (10 & 50
+  pairs). Cron overlap within the same window can make consumption
+  **superlinear**.
+- The `3.5 minutes/pair/month` figure is **specific** to the calls-per-pair
+  configuration at that time. If the calls/pair, cron cadence, or region
+  change → **re-measure the baseline**; do not reuse this constant blindly.
+- "Active CPU" ≠ wall-clock. Do not mix it up with the cron wall-clock cap
+  (a separate limit — see the `[limits]`/cron comments in `wrangler.toml` for
+  the Cloudflare context, which is not Vercel).
 
-## 5. Kapan dokumen ini relevan
+## 5. When this document is relevant
 
-- **Hanya** kalau ada rencana konkret balik ke Vercel dengan **plan berbayar**
-  atau use-case non-komersial.
-- Untuk relay Binance saat ini: **pakai VPS / Fly.io / Deno Deploy** (region
-  Singapore/Tokyo), lihat [`proxy-standalone/README.md`](../proxy-standalone/README.md).
-  Vercel = jalur historis/retired.
+- **Only** if there is a concrete plan to return to Vercel on a **paid plan**
+  or for a non-commercial use case.
+- For the Binance relay today: **use a VPS / Fly.io / Deno Deploy** (Singapore
+  or Tokyo region) — see
+  [`proxy-standalone/README.md`](../proxy-standalone/README.md). Vercel is a
+  historical/retired path.
