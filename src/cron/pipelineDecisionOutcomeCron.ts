@@ -13,7 +13,13 @@
 // per row, bukan 3 fetch terpisah -- slice array yang sama 3x.
 import * as binanceProxy from "../binanceProxyClient.js";
 import type { KlineTuple } from "../binanceProxyClient.js";
-import { evaluateDecisionForward } from "../tools/pipelineDecisionBacktest.js";
+import {
+  evaluateDecisionForward,
+  FORWARD_INTERVAL,
+  FORWARD_WINDOW_CANDLES,
+  FORWARD_FULL_WINDOW_CANDLES,
+  FORWARD_FULL_WINDOW_MS,
+} from "../tools/pipelineDecisionBacktest.js";
 import {
   queryPendingPipelineDecisionOutcomes,
   updatePipelineDecisionOutcome,
@@ -34,8 +40,11 @@ const GIVE_UP_AFTER_MS = 14 * 24 * 3600 * 1000;
 // entryAlertCron.ts, jaga budget rate-limiter internal (rateLimiter.ts)
 // tetap wajar dibagi sama housekeeping lain di tick */5.
 const MAX_ROWS_PER_TICK = 30;
-const FULL_WINDOW_KLINE_LIMIT = 25; // 24h + 1 candle acuan awal
-const FULL_WINDOW_MS = 24 * 3600 * 1000 + 3600 * 1000; // buffer 1 candle ekstra buat fetch endTime
+// B1/B2 (2026-09-04): window sekarang dihitung dalam candle 5m, bukan 1h --
+// lihat komentar panjang di pipelineDecisionBacktest.ts. Konstanta di-import
+// dari sana supaya tool on-demand dan cron ini TIDAK BISA lagi berbeda
+// (klaim "angka IDENTIK" di header file ini dulu tidak benar untuk window
+// 1h: tool menghasilkan 0 persis, cron menghasilkan return jam+1 -> jam+2).
 
 export async function backfillPipelineDecisionOutcomes(now: number = Date.now()): Promise<{ attempted: number; updated: number }> {
   const pending: PendingPipelineDecisionOutcomeRow[] = await queryPendingPipelineDecisionOutcomes(
@@ -48,25 +57,31 @@ export async function backfillPipelineDecisionOutcomes(now: number = Date.now())
   for (const row of pending) {
     let candles: KlineTuple[] = [];
     try {
-      candles = await binanceProxy.getKlinesNative(row.symbol, "1h", FULL_WINDOW_KLINE_LIMIT, row.runAt, row.runAt + FULL_WINDOW_MS);
+      candles = await binanceProxy.getKlinesNative(
+        row.symbol,
+        FORWARD_INTERVAL,
+        FORWARD_FULL_WINDOW_CANDLES,
+        row.runAt,
+        row.runAt + FORWARD_FULL_WINDOW_MS,
+      );
     } catch (err) {
       console.error(`[cron] gagal fetch klines backfill pipeline_decision_log id=${row.id} (${row.symbol}):`, (err as Error)?.message ?? String(err));
       continue;
     }
 
-    if (candles.length < FULL_WINDOW_KLINE_LIMIT) {
-      // Klines belum cukup (candle < 25) -- symbol baru listing/gap data.
+    if (candles.length < FORWARD_FULL_WINDOW_CANDLES) {
+      // Candle belum cukup (< 289 candle 5m) -- symbol baru listing/gap data.
       // Coba lagi tick berikutnya (masih dalam GIVE_UP_AFTER_MS). PENTING:
-      // evaluateDecisionForward() TIDAK menolak array pendek (cuma butuh
-      // candles[0]/candles[last]), jadi length harus dicek EKSPLISIT di
-      // sini -- tanpa ini, row ke-persist dengan forwardReturn24h yang
-      // sebenarnya cuma jarak N<24 jam, bukan 24h beneran.
+      // evaluateDecisionForward() cuma menolak array < 2 candle, jadi tanpa
+      // cek eksplisit di sini row bisa ke-persist dengan forwardReturn24h
+      // yang sebenarnya cuma jarak N < 24 jam.
       continue;
     }
 
-    const fwd1h = evaluateDecisionForward(candles.slice(0, 2), row.stopLoss);
-    const fwd4h = evaluateDecisionForward(candles.slice(0, 5), row.stopLoss);
-    const fwd24h = evaluateDecisionForward(candles.slice(0, FULL_WINDOW_KLINE_LIMIT), row.stopLoss);
+    // slice(0, N+1): entry = open candle ke-0, exit = close candle ke-N.
+    const fwd1h = evaluateDecisionForward(candles.slice(0, FORWARD_WINDOW_CANDLES["1h"] + 1), row.stopLoss);
+    const fwd4h = evaluateDecisionForward(candles.slice(0, FORWARD_WINDOW_CANDLES["4h"] + 1), row.stopLoss);
+    const fwd24h = evaluateDecisionForward(candles.slice(0, FORWARD_WINDOW_CANDLES["24h"] + 1), row.stopLoss);
     if (!fwd24h) continue; // harusnya gak pernah kejadian setelah length check di atas, jaga-jaga saja
 
     await updatePipelineDecisionOutcome(row.id, {

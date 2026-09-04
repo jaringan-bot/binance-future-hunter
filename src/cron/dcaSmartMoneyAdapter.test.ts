@@ -176,3 +176,141 @@ describe("evaluateDcaSmartMoney", () => {
     expect(r.pauseReason).toContain("Grid Bot detects range breakdown");
   });
 });
+
+// ─────────────────────────────────────────────────────────────
+// K4 REACHABILITY GUARD (2026-09-04, Stage 2 signal-integrity)
+//
+// Kelas test yang ABSEN dan karenanya membiarkan K4 hidup: SEMUA test lama
+// menguji fungsi skoring satu-satu dengan angka yang disuapkan tangan, tidak
+// ada satu pun yang bertanya "apakah DCA_TRADE bisa DICAPAI sama sekali dari
+// input yang mungkin?". Jawabannya dulu: TIDAK, untuk ~300 dari 350 pair,
+// karena histori funding cuma ada untuk 50 pair SNAPSHOT_WATCHLIST.
+// ─────────────────────────────────────────────────────────────
+describe("K4: reachability head DCA Smart Money", () => {
+  // Mereplikasi apa yang benar-benar dibangun buildAndEvaluateDcaSmartMoney:
+  // slopeSpot = slopeFutures * 0.85 (K3 -- masih dikarang sampai Stage 3).
+  function scenarioC(takerSpotNorm: number, multiTfAlign: number) {
+    const slopeFutures = 1;
+    return { slopeSpot: slopeFutures * 0.85, slopeFutures, takerSpotNorm, multiTfAlign };
+  }
+
+  function candles(n = 40) {
+    return Array.from({ length: n }, (_, i) => ({
+      openTime: i * 3_600_000,
+      open: 100 + i * 0.1,
+      high: 101 + i * 0.1,
+      low: 99 + i * 0.1,
+      close: 100.5 + i * 0.1,
+      volume: 10,
+    }));
+  }
+
+  function input(over: Partial<DcaSmartMoneyInput> = {}): DcaSmartMoneyInput {
+    return {
+      symbol: "TESTUSDT",
+      side: "LONG",
+      currentPrice: 100,
+      scenarioC: scenarioC(100, 100), // S_C maksimum yang mungkin
+      fundingRate: -0.0009,
+      fundingHistory30d: [],
+      oiVelocityPerHour: 1000,
+      oiVelocityHistory: [],
+      regime: "RANGING",
+      candles1h: candles(),
+      liqSpikeUsd: 0,
+      liqMean24hUsd: 0,
+      ...over,
+    };
+  }
+
+  it("REGRESSION: with an EMPTY funding history, timing is capped below the WATCH floor -- DCA is unreachable", () => {
+    // Ini kondisi lama untuk mayoritas pair. Percentile jatuh ke 50 netral:
+    // shortSqueezeBoost = 0 DAN longSqueezeRisk = 0 sekaligus.
+    //   timing_LONG = 0.4*S_C + 0.3*0 + 0.2*oi + 0.1*100
+    //               <= 0.4*64.025 + 0 + 20 + 10 = 55.61  <  60
+    const r = evaluateDcaSmartMoney(
+      input({
+        fundingHistory30d: [],
+        oiVelocityHistory: [1, 2, 3], // percentile OI maksimum (100)
+        oiVelocityPerHour: 9_999,
+      }),
+    );
+
+    expect(r.fundingPercentile).toBe(50);
+    expect(r.timingScore).toBeLessThan(60);
+    expect(r.decision).toBe("DCA_PAUSE_SOFT");
+    // Dan alasannya sekarang TERLIHAT, bukan senyap.
+    expect(r.reasons.join(" ")).toContain("Histori funding tipis");
+  });
+
+  it("with a REAL funding history at an extreme, DCA_TRADE becomes reachable", () => {
+    // Funding sekarang berada di persentil ~0 dari 30 hari terakhir
+    // (short crowded) -> shortSqueezeBoost maksimum. Inilah setup yang
+    // memang SEHARUSNYA memicu DCA LONG, dan yang dulu mustahil terbit.
+    const history = Array.from({ length: 90 }, (_, i) => 0.0001 + i * 0.000001);
+    const r = evaluateDcaSmartMoney(
+      input({
+        fundingRate: -0.001, // di bawah SEMUA nilai historis
+        fundingHistory30d: history,
+        oiVelocityHistory: [1, 2, 3],
+        oiVelocityPerHour: 9_999,
+      }),
+    );
+
+    expect(r.fundingPercentile).toBe(0);
+    expect(r.timingScore).toBeGreaterThanOrEqual(DCA_TIMING_TRADE_MIN);
+    expect(r.decision).toBe("DCA_TRADE");
+  });
+
+  it("SHORT side is reachable too (mirror), not just LONG", () => {
+    // Funding di persentil tertinggi = long crowded = bahan bakar DCA SHORT.
+    const history = Array.from({ length: 90 }, (_, i) => -0.001 + i * 0.000001);
+    const r = evaluateDcaSmartMoney(
+      input({
+        side: "SHORT",
+        scenarioC: scenarioC(0, 0), // S_C minimum -> (100 - S_C) maksimum untuk SHORT
+        fundingRate: 0.001,
+        fundingHistory30d: history,
+        oiVelocityHistory: [1, 2, 3],
+        oiVelocityPerHour: 9_999,
+      }),
+    );
+
+    expect(r.fundingPercentile).toBe(100);
+    expect(["DCA_TRADE", "DCA_WATCH"]).toContain(r.decision);
+  });
+});
+
+describe("K10: safety/pause harus mencerminkan arah, bukan selalu sudut pandang LONG", () => {
+  it("does not penalise a SHORT for the very conditions that make SHORT attractive", () => {
+    // Funding percentile 100 = long crowded. Untuk LONG itu risiko squeeze;
+    // untuk SHORT itu bahan bakar. S_C rendah = arus jual; melawan LONG,
+    // mendukung SHORT.
+    const longSide = computeDcaSafetyScore(14, 100, "LONG");
+    const shortSide = computeDcaSafetyScore(14, 100, "SHORT");
+
+    expect(longSide.score).toBeLessThan(shortSide.score);
+    expect(shortSide.distributionPenalty).toBe(0);
+    expect(shortSide.squeezePenalty).toBe(0);
+    // Sebelum perbaikan: keduanya 40 + 50 -> safety 10 -> DCA_STOP.
+    expect(shortSide.score).toBe(100);
+  });
+
+  it("still penalises a SHORT when the flow genuinely runs against it", () => {
+    // S_C tinggi = arus beli dominan (melawan SHORT); funding percentile
+    // rendah = short-squeeze setup (merugikan SHORT).
+    const shortSide = computeDcaSafetyScore(90, 0, "SHORT");
+    expect(shortSide.distributionPenalty).toBe(40);
+    expect(shortSide.squeezePenalty).toBe(50);
+    expect(shortSide.score).toBe(10);
+  });
+
+  it("resolvePauseLevel mirrors the S_C gate per side", () => {
+    // S_C 90 aman untuk LONG, tapi melawan SHORT -> SOFT.
+    expect(resolvePauseLevel(100, 90, 0, false, "LONG")).toBe("NONE");
+    expect(resolvePauseLevel(100, 90, 0, false, "SHORT")).toBe("PAUSE_SOFT");
+    // S_C 14 melawan LONG -> SOFT, tapi mendukung SHORT.
+    expect(resolvePauseLevel(100, 14, 0, false, "LONG")).toBe("PAUSE_SOFT");
+    expect(resolvePauseLevel(100, 14, 0, false, "SHORT")).toBe("NONE");
+  });
+});

@@ -63,7 +63,7 @@ import { registerSafeTool } from "../toolWrapper.js";
 import { ToolResponseBuilder } from "../responseBuilder.js";
 import { fmtPrice } from "../format.js";
 import { computeGridVelocity, type GridVelocityResult } from "../gridVelocity.js";
-import { insertPipelineDecisionLogs } from "../d1Client.js";
+import { insertPipelineDecisionLogs, getDcaActivePlan } from "../d1Client.js";
 import { toPipelineDecisionLogRow, type PipelineDecisionLogSource } from "../pipelineDecisionLog.js";
 
 const REFERENCE_CAPITAL = 1000;
@@ -513,6 +513,57 @@ async function runPipelineInternal(
         rankingScore: 0,
         gridRiskStatus: "REJECT",
       });
+      const rejectTag = hardScreen.tags.join(",") || "regime/vol/funding";
+
+      // ─────────────────────────────────────────────────────────
+      // K5 (2026-09-04, Stage 2) -- HEAD TRADITIONAL PUNYA JALUR BREAKOUT.
+      //
+      // CACAT LAMA: hard screen adalah gate GRID (grid bot memang tidak
+      // cocok saat breakout), tapi ia ikut mematikan head Traditional yang
+      // justru MEMBUTUHKAN kondisi itu. calculateTraditionalBracket()
+      // skenario B mensyaratkan `regime === "BREAKOUT"`, sementara
+      // evaluateHardScreen() me-reject regime1h/regime4h BREAKOUT dan
+      // stub trad jadi TRAD_NO_TRADE di sini. Hasilnya TREND_BREAKOUT
+      // adalah DEAD CODE: tidak pernah bisa terbit lewat cron maupun tool.
+      // (Komentar lama di baris ini bahkan menyatakan sebaliknya.)
+      //
+      // Sekarang: kalau hard screen gagal HANYA karena tag regime, head
+      // trad tetap dievaluasi dari data Wave 1 yang SUDAH ada. Grid tetap
+      // NO_TRADE. Nol subrequest tambahan -- oiVelocity dioper null
+      // (engine sweep fault-tolerant terhadap itu), liquidations null,
+      // persis seperti jalur survivor.
+      //
+      // Gagal karena not_tradable / low_volume / funding_extreme TETAP
+      // mematikan semua head: itu bukan soal cocok-tidaknya strategi,
+      // melainkan pair-nya memang tidak layak disentuh.
+      // ─────────────────────────────────────────────────────────
+      const REGIME_ONLY_TAGS = new Set(["regime1h_breakout", "regime4h_breakout", "adx_spike_1h", "adx_spike_4h"]);
+      const regimeOnlyReject = hardScreen.tags.length > 0 && hardScreen.tags.every((t) => REGIME_ONLY_TAGS.has(t));
+
+      let tradOnRegimeReject: TraditionalFuturesResult;
+      if (regimeOnlyReject) {
+        const { bias: biasRejected } = summarizeKlines(klines1h);
+        const activeOpen = candles1h[candles1h.length - 1]?.openTime ?? 0;
+        const priorOpen = candles1h[candles1h.length - 2]?.openTime ?? 0;
+        tradOnRegimeReject = evaluateTraditionalFuturesEntry(
+          {
+            activePrice: currentPrice,
+            candles: candles1h,
+            atr14: computeATR(candles1h, opts.atrPeriod),
+            adx14: regime1h.adx,
+            regime: regime1h.regime,
+            bias: biasRejected,
+            activeCvd: computeCvdFromTrades(aggTrades.filter((t) => t.T >= activeOpen)),
+            priorCvd: computeCvdFromTrades(aggTrades.filter((t) => t.T >= priorOpen && t.T < activeOpen)),
+            oiVelocity: null,
+            lookbackBars: opts.lookbackBars,
+          },
+          { liquidations: null },
+        );
+      } else {
+        tradOnRegimeReject = stubTraditionalResult(`hard_screen_reject (${rejectTag})`);
+      }
+
       return {
         grid: {
           symbol,
@@ -523,10 +574,8 @@ async function runPipelineInternal(
         },
         // DCA: hard-screen SELALU lebih permisif dari gate DCA -- kalau grid
         // reject di sini, DCA pasti reject juga. Nol Wave-2 call.
-        dca: stubDca(symbol, `hard_screen_reject (${hardScreen.tags.join(",") || "regime/vol/funding"})`),
-        // Traditional Futures: skenario A butuh sweep, skenario B butuh
-        // regime BREAKOUT -- keduanya lolos hanya via jalur survivor. Reject.
-        trad: stubTraditionalResult(`hard_screen_reject (${hardScreen.tags.join(",") || "regime/vol/funding"})`),
+        dca: stubDca(symbol, `hard_screen_reject (${rejectTag})`),
+        trad: tradOnRegimeReject,
         dcaSm: null,
       };
     }
@@ -970,6 +1019,17 @@ async function runPipelineInternal(
         (regime1h.regime === "BREAKOUT" || regime4h.regime === "BREAKOUT" || regime1h.regime === "TRENDING_UP" || regime1h.regime === "TRENDING_DOWN")
           ? "GRID_NO_TRADE"
           : null;
+      // D1 (Stage 2): baca state plan yang ADA supaya entryCount benar-benar
+      // masuk ke evaluasi. Tanpa ini `entryCount` selalu 0 dan guard
+      // `entryCount >= maxEntries` (freeze plan) tidak pernah aktif.
+      // Best-effort: D1 tidak tersedia / row belum ada -> undefined (0).
+      let existingEntryCount: number | undefined;
+      try {
+        const plan = await getDcaActivePlan(symbol.toUpperCase(), dca.direction);
+        existingEntryCount = plan?.entryCount;
+      } catch {
+        existingEntryCount = undefined;
+      }
       try {
         dcaSm = await buildAndEvaluateDcaSmartMoney({
           symbol,
@@ -983,6 +1043,7 @@ async function runPipelineInternal(
           regime: regime4h.regime,
           gridSmDecision: gridSmDecision,
           cvdBuyPct: cvd.buyPct,
+          entryCount: existingEntryCount,
         });
       } catch (err) {
         preHardScreenNotes.push(

@@ -4,6 +4,7 @@ import {
   CIRCUIT_NOTIFY_COOLDOWN_MS,
   DAILY_LOSS_KEY,
   DAILY_LOSS_TTL_SECONDS,
+  DAILY_LOSS_COUNT_LIMIT,
   DAILY_LOSS_USD_LIMIT,
   MACRO_RISK_KEY,
   getDailyLossCircuit,
@@ -41,9 +42,9 @@ describe("riskCircuitBreaker", () => {
     expect(await isDailyLossCircuitOpen()).toBe(false);
   });
 
-  it("trips when count >= 3 or total_loss >= 60", () => {
+  it("trips at the exported count/USD limits (constants, not hardcoded literals)", () => {
     expect(isDailyLossTripped({ count: 2, total_loss: 40, window_start: 1 })).toBe(false);
-    expect(isDailyLossTripped({ count: 3, total_loss: 40, window_start: 1 })).toBe(true);
+    expect(isDailyLossTripped({ count: DAILY_LOSS_COUNT_LIMIT, total_loss: 40, window_start: 1 })).toBe(true);
     expect(isDailyLossTripped({ count: 1, total_loss: DAILY_LOSS_USD_LIMIT, window_start: 1 })).toBe(true);
   });
 
@@ -70,7 +71,7 @@ describe("riskCircuitBreaker", () => {
   });
 
   it("shouldNotifyDailyLoss is true once tripped and outside the 1h cooldown", () => {
-    const tripped = { count: 3, total_loss: 60, window_start: 1 };
+    const tripped = { count: DAILY_LOSS_COUNT_LIMIT, total_loss: DAILY_LOSS_USD_LIMIT, window_start: 1 };
     expect(shouldNotifyDailyLoss(tripped, 10_000)).toBe(true);
     expect(
       shouldNotifyDailyLoss({ ...tripped, last_notified_at: 10_000 - (CIRCUIT_NOTIFY_COOLDOWN_MS - 1) }, 10_000),

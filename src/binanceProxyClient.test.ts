@@ -1,5 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { setProxyConfig, getRelayEndpoints, getCurrentFundingRateNative, getAllTicker24hrNative, getKlinesNative, BinanceProxyError } from "./binanceProxyClient.js";
+import {
+  setProxyConfig,
+  getRelayEndpoints,
+  getCurrentFundingRateNative,
+  getAllTicker24hrNative,
+  getKlinesNative,
+  BinanceProxyError,
+  resetTierCooldowns,
+  recordTierCooldown,
+  isTierCoolingDown,
+  RELAY_COOLDOWN_MAX_MS,
+} from "./binanceProxyClient.js";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status });
@@ -307,5 +318,85 @@ describe("getAllTicker24hrNative", () => {
     const calledUrl = new URL(String(fetchMock.mock.calls[0][0]));
     expect(calledUrl.searchParams.get("path")).toBe("/fapi/v1/ticker/24hr");
     expect(calledUrl.searchParams.has("symbol")).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// PER-RELAY COOLDOWN (2026-09-04, Stage 1 signal-integrity)
+//
+// Cacat yang ditutup: 418/429 ada di FAILOVER_STATUS, jadi relay-1 yang
+// kena IP weight-ban langsung melempar SELURUH bebannya ke relay-2 -- yang
+// lalu ikut kena ban. Tidak ada memori bahwa sebuah relay baru saja
+// disuruh berhenti.
+// ─────────────────────────────────────────────────────────────
+describe("per-relay cooldown after 418/429", () => {
+  beforeEach(() => {
+    resetTierCooldowns();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    setProxyConfig(undefined, undefined);
+    resetTierCooldowns();
+  });
+
+  it("skips a relay that just returned 418 on the NEXT call instead of knocking again", async () => {
+    setProxyConfig("https://primary.example", "s1", "https://secondary.example", "s2", false);
+    // Body sebuah Response cuma bisa dibaca SEKALI -- wajib factory per
+    // panggilan, bukan satu objek yang dipakai ulang.
+    const banned = () =>
+      jsonResponse({ code: -1003, msg: "Way too many requests; IP(1.2.3.4) banned until 9999999999999." }, 418);
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(() => Promise.resolve(banned())) // call 1 -> tier A kena ban
+      .mockImplementation(() => Promise.resolve(jsonResponse(fundingBody, 200))); // sisanya sehat
+    vi.stubGlobal("fetch", fetchMock);
+
+    // Call 1: tier A kena 418, failover ke tier B, sukses.
+    await getCurrentFundingRateNative("BTCUSDT");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const bannedUrl = String(fetchMock.mock.calls[0][0]);
+
+    // Call 2: tier yang kena ban HARUS di-skip, bukan dicoba lagi.
+    await getCurrentFundingRateNative("ETHUSDT");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const thirdUrl = String(fetchMock.mock.calls[2][0]);
+    expect(new URL(thirdUrl).origin).not.toBe(new URL(bannedUrl).origin);
+  });
+
+  it("throws an explicit cooldown error instead of hammering when every tier is banned", async () => {
+    setProxyConfig("https://primary.example", "s1", "https://secondary.example", "s2", false);
+    const banned = () => jsonResponse({ code: -1003, msg: "IP banned until 9999999999999." }, 418);
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(banned()));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getCurrentFundingRateNative("BTCUSDT")).rejects.toThrow(BinanceProxyError);
+    const callsAfterFirst = fetchMock.mock.calls.length;
+    expect(callsAfterFirst).toBe(2); // dua relay dicoba sekali masing-masing
+
+    // Call kedua tidak boleh menyentuh jaringan sama sekali.
+    await expect(getCurrentFundingRateNative("ETHUSDT")).rejects.toThrow(/cooldown/i);
+    expect(fetchMock).toHaveBeenCalledTimes(callsAfterFirst);
+  });
+
+  it("records cooldown from Retry-After when the body carries no `banned until`", () => {
+    const now = 1_000_000;
+    recordTierCooldown("relay-x", now + 30_000, now);
+    expect(isTierCoolingDown("relay-x", now + 29_000)).toBe(true);
+    expect(isTierCoolingDown("relay-x", now + 31_000)).toBe(false);
+  });
+
+  it("never shortens an existing cooldown", () => {
+    const now = 1_000_000;
+    recordTierCooldown("relay-y", now + 120_000, now);
+    recordTierCooldown("relay-y", now + 5_000, now);
+    expect(isTierCoolingDown("relay-y", now + 100_000)).toBe(true);
+  });
+
+  it("caps an absurd `banned until` at RELAY_COOLDOWN_MAX_MS", () => {
+    const now = 1_000_000;
+    recordTierCooldown("relay-z", now + 99 * 3600_000, now);
+    expect(isTierCoolingDown("relay-z", now + RELAY_COOLDOWN_MAX_MS - 1)).toBe(true);
+    expect(isTierCoolingDown("relay-z", now + RELAY_COOLDOWN_MAX_MS + 1)).toBe(false);
   });
 });

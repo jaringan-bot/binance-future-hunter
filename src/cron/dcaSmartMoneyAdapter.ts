@@ -11,7 +11,8 @@ import type { MarketRegime } from "../tools/marketRegime.js";
 import type { GridSmDecision } from "./gridSmartMoneyAdapter.js";
 import { computeOiVelocity } from "../tools/oiVelocity.js";
 import type { KlineTuple, OpenInterestHistPoint } from "../binanceProxyClient.js";
-import { queryMarketSnapshots } from "../d1Client.js";
+import * as binanceProxy from "../binanceProxyClient.js";
+import * as streamGateway from "../streamGatewayClient.js";
 
 export type DcaSide = "LONG" | "SHORT";
 export type DcaPauseLevel = "NONE" | "PAUSE_SOFT" | "PAUSE_HARD" | "STOP";
@@ -121,19 +122,50 @@ export function computeDirectionalTiming(
 
 export interface DcaSafetyResult {
   score: number;
+  /** Penalti "arus order melawan tesis akumulasi arah ini". */
   distributionPenalty: number;
-  longSqueezePenalty: number;
-  longSqueezeRisk: number;
+  /** Penalti risiko squeeze YANG MERUGIKAN arah ini. */
+  squeezePenalty: number;
+  /** Risiko squeeze yang merugikan arah ini, 0-100. */
+  adverseSqueezeRisk: number;
 }
 
-/** SafetyScore = max(0, 100 - distributionPenalty - longSqueezePenalty). */
-export function computeDcaSafetyScore(scenarioCScore: number, fundingPercentile: number): DcaSafetyResult {
+// ─────────────────────────────────────────────────────────────
+// K10 (BARU, ditemukan 2026-09-04 oleh reachability test Stage 2)
+// -- SAFETY/PAUSE DULU HANYA DITULIS DARI SUDUT PANDANG LONG.
+//
+// computeDirectionalTiming() SUDAH mencerminkan arah (SHORT = mirror), tapi
+// dua fungsi di bawah tidak ikut diperbarui:
+//   - distributionPenalty dipicu S_C < 25. S_C rendah = arus jual dominan --
+//     buruk untuk DCA LONG, tapi justru TESIS-nya DCA SHORT.
+//   - penalti squeeze memakai computeLongSqueezeRisk(). Funding di persentil
+//     tinggi = long crowded -- risiko untuk LONG, tapi bahan bakar SHORT.
+//
+// Akibatnya: makin KUAT setup SHORT, makin besar penaltinya, sampai
+// safety < 20 -> DCA_STOP. DCA SHORT secara struktural tidak terjangkau
+// tepat ketika seharusnya paling layak. Ini saudara kandung K4, ditemukan
+// karena test reachability -- bukan oleh 849 test lama yang menyuapkan
+// angka satu per satu.
+//
+// Perbaikannya MENGIKUTI konvensi mirror yang SUDAH ada di
+// computeDirectionalTiming(), bukan desain baru.
+// ─────────────────────────────────────────────────────────────
+export function computeDcaSafetyScore(
+  scenarioCScore: number,
+  fundingPercentile: number,
+  side: DcaSide = "LONG",
+): DcaSafetyResult {
   const sC = clamp100(scenarioCScore);
-  const longSqueezeRisk = computeLongSqueezeRisk(fundingPercentile);
-  const distributionPenalty = sC < 25 ? 40 : 0;
-  const longSqueezePenalty = longSqueezeRisk > 80 ? 50 : longSqueezeRisk > 60 ? 25 : 0;
-  const score = Math.max(0, 100 - distributionPenalty - longSqueezePenalty);
-  return { score, distributionPenalty, longSqueezePenalty, longSqueezeRisk };
+  // Arus yang MELAWAN tesis arah ini.
+  const flowAgainst = side === "LONG" ? sC < 25 : sC > 75;
+  // Squeeze yang MERUGIKAN arah ini: LONG takut long-squeeze (funding
+  // percentile tinggi), SHORT takut short-squeeze (percentile rendah).
+  const adverseSqueezeRisk =
+    side === "LONG" ? computeLongSqueezeRisk(fundingPercentile) : computeShortSqueezeBoost(fundingPercentile);
+  const distributionPenalty = flowAgainst ? 40 : 0;
+  const squeezePenalty = adverseSqueezeRisk > 80 ? 50 : adverseSqueezeRisk > 60 ? 25 : 0;
+  const score = Math.max(0, 100 - distributionPenalty - squeezePenalty);
+  return { score, distributionPenalty, squeezePenalty, adverseSqueezeRisk };
 }
 
 export interface CapitulationInput {
@@ -166,12 +198,18 @@ export function isCapitulation(input: CapitulationInput): boolean {
 export function resolvePauseLevel(
   safetyScore: number,
   scenarioCScore: number,
-  longSqueezeRisk: number,
+  /** Risiko squeeze yang MERUGIKAN arah yang dievaluasi (lihat K10). */
+  adverseSqueezeRisk: number,
   capitulation: boolean,
+  side: DcaSide = "LONG",
 ): DcaPauseLevel {
   if (safetyScore < 20 || capitulation) return "STOP";
-  if (safetyScore < 50 || longSqueezeRisk > 80) return "PAUSE_HARD";
-  if (safetyScore < 70 || scenarioCScore < 25) return "PAUSE_SOFT";
+  if (safetyScore < 50 || adverseSqueezeRisk > 80) return "PAUSE_HARD";
+  // K10: S_C rendah = arus jual dominan. Itu melawan tesis LONG, tapi
+  // MENDUKUNG tesis SHORT -- ambangnya harus dicerminkan, bukan dipakai
+  // apa adanya untuk kedua arah.
+  const flowAgainst = side === "LONG" ? scenarioCScore < 25 : scenarioCScore > 75;
+  if (safetyScore < 70 || flowAgainst) return "PAUSE_SOFT";
   return "NONE";
 }
 
@@ -215,6 +253,8 @@ export interface DcaSmartMoneyInput {
   scenarioC: ScenarioCInput;
   fundingRate: number;
   fundingHistory30d: number[];
+  /** Rentang jam yang benar-benar tercakup fundingHistory30d (observabilitas). */
+  fundingHistoryHours?: number;
   oiVelocityPerHour: number;
   oiVelocityHistory: number[];
   regime: MarketRegime | string;
@@ -235,6 +275,10 @@ export interface DcaSmartMoneyResult {
   safetyScore: number;
   intervalPct: number;
   nextTriggerPrice: number;
+  /** Harga saat evaluasi -- dipakai entryAlertCron untuk mendeteksi apakah
+   *  nextTriggerPrice plan sebelumnya sudah terlampaui (D1). */
+  currentPrice: number;
+  side: DcaSide;
   pauseLevel: DcaPauseLevel;
   pauseReason: string | null;
   entryCount: number;
@@ -259,12 +303,161 @@ export function oiVelocityHistoryFromHist(oiHist: OpenInterestHistPoint[]): numb
   return out;
 }
 
-export async function loadFundingHistory30d(symbol: string): Promise<number[]> {
+// ─────────────────────────────────────────────────────────────
+// K4 + D3 (2026-09-04, Stage 2 signal-integrity) -- SUMBER HISTORI FUNDING.
+//
+// DULU: queryMarketSnapshots(symbol, 24*30) -- baca D1 `market_snapshots`.
+// DUA cacat sekaligus:
+//
+//  K4 (fungsional, fatal). `market_snapshots` HANYA diisi untuk 50 pair
+//  SNAPSHOT_WATCHLIST (+ top-5 non-watchlist yang sering di-query). Untuk
+//  pair lain history-nya KOSONG -> normalizeFunding() balik 50 (netral) ->
+//  computeShortSqueezeBoost(50) = 0 DAN computeLongSqueezeRisk(50) = 0.
+//  Timing LONG lalu ter-cap secara aritmetika:
+//      0.4*S_C + 0.3*0 + 0.2*oi + 0.1*100  <=  0.4*64 + 20 + 10 = 55.6
+//  Padahal DCA_TIMING_WATCH_MIN = 60 dan DCA_TIMING_TRADE_MIN = 75.
+//  Artinya: untuk mayoritas pair, head DCA V3 TIDAK PERNAH bisa keluar dari
+//  DCA_PAUSE_SOFT -- nol alert DCA, selamanya, tanpa satu pun error di log.
+//
+//  D3 (biaya). Query itu `SELECT *` TANPA LIMIT atas tabel yang diisi tiap
+//  5 menit: ~8.640 baris per symbol per 30 hari, dipanggil untuk tiap
+//  symbol top-40, tiap 15 menit -> ~345k row-read per tick, ~33 juta/hari.
+//  Salah satu kontributor wall-clock cron 12m13s.
+//
+// SEKARANG: /fapi/v1/fundingRate (weight 1, sudah LONG_CACHE 300s di
+// binanceProxyClient.ts). Tersedia untuk SEMUA perp, bukan cuma watchlist.
+// Biaya +1 subrequest/symbol (~40/tick, ~160/jam vs budget 1.800/menit --
+// dapat diabaikan) DAN menghapus ~33 juta row-read D1/hari. Net: turun.
+//
+// CATATAN JUJUR: `fundingRate` yang dibandingkan adalah lastFundingRate
+// (rate berjalan/prediktif dari premiumIndex), sedangkan history di sini
+// adalah rate yang SUDAH settle. Sedikit apples-to-oranges, tapi itu memang
+// perbandingan yang diinginkan ("posisi funding sekarang relatif terhadap
+// sebulan terakhir") dan jauh lebih baik daripada konstanta 50.
+//
+// Interval funding berbeda per pair (8 jam mayoritas, sebagian 4 jam / 1
+// jam), jadi 90 titik TIDAK selalu tepat 30 hari. Kita tidak menambah call
+// ke /fapi/v1/fundingInfo cuma untuk tahu intervalnya -- window aktual
+// dilaporkan lewat fundingHistoryHours supaya bisa dibaca apa adanya.
+// ─────────────────────────────────────────────────────────────
+export const FUNDING_HISTORY_POINTS = 90; // 90 x 8 jam = 30 hari untuk pair interval-8h
+/** Di bawah ini, percentile funding dianggap terlalu tipis untuk dipercaya. */
+export const FUNDING_HISTORY_MIN_POINTS = 10;
+
+export interface FundingHistoryResult {
+  rates: number[];
+  /** Rentang waktu yang benar-benar tercakup (jam). 0 kalau kosong. */
+  hours: number;
+}
+
+export async function loadFundingHistory30d(symbol: string): Promise<FundingHistoryResult> {
   try {
-    const snaps = await queryMarketSnapshots(symbol, 24 * 30);
-    return snaps.map((s) => s.fundingRate).filter((r): r is number => r != null && Number.isFinite(r));
+    const points = await binanceProxy.getFundingRateHistoryNative(symbol, FUNDING_HISTORY_POINTS);
+    const rates: number[] = [];
+    let minTime = Number.POSITIVE_INFINITY;
+    let maxTime = Number.NEGATIVE_INFINITY;
+    for (const p of points) {
+      const rate = parseFloat(p.fundingRate);
+      if (!Number.isFinite(rate)) continue;
+      rates.push(rate);
+      if (Number.isFinite(p.fundingTime)) {
+        if (p.fundingTime < minTime) minTime = p.fundingTime;
+        if (p.fundingTime > maxTime) maxTime = p.fundingTime;
+      }
+    }
+    const hours = rates.length > 1 && Number.isFinite(minTime) && Number.isFinite(maxTime) ? (maxTime - minTime) / 3_600_000 : 0;
+    return { rates, hours };
   } catch {
-    return [];
+    // Gagal fetch -> history kosong -> normalizeFunding balik 50 (netral).
+    // Sama seperti perilaku lama saat D1 kosong, tapi sekarang itu kondisi
+    // LANGKA (kegagalan jaringan), bukan kondisi NORMAL untuk 300 dari 350 pair.
+    return { rates: [], hours: 0 };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// D2 (2026-09-04, Stage 2) -- CAPITULATION DETECTION AKHIRNYA PUNYA DATA.
+//
+// CACAT LAMA: buildAndEvaluateDcaSmartMoney() memakai default
+// `liqSpikeUsd ?? 0` / `liqMean24hUsd ?? 0`, dan fullPipeline TIDAK PERNAH
+// mengisinya. isCapitulation() karena itu SELALU false -- level DCA_STOP
+// hanya bisa dicapai lewat safety < 20. Guard capitulation-nya mati total
+// padahal stream gateway VPS menyimpan liquidations 24 jam di SQLite.
+//
+// KETERBATASAN JUJUR: queryLiquidations() di gateway di-cap 1000 baris
+// (ORDER BY trade_time DESC). Untuk pair sangat likuid, 1000 baris terakhir
+// bisa jadi TIDAK mencakup 24 jam penuh. Karena itu baseline dihitung atas
+// rentang yang BENAR-BENAR tercakup baris yang kembali, bukan diasumsikan
+// 24 jam -- mengasumsikan 24 jam akan membuat baseline terlalu KECIL
+// (cuma periode terpadat yang terhitung) dan capitulation over-trigger.
+//
+// `meanHourlyUsd` = notional per JAM rata-rata sepanjang rentang tercakup,
+// dibandingkan dengan `spikeUsd` = notional 1 jam terakhir. Dimensinya
+// konsisten (jam vs jam) -- berbeda dari nama field lama `liqMean24hUsd`
+// yang menyiratkan total 24 jam dibanding satu spike.
+// ─────────────────────────────────────────────────────────────
+export const LIQ_LOOKBACK_MS = 24 * 3_600_000;
+export const LIQ_SPIKE_WINDOW_MS = 3_600_000;
+export const LIQ_QUERY_LIMIT = 1000;
+
+export interface LiquidationStats {
+  spikeUsd: number;
+  meanHourlyUsd: number;
+  /** Rentang jam yang benar-benar tercakup sampel (bisa < 24 kalau ke-cap). */
+  coveredHours: number;
+  sampleCount: number;
+  capped: boolean;
+}
+
+export const EMPTY_LIQUIDATION_STATS: LiquidationStats = {
+  spikeUsd: 0,
+  meanHourlyUsd: 0,
+  coveredHours: 0,
+  sampleCount: 0,
+  capped: false,
+};
+
+/** Pure: hitung spike 1 jam + baseline per-jam dari event mentah gateway. */
+export function computeLiquidationStats(
+  events: { trade_time: number; notional_usd: number }[],
+  now: number,
+): LiquidationStats {
+  const valid = events.filter((e) => Number.isFinite(e.trade_time) && Number.isFinite(e.notional_usd));
+  if (valid.length === 0) return EMPTY_LIQUIDATION_STATS;
+
+  let spikeUsd = 0;
+  let totalUsd = 0;
+  let oldest = Number.POSITIVE_INFINITY;
+  for (const e of valid) {
+    totalUsd += e.notional_usd;
+    if (e.trade_time < oldest) oldest = e.trade_time;
+    if (now - e.trade_time <= LIQ_SPIKE_WINDOW_MS) spikeUsd += e.notional_usd;
+  }
+  const coveredHours = Math.max((now - oldest) / 3_600_000, 0);
+  // < 1 jam tercakup -> tidak ada baseline yang bermakna; jangan bagi dengan
+  // angka kecil dan menghasilkan "mean" raksasa yang bikin capitulation
+  // tidak pernah trigger (atau sebaliknya).
+  const meanHourlyUsd = coveredHours >= 1 ? totalUsd / coveredHours : 0;
+  return {
+    spikeUsd,
+    meanHourlyUsd,
+    coveredHours,
+    sampleCount: valid.length,
+    capped: valid.length >= LIQ_QUERY_LIMIT,
+  };
+}
+
+/** Fetch + reduce. Gagal / gateway mati -> stats kosong (capitulation off). */
+export async function loadLiquidationStats(symbol: string, now: number = Date.now()): Promise<LiquidationStats> {
+  try {
+    const res = await streamGateway.fetchLiquidations({
+      symbol,
+      sinceMs: now - LIQ_LOOKBACK_MS,
+      limit: LIQ_QUERY_LIMIT,
+    });
+    return computeLiquidationStats(res.events ?? [], now);
+  } catch {
+    return EMPTY_LIQUIDATION_STATS;
   }
 }
 
@@ -281,8 +474,8 @@ export interface BuildDcaSmParams {
   gridSmDecision?: GridSmDecision | null;
   cvdBuyPct?: number;
   entryCount?: number;
-  liqSpikeUsd?: number;
-  liqMean24hUsd?: number;
+  /** D2: kalau tidak diisi, diambil dari stream gateway (loadLiquidationStats). */
+  liqStats?: LiquidationStats;
 }
 
 /** Build Scenario C + funding/OI context from Wave 1/2 pipeline data (0 fetch tambahan). */
@@ -297,7 +490,13 @@ export async function buildAndEvaluateDcaSmartMoney(params: BuildDcaSmParams): P
     takerSpotNorm: params.cvdBuyPct ?? 50,
     multiTfAlign: multiTfAlignScore(b1h, b4h),
   };
-  const fundingHistory30d = await loadFundingHistory30d(params.symbol);
+  // Dua I/O ini independen -- jalankan paralel, jangan berurutan.
+  const [funding, liq] = await Promise.all([
+    loadFundingHistory30d(params.symbol),
+    // D2: kalau caller sudah menyediakan stats (mis. test), pakai itu;
+    // kalau tidak, ambil dari stream gateway.
+    params.liqStats !== undefined ? Promise.resolve(params.liqStats) : loadLiquidationStats(params.symbol),
+  ]);
   const atr1h = computeATR(candles1h, 14);
 
   return evaluateDcaSmartMoney({
@@ -306,13 +505,14 @@ export async function buildAndEvaluateDcaSmartMoney(params: BuildDcaSmParams): P
     currentPrice: params.currentPrice,
     scenarioC,
     fundingRate: params.fundingRate,
-    fundingHistory30d,
+    fundingHistory30d: funding.rates,
+    fundingHistoryHours: funding.hours,
     oiVelocityPerHour: params.oiVelocityPerHour,
     oiVelocityHistory: oiVelocityHistoryFromHist(params.oiHist24),
     regime: params.regime,
     candles1h,
-    liqSpikeUsd: params.liqSpikeUsd ?? 0,
-    liqMean24hUsd: params.liqMean24hUsd ?? 0,
+    liqSpikeUsd: liq.spikeUsd,
+    liqMean24hUsd: liq.meanHourlyUsd,
     atr1h,
     gridSmDecision: params.gridSmDecision,
     entryCount: params.entryCount,
@@ -328,27 +528,39 @@ export function evaluateDcaSmartMoney(input: DcaSmartMoneyInput): DcaSmartMoneyR
   const fundingPercentile = normalizeFunding(input.fundingRate, input.fundingHistory30d);
   const oiVelocityPercentile = getOIVelocityPercentile(input.oiVelocityPerHour, input.oiVelocityHistory);
 
+  // K4: histori funding yang tipis/kosong membuat percentile jatuh ke 50
+  // netral, yang secara aritmetika menutup jalan ke DCA_WATCH/DCA_TRADE.
+  // Dulu ini kondisi DIAM untuk ~300 dari 350 pair; sekarang harus terlihat
+  // di `reasons` supaya "nol sinyal" tidak pernah lagi salah dibaca sebagai
+  // "pasar sepi".
+  const fundingHistoryPoints = input.fundingHistory30d.filter((v) => Number.isFinite(v)).length;
+  if (fundingHistoryPoints < FUNDING_HISTORY_MIN_POINTS) {
+    reasons.push(
+      `⚠ Histori funding tipis (${fundingHistoryPoints} titik${input.fundingHistoryHours ? `, ~${input.fundingHistoryHours.toFixed(0)} jam` : ""}) -> percentile ${fundingPercentile.toFixed(0)} kurang bermakna; komponen squeeze praktis netral.`,
+    );
+  }
+
   const { score: timingScore, components: timingComp } = computeDirectionalTiming(
     input.side,
     scenarioCScore,
     fundingPercentile,
     oiVelocityPercentile,
   );
-  const safety = computeDcaSafetyScore(scenarioCScore, fundingPercentile);
+  const safety = computeDcaSafetyScore(scenarioCScore, fundingPercentile, input.side);
   const capitulation = isCapitulation({
     liqSpikeUsd: input.liqSpikeUsd,
     liqMean24hUsd: input.liqMean24hUsd,
     priceDropAbs: input.priceDropAbs,
     atr1h: input.atr1h,
   });
-  let pauseLevel = resolvePauseLevel(safety.score, scenarioCScore, safety.longSqueezeRisk, capitulation);
+  let pauseLevel = resolvePauseLevel(safety.score, scenarioCScore, safety.adverseSqueezeRisk, capitulation, input.side);
   let pauseReason: string | null = null;
 
   reasons.push(
     `D_timing ${timingScore.toFixed(1)} (S_C ${timingComp.scenarioC.toFixed(0)}, squeeze ${timingComp.squeezeBoost.toFixed(0)}, OI ${timingComp.oiVelocity.toFixed(0)}, anti ${timingComp.antiSqueeze.toFixed(0)})`,
   );
   reasons.push(
-    `Safety ${safety.score.toFixed(0)} (distPen ${safety.distributionPenalty}, longSqPen ${safety.longSqueezePenalty}, longRisk ${safety.longSqueezeRisk.toFixed(0)})`,
+    `Safety ${safety.score.toFixed(0)} (distPen ${safety.distributionPenalty}, squeezePen ${safety.squeezePenalty}, adverseSqueeze ${safety.adverseSqueezeRisk.toFixed(0)})`,
   );
 
   if (capitulation) reasons.push("Capitulation detected (liq spike vs baseline / $2M+ drop)");
@@ -378,6 +590,8 @@ export function evaluateDcaSmartMoney(input: DcaSmartMoneyInput): DcaSmartMoneyR
       safetyScore: safety.score,
       intervalPct,
       nextTriggerPrice,
+      currentPrice: input.currentPrice,
+      side: input.side,
       pauseLevel,
       pauseReason,
       entryCount,
@@ -392,8 +606,8 @@ export function evaluateDcaSmartMoney(input: DcaSmartMoneyInput): DcaSmartMoneyR
   if (pauseLevel === "PAUSE_HARD") {
     pauseReason =
       pauseReason ??
-      (safety.longSqueezeRisk > 80
-        ? `Long squeeze risk ${safety.longSqueezeRisk.toFixed(0)} > 80`
+      (safety.adverseSqueezeRisk > 80
+        ? `Adverse squeeze risk ${safety.adverseSqueezeRisk.toFixed(0)} > 80 (arah ${input.side})`
         : `Safety score ${safety.score.toFixed(0)} < 50`);
     return {
       decision: "DCA_PAUSE_HARD",
@@ -401,6 +615,8 @@ export function evaluateDcaSmartMoney(input: DcaSmartMoneyInput): DcaSmartMoneyR
       safetyScore: safety.score,
       intervalPct,
       nextTriggerPrice,
+      currentPrice: input.currentPrice,
+      side: input.side,
       pauseLevel,
       pauseReason,
       entryCount,
@@ -424,6 +640,8 @@ export function evaluateDcaSmartMoney(input: DcaSmartMoneyInput): DcaSmartMoneyR
       safetyScore: safety.score,
       intervalPct,
       nextTriggerPrice,
+      currentPrice: input.currentPrice,
+      side: input.side,
       pauseLevel,
       pauseReason,
       entryCount,
@@ -442,6 +660,8 @@ export function evaluateDcaSmartMoney(input: DcaSmartMoneyInput): DcaSmartMoneyR
       safetyScore: safety.score,
       intervalPct,
       nextTriggerPrice,
+      currentPrice: input.currentPrice,
+      side: input.side,
       pauseLevel: "PAUSE_HARD",
       pauseReason: `Max entries reached (${entryCount}/${maxEntries})`,
       entryCount,
@@ -467,6 +687,8 @@ export function evaluateDcaSmartMoney(input: DcaSmartMoneyInput): DcaSmartMoneyR
       safetyScore: safety.score,
       intervalPct,
       nextTriggerPrice,
+      currentPrice: input.currentPrice,
+      side: input.side,
       pauseLevel: "PAUSE_SOFT",
       pauseReason,
       entryCount,
@@ -485,6 +707,8 @@ export function evaluateDcaSmartMoney(input: DcaSmartMoneyInput): DcaSmartMoneyR
     safetyScore: safety.score,
     intervalPct,
     nextTriggerPrice,
+    currentPrice: input.currentPrice,
+    side: input.side,
     pauseLevel: "NONE",
     pauseReason: null,
     entryCount,
