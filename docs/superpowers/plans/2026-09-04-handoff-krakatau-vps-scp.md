@@ -102,30 +102,40 @@ Ulangi untuk KEDUA host:
     scp -i <key> proxy-standalone/handler.mjs ubuntu@<HOST>:/tmp/handler.mjs
     ssh -i <key> ubuntu@<HOST> "sudo install -m 644 /tmp/handler.mjs /opt/whale-binance-proxy/handler.mjs && sudo systemctl restart whale-binance-proxy && systemctl is-active whale-binance-proxy"
 
-### Host relay #2 — KANDIDAT (belum diverifikasi)
+### Host relay — HASIL PROBE 2026-09-04
 
-Alamat relay kedua tidak ada di repo; nilainya ada di secret `PROXY_URL_2`.
-Dari `~/.ssh/config` di mesin user ada TIGA host:
+Alamat relay #2 tidak ada di repo (nilainya di secret `PROXY_URL_2`).
+`~/.ssh/config` memuat tiga host; user menjalankan probe read-only:
 
-| Host | IP | Catatan |
-|---|---|---|
-| `svm-vps` | 13.212.7.132 | relay #1 + gateway, sudah pasti |
-| `svm-jkt` | 108.136.219.101 | **kandidat kuat relay #2** — belum diverifikasi |
-| `jaringan-dev` | 146.235.17.228 | host Oracle dari spec 2026-08-11 — **jangan diasumsikan relay #2** |
+| Host | IP | `whale-binance-proxy` | `/opt` |
+|---|---|---|---|
+| `svm-vps` | 13.212.7.132 | **active** | `whale-binance-proxy` + `whale-stream-gateway` |
+| `svm-jkt` | 108.136.219.101 | SSH **timeout** port 22 | tidak terbaca |
+| `jaringan-dev` | 146.235.17.228 | **active** | `whale-binance-proxy` + `whale-stream-gateway` |
 
-Semeru TIDAK bisa memverifikasi: SSH diblokir di sesi Claude Code. Krakatau
-harus membuktikan dulu, bukan menebak, sebelum `scp`:
+**Koreksi:** versi sebelumnya dokumen ini menandai `jaringan-dev` sebagai
+"jangan diasumsikan relay #2" karena hanya muncul di spec Oracle 2026-08-11.
+Probe membuktikan host itu MENJALANKAN relay dan aktif. Dugaan bahwa
+`svm-jkt` adalah relay #2 (murni dari namanya) TIDAK terbukti.
 
-    for h in svm-vps svm-jkt jaringan-dev; do
-      echo "== $h =="
-      ssh $h "systemctl is-active whale-binance-proxy 2>/dev/null || echo TIDAK-ADA; ls -d /opt/whale-* 2>/dev/null"
-    done
+**`scp` handler.mjs ke `svm-vps` DAN `jaringan-dev`.** Keduanya menjalankan
+relay, file-nya sama, dan meng-update host yang ternyata bukan `PROXY_URL_2`
+pun tidak merugikan — kode identik, bug yang sama diperbaiki. Ini justru
+menghilangkan risiko relay campur-versi, bukan menambahnya.
 
-Cocokkan hasilnya dengan `PROXY_URL_2` yang sebenarnya sebelum mengirim.
+**SSH timeout pada `svm-jkt` BUKAN bukti host itu mati.** Port 22 bisa
+ditutup Security Group sementara :443 tetap melayani. Kalau `PROXY_URL_2`
+ternyata menunjuk ke sana, relay #2 tidak akan pernah ter-update lewat SSH
+dan itu masalah tersendiri. Cek dari luar sebelum menyimpulkan:
 
-**Kalau hanya satu host yang ter-update, katakan begitu di laporan.** Relay
-campur-versi berarti separuh trafik masih membuang header weight, dan itu
-justru membuat data verifikasi besok ambigu.
+    curl -s -o /dev/null -w %{http_code}n https://108.136.219.101.sslip.io/health
+
+**TEMUAN BARU yang belum ditindaklanjuti:** `jaringan-dev` juga punya
+`/opt/whale-stream-gateway`. Kalau service itu AKTIF, ada DUA stream gateway
+berjalan — pola yang sama dengan duplikasi cron whalescope-mcp (lihat
+CLAUDE.md). Harus dicek sebelum menyimpulkan apa pun soal churn depth-watch:
+
+    ssh jaringan-dev "systemctl is-active whale-stream-gateway"
 
 ### Verifikasi 2 — perilaku, bukan cuma `is-active`
 
