@@ -57,6 +57,12 @@ interface Env {
   NOTIFY_WEBHOOK_URL?: string;
   // OPSIONAL -- Bromo public uptime probe target (default workers.dev URL).
   WORKER_PUBLIC_URL?: string;
+  // OPSIONAL -- Binance Futures API key (SIGNED endpoints only:
+  // /fapi/v1/leverageBracket → real MMR di gridRiskEngine). Tanpa ini,
+  // liquidationPrice pakai volume heuristic. Futures trading permission
+  // TIDAK diperlukan — enable "Enable Reading" saja; IP restrict ke relay.
+  BINANCE_API_KEY?: string;
+  BINANCE_API_SECRET?: string;
 }
 
 const REQUEST_LOG_RETENTION_MS = 30 * 24 * 3600 * 1000; // 30 hari
@@ -152,6 +158,7 @@ export default {
       env.PROXY_SECRET_2,
       env.DISABLE_DIRECT_FALLBACK !== "true",
     );
+    binanceProxy.setBinanceApiCredentials(env.BINANCE_API_KEY, env.BINANCE_API_SECRET);
     kvConfig.setKvNamespace(env.CONFIG_KV);
     d1Client.setD1Database(env.DB);
     streamGateway.setStreamGatewayConfig(env.PROXY_URL, env.PROXY_SECRET);
@@ -316,6 +323,7 @@ export default {
       env.PROXY_SECRET_2,
       env.DISABLE_DIRECT_FALLBACK !== "true",
     );
+    binanceProxy.setBinanceApiCredentials(env.BINANCE_API_KEY, env.BINANCE_API_SECRET);
     kvConfig.setKvNamespace(env.CONFIG_KV);
     d1Client.setD1Database(env.DB);
     streamGateway.setStreamGatewayConfig(env.PROXY_URL, env.PROXY_SECRET);
