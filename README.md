@@ -816,7 +816,12 @@ You will most likely never be charged on either platform for personal use.
 
 ## Sponsors
 
-This project is sponsored by **PT. Jaringan Semesta Raya**.
+<a href="https://jaringan.co.id/">
+  <img src="docs/assets/jaringan-semesta-raya-logo.png" alt="PT Jaringan Semesta Raya" width="64" height="64" />
+</a>
+
+This project is sponsored by
+**[PT. Jaringan Semesta Raya](https://jaringan.co.id/)**.
 
 ## Disclaimer
 
