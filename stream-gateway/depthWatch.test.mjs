@@ -79,11 +79,22 @@ test("classifyLevelTransition: APPEARED / VANISHED / GREW / SHRANK / none", () =
   // price 100 => wall needs qty >= 2500
   assert.equal(classifyLevelTransition(0, 3000, 100, W).type, "WALL_APPEARED");
   assert.equal(classifyLevelTransition(3000, 0, 100, W).type, "WALL_VANISHED");
-  assert.equal(classifyLevelTransition(3000, 1000, 100, W).type, "WALL_VANISHED"); // dropped below wall
+  assert.equal(classifyLevelTransition(3000, 1000, 100, W).type, "WALL_VANISHED"); // dropped below exit floor
   assert.equal(classifyLevelTransition(3000, 5000, 100, W).type, "WALL_GREW");
   assert.equal(classifyLevelTransition(5000, 2600, 100, W).type, "WALL_SHRANK");
   assert.equal(classifyLevelTransition(3000, 3100, 100, W), null); // +3%, still a wall, no resize
   assert.equal(classifyLevelTransition(1000, 1200, 100, W), null); // never a wall
+});
+
+test("classifyLevelTransition: exit hysteresis suppresses flap just below threshold", () => {
+  const W = 250_000;
+  // Was a wall at $300k; drop to $220k (still >= 85% of $250k = $212.5k) → stay wall.
+  // Resize -26.7% < 40% → no event (null), NOT VANISHED.
+  assert.equal(classifyLevelTransition(3000, 2200, 100, W), null);
+  // Drop further to $200k (< exit floor) → VANISHED.
+  assert.equal(classifyLevelTransition(3000, 2000, 100, W).type, "WALL_VANISHED");
+  // Enter still requires full threshold: $240k from below is not a wall.
+  assert.equal(classifyLevelTransition(2000, 2400, 100, W), null);
 });
 
 test("depthWsUrl builds the per-symbol stream path", () => {

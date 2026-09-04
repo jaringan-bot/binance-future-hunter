@@ -15,11 +15,15 @@ const DEPTH_EVENT_LIMIT = 40;
 // 233 VANISHED @ $250k dalam ~5s). Pair kecil butuh threshold jauh lebih
 // rendah. Tier by quote volume 24h (USDT), sama pola
 // estimateMaintenanceMarginBufferPct di gridRiskEngine.ts.
+//
+// 2026-09-04: tambah tier mega (>=$10B → $3M) setelah live verify BTC ~$19B
+// @ $2M masih ~12 event/6s (OK) — $3M kurangi flap residual di buku terdalam.
 export function wallThresholdForVolume(quoteVolume24hUsd: number | undefined): number {
   if (quoteVolume24hUsd === undefined || !Number.isFinite(quoteVolume24hUsd) || quoteVolume24hUsd <= 0) {
     return 250_000; // fallback = default lama
   }
-  if (quoteVolume24hUsd >= 5_000_000_000) return 2_000_000; // BTC/ETH
+  if (quoteVolume24hUsd >= 10_000_000_000) return 3_000_000; // mega BTC days
+  if (quoteVolume24hUsd >= 5_000_000_000) return 2_000_000; // ETH / quieter BTC
   if (quoteVolume24hUsd >= 1_000_000_000) return 800_000; // SOL / top alts
   if (quoteVolume24hUsd >= 200_000_000) return 350_000; // mid alts
   if (quoteVolume24hUsd >= 20_000_000) return 150_000;
@@ -191,10 +195,12 @@ export function registerRealtimeStreamTools(server: McpServer): void {
         "`sinceMs` = ts event terakhir untuk lihat perubahan baru. Watch auto-mati setelah `ttlMs` (default 5 menit) " +
         "tanpa perpanjangan. BUKAN L2 book penuh: cuma level di atas ambang notional yang dilacak (hemat memori VPS " +
         "1GB, ada batas jumlah watch bersamaan). Wall pre-existing bisa muncul sebagai 1 WALL_APPEARED saat konek " +
-        "(warmup ~1.5s menekan sebagian besar). Ambang wall default DI-SKALA volume 24h symbol (BTC ~$2M, mid alt " +
-        "~$350k, micro ~$80k — heuristik, BELUM dikalibrasi); override lewat `wall_min_notional_usd`. Ambang LOCKED " +
-        "ke nilai saat arming — panggilan renew tidak mengubahnya. Kalau gateway belum di-upgrade / watch penuh / " +
-        "stream putus: balik `degraded: true` + alasan, bukan diam-diam kosong.",
+        "(warmup ~1.5s menekan sebagian besar). Ambang wall default DI-SKALA volume 24h symbol (mega BTC ~$3M, " +
+        "ETH/quiet BTC ~$2M, mid alt ~$350k, micro ~$80k — heuristik, BELUM dikalibrasi); override lewat " +
+        "`wall_min_notional_usd`. Ambang LOCKED ke nilai saat arming — panggilan renew tidak mengubahnya. " +
+        "Gateway ring buffer ~2000 event/symbol (yang lama digeser) — poll jarang tanpa sinceMs hanya lihat ujung " +
+        "history. Kalau gateway belum di-upgrade / watch penuh / stream putus: balik `degraded: true` + alasan, " +
+        "bukan diam-diam kosong.",
       inputSchema: {
         symbol: symbolSchema,
         ttlMs: z

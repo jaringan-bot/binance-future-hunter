@@ -36,13 +36,21 @@ export const DEFAULT_WALL_MIN_NOTIONAL_USD = 250_000;
 // Batas bawah yang dipaksakan buat threshold per-watch -- di bawah ini,
 // hampir semua pair likuid bikin event ring penuh dalam hitungan detik.
 export const MIN_WALL_NOTIONAL_USD = 25_000;
-export const EVENT_BUFFER_PER_SYMBOL = 500;
+// 500 -> 2000 (2026-09-04): di pair likuid @ threshold volume-scaled masih
+// ~2 event/s; ring 500 = ~4 menit history. Poll lambat / sinceMs=0 cuma
+// lihat ujung. 2000 ≈ ~15 menit @ rate itu, muat 1 TTL default (5 mnt)
+// dengan headroom. Memory: ~8 watch × 2000 event kecil << 1GB VPS.
+export const EVENT_BUFFER_PER_SYMBOL = 2000;
 export const DEFAULT_WARMUP_MS = 1_500;
 // Track levels down to 50% of the wall threshold so we can watch one grow
 // INTO a wall, not just snap into existence.
 const TRACK_FLOOR_FRACTION = 0.5;
 // While still a wall, only report a resize once qty moves >= 40%.
 const RESIZE_MIN_RATIO = 0.4;
+// Exit hysteresis: once a level is a wall, it stays a wall until notional
+// drops below threshold * (1 - band). Cuts APPEARED↔VANISHED flap when
+// size oscillates around the threshold (common on BTC/ETH books).
+export const WALL_EXIT_HYSTERESIS = 0.15;
 
 /**
  * Pure: classify a single price-level quantity change.
@@ -51,8 +59,10 @@ const RESIZE_MIN_RATIO = 0.4;
 export function classifyLevelTransition(prevQty, nextQty, price, wallMinNotionalUsd) {
   const prevNotional = prevQty * price;
   const nextNotional = nextQty * price;
+  const exitFloor = wallMinNotionalUsd * (1 - WALL_EXIT_HYSTERESIS);
   const wasWall = prevNotional >= wallMinNotionalUsd;
-  const isWall = nextNotional >= wallMinNotionalUsd;
+  // Enter at full threshold; exit only after dropping through hysteresis band.
+  const isWall = wasWall ? nextNotional >= exitFloor : nextNotional >= wallMinNotionalUsd;
 
   if (!wasWall && isWall) {
     return { type: "WALL_APPEARED", notionalUsd: nextNotional, qty: nextQty };
