@@ -1,71 +1,70 @@
-# Referensi Response Tool: `detail` & Output Composite Ringkas
+# Tool Response Reference: `detail` & Compact Composite Output
 
-Dokumen ini menjelaskan dua perubahan konvensi response tool (2026-08) yang
-dibuat murni untuk hemat token, TANPA mengurangi data yang bisa diakses:
+This document explains two tool-response convention changes (2026-08) made
+purely for token efficiency, with NO loss of reachable data:
 
-1. Parameter `detail: "summary" | "full"` di semua tool array/history-shaped.
-2. Struktur `structuredContent` yang lebih ringkas & flat di 5 tool composite.
+1. A `detail: "summary" | "full"` parameter on every array/history-shaped tool.
+2. A leaner, flatter `structuredContent` shape on 5 composite tools.
 
-Tidak ada nama parameter Zod yang dihapus/diganti nama di perubahan ini —
-semua penambahan bersifat opsional dengan default baru. Ini **satu-satunya**
-perubahan default-behavior yang disengaja: caller lama yang tidak mengirim
-`detail` sekarang dapat response yang lebih ringkas (bukan array penuh) dari
-sebelumnya.
+No Zod parameter name was removed or renamed in this change — every addition
+is optional with a new default. This is the **only** intentional
+default-behavior change: existing callers that don't pass `detail` now get a
+more compact response (not a full array) than before.
 
-## 1. Parameter `detail`
+## 1. The `detail` parameter
 
-Ditambahkan (opsional, default `"summary"`) ke semua tool yang sebelumnya
-(atau berpotensi) mengembalikan array candle/trade/level/histori panjang:
+Added (optional, defaults to `"summary"`) to every tool that previously (or
+potentially) returned a long candle/trade/level/history array:
 
 | Tool | `summary` (default) | `full` |
 |---|---|---|
-| `binance_get_klines` / `binance_get_spot_klines` | ringkasan (bias, swing high/low, last) + 5 candle terakhir | array candle penuh (sama seperti `includeCandles: true`, param lama tetap ada) |
-| `binance_get_mark_price_klines`, `_index_price_klines`, `_premium_index_klines`, `_continuous_klines` | ringkasan + 5 candle terakhir | array candle penuh |
-| `binance_get_quarterly_settlement_price` | 10 settlement terakhir | semua settlement |
-| `binance_get_agg_trades` / `binance_get_spot_agg_trades` | CVD + ringkasan (trade mentah TIDAK disertakan) | array trade mentah penuh |
-| `binance_get_taker_volume_ratio` | rasio terkini + <=10 poin terbaru | semua poin sesuai `limit` |
-| `binance_get_order_book_depth` / `binance_get_spot_order_book` | best bid/ask + spread (level mentah TIDAK disertakan) | array bids/asks penuh sesuai `limit` |
-| `binance_get_open_interest_history` | tren + <=10 poin terbaru | semua poin sesuai `limit` |
-| `binance_get_funding_rate_history` | rata-rata + tren + <=10 poin terbaru | semua poin sesuai `limit` |
-| `binance_get_basis_history` | current/avg/range + <=10 snapshot terbaru | semua snapshot dalam window `hours` |
-| `binance_get_long_short_ratio` / `binance_get_top_trader_ratio` | snapshot + tren + <=10 poin terbaru | semua poin sesuai `limit` |
+| `binance_get_klines` / `binance_get_spot_klines` | summary (bias, swing high/low, last) + last 5 candles | full candle array (same as `includeCandles: true`, kept for compatibility) |
+| `binance_get_mark_price_klines`, `_index_price_klines`, `_premium_index_klines`, `_continuous_klines` | summary + last 5 candles | full candle array |
+| `binance_get_quarterly_settlement_price` | last 10 settlements | all settlements |
+| `binance_get_agg_trades` / `binance_get_spot_agg_trades` | CVD + summary (no raw trades) | full raw trade array |
+| `binance_get_taker_volume_ratio` | latest ratio + last <=10 points | all points per `limit` |
+| `binance_get_order_book_depth` / `binance_get_spot_order_book` | best bid/ask + spread (no raw levels) | full bids/asks array per `limit` |
+| `binance_get_open_interest_history` | trend + last <=10 points | all points per `limit` |
+| `binance_get_funding_rate_history` | average + trend + last <=10 points | all points per `limit` |
+| `binance_get_basis_history` | current/avg/range + last <=10 snapshots | all snapshots within `hours` |
+| `binance_get_long_short_ratio` / `binance_get_top_trader_ratio` | snapshot + trend + last <=10 points | all points per `limit` |
 
-Field markdown (teks tabel) tetap dipotong ke 10-15 baris terakhir di kedua
-mode — `detail: "full"` hanya mempengaruhi `structuredContent`, bukan
-panjang tabel teks (supaya teks tetap terbaca manusia untuk `limit` besar).
+The markdown text table stays capped to the last 10-15 rows in both modes —
+`detail: "full"` only affects `structuredContent`, not text table length (so
+text stays human-readable even for a large `limit`).
 
-**Kenapa bukan cuma `limit` kecil saja?** `limit` mengontrol berapa banyak
-data yang di-*fetch* dari Binance (dipakai penuh untuk hitung
-rata-rata/tren), sedangkan `detail` mengontrol berapa banyak dari data yang
-sudah di-fetch itu yang ikut dikirim balik ke Claude. Keduanya independen:
-`limit: 500, detail: "summary"` tetap menghitung tren dari 500 titik, tapi
-cuma balikin ringkasan + 10 poin terakhir.
+**Why not just use a smaller `limit`?** `limit` controls how much data is
+*fetched* from Binance (all of it is used to compute averages/
+trends), while `detail` controls how much of that already-fetched data is
+sent back to Claude. They're independent: `limit: 500, detail: "summary"`
+still computes the trend from 500 points, but only returns the summary +
+last 10 points.
 
-## 2. Output Composite Ringkas (§B/§D)
+## 2. Compact composite output (§B/§D)
 
-5 tool composite (`binance_analyze_pair`, `binance_analyze_smart_money`,
+The 5 composite tools (`binance_analyze_pair`, `binance_analyze_smart_money`,
 `binance_detect_mm_activity`, `analyze_futures_grid_risk`,
-`whalescope_full_pipeline`) dirapikan:
+`whalescope_full_pipeline`) were tightened:
 
-- **Markdown teks** dipotong ke sekitar 8-12 baris, reasoning/evidence
-  dibatasi ke sinyal yang aktif/relevan saja (maks ~6 bullet) — bukan lagi
-  subheader + tabel + evidence penuh per sinyal/symbol.
-- **`structuredContent`** jadi field pembawa utama: key lebih pendek & flat,
-  field null/undefined dibuang (`dropNulls()`, `src/shared.ts`), field
-  keputusan (`status`, `decision`, `tier`, `condition`) dipromosikan ke
-  top-level.
-- **Tidak ada sinyal/metrik yang dihapus** — semua angka yang sebelumnya
-  dinarasikan panjang di teks sekarang tetap ada di `structuredContent`,
-  cuma tidak lagi ditulis ulang sebagai paragraf.
+- **Markdown text** capped to roughly 8-12 lines; reasoning/evidence limited
+  to active/relevant signals only (max ~6 bullets) — no more per-signal or
+  per-symbol subheader + table + full evidence block.
+- **`structuredContent`** is now the primary payload: shorter, flatter keys,
+  null/undefined fields dropped (`dropNulls()`, `src/shared.ts`), and
+  decision fields (`status`, `decision`, `tier`, `condition`) promoted to
+  the top level.
+- **No signal or metric was removed** — everything that used to be narrated
+  at length in the text is still present in `structuredContent`, just no
+  longer written out as prose.
 
-### Mapping field yang berubah nama
+### Renamed fields
 
-Kalau kode kamu mem-parsing `structuredContent` tool-tool ini secara
-terprogram (bukan cuma baca teks), berikut field yang berganti nama:
+If you parse these tools' `structuredContent` programmatically (not just
+read the text), here's what changed name:
 
 **`binance_analyze_pair`**
 
-| Lama | Baru |
+| Old | New |
 |---|---|
 | `fundingRate` | `funding` |
 | `oiChangePct` | `oiChg` |
@@ -77,33 +76,32 @@ terprogram (bukan cuma baca teks), berikut field yang berganti nama:
 
 **`binance_analyze_smart_money`**
 
-| Lama | Baru |
+| Old | New |
 |---|---|
 | `smartMoneyBias` | `smBias` |
 | `retailSentiment` | `retail` |
 | `confidenceScore` | `confidence` |
 | `divergenceScore` | `divScore` |
 | `divergenceAnalysis` | `reason` |
-| `signals` (7 raw variable) | `raw` |
+| `signals` (7 raw variables) | `raw` |
 
 **`analyze_futures_grid_risk`** — `metrics`/`market`/`context`/`anomalies`
-tetap sama strukturnya (tidak di-rename, cuma `context`/`anomalies`
-sekarang null-stripped), TAPI `status`, `circuitBreakerTriggered`, dan
-`circuitBreakerReason` (sebelumnya di dalam `circuit_breaker.*`) sekarang
-juga ada di top-level response sebagai first-class decision fields.
+keep their existing structure (not renamed, but `context`/`anomalies` are
+now null-stripped); `status`, `circuitBreakerTriggered`, and
+`circuitBreakerReason` (previously nested under `circuit_breaker.*`) are now
+also promoted to the top level as first-class decision fields.
 
-**`binance_detect_mm_activity`** dan **`whalescope_full_pipeline`** —
-`structuredContent` TIDAK berubah struktur/nama field sama sekali (cuma
-teks-nya yang dipangkas), supaya integrasi terprogram yang sudah ada tidak
-perlu berubah.
+**`binance_detect_mm_activity`** and **`whalescope_full_pipeline`** —
+`structuredContent` field names/shape are UNCHANGED (only the text output
+was trimmed), so any existing programmatic integration needs no changes.
 
-## Rekomendasi
+## Recommendations
 
-- Kalau kamu (atau Claude) cuma butuh baca kesimpulan/keputusan → biarkan
-  default `detail: "summary"`, ini yang paling hemat token.
-- Kalau butuh proses data mentah secara programatik (backtest kustom,
-  kalkulasi sendiri di luar tool ini) → set `detail: "full"` secara
-  eksplisit per panggilan yang butuh.
-- Untuk batasan analitis tiap sinyal (bukan soal ukuran response), lihat
-  [`docs/mm_detection_framework.md`](mm_detection_framework.md) dan
+- If you (or Claude) only need the conclusion/decision → leave `detail` at
+  its `"summary"` default, this is the most token-efficient path.
+- If you need to process raw data programmatically (custom backtests,
+  calculations outside this tool) → set `detail: "full"` explicitly on the
+  calls that need it.
+- For each signal's analytical limitations (not response size), see
+  [`docs/mm_detection_framework.md`](mm_detection_framework.md) and
   [`docs/full_pipeline_framework.md`](full_pipeline_framework.md).
