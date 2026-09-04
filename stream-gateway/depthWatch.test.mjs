@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   createDepthWatcher,
   classifyLevelTransition,
+  resolveWallState,
   depthWsUrl,
   DEFAULT_WALL_MIN_NOTIONAL_USD,
   MIN_WALL_NOTIONAL_USD,
@@ -74,16 +75,90 @@ function depthFrame({ b = [], a = [] }) {
 }
 
 // ---- classifyLevelTransition (pure) -----------------------------------
+// Argumen ke-5 = prevIsWall, status wall yang DISIMPAN caller. Bukan
+// kenyamanan: histeresis punya memori, dan menurunkan ulang statusnya dari
+// prevQty menghapus memori itu (lihat test regresi di bawah).
 test("classifyLevelTransition: APPEARED / VANISHED / GREW / SHRANK / none", () => {
   const W = 250_000;
   // price 100 => wall needs qty >= 2500
-  assert.equal(classifyLevelTransition(0, 3000, 100, W).type, "WALL_APPEARED");
-  assert.equal(classifyLevelTransition(3000, 0, 100, W).type, "WALL_VANISHED");
-  assert.equal(classifyLevelTransition(3000, 1000, 100, W).type, "WALL_VANISHED"); // dropped below wall
-  assert.equal(classifyLevelTransition(3000, 5000, 100, W).type, "WALL_GREW");
-  assert.equal(classifyLevelTransition(5000, 2600, 100, W).type, "WALL_SHRANK");
-  assert.equal(classifyLevelTransition(3000, 3100, 100, W), null); // +3%, still a wall, no resize
-  assert.equal(classifyLevelTransition(1000, 1200, 100, W), null); // never a wall
+  assert.equal(classifyLevelTransition(0, 3000, 100, W, false).type, "WALL_APPEARED");
+  assert.equal(classifyLevelTransition(3000, 0, 100, W, true).type, "WALL_VANISHED");
+  assert.equal(classifyLevelTransition(3000, 1000, 100, W, true).type, "WALL_VANISHED"); // below exit floor
+  assert.equal(classifyLevelTransition(3000, 5000, 100, W, true).type, "WALL_GREW");
+  assert.equal(classifyLevelTransition(5000, 2600, 100, W, true).type, "WALL_SHRANK");
+  assert.equal(classifyLevelTransition(3000, 3100, 100, W, true), null); // +3%, still a wall, no resize
+  assert.equal(classifyLevelTransition(1000, 1200, 100, W, false), null); // never a wall
+});
+
+test("classifyLevelTransition: exit hysteresis suppresses flap just below threshold", () => {
+  const W = 250_000;
+  // Was a wall at $300k; drop to $220k (still >= 85% of $250k = $212.5k) → stay wall.
+  // Resize -26.7% < 40% → no event (null), NOT VANISHED.
+  assert.equal(classifyLevelTransition(3000, 2200, 100, W, true), null);
+  // Drop further to $200k (< exit floor) → VANISHED.
+  assert.equal(classifyLevelTransition(3000, 2000, 100, W, true).type, "WALL_VANISHED");
+  // Enter still requires full threshold: $240k from below is not a wall.
+  assert.equal(classifyLevelTransition(2000, 2400, 100, W, false), null);
+});
+
+test("resolveWallState: enter at full threshold, exit only through the band", () => {
+  const W = 250_000;
+  assert.equal(resolveWallState(false, 240_000, W), false); // masuk butuh ambang penuh
+  assert.equal(resolveWallState(false, 250_000, W), true);
+  assert.equal(resolveWallState(true, 220_000, W), true); // di dalam pita -> tetap wall
+  assert.equal(resolveWallState(true, 212_500, W), true); // tepat di exit floor
+  assert.equal(resolveWallState(true, 212_499, W), false); // menembus pita -> bukan wall
+});
+
+// ---- REGRESSION GUARD: histeresis tidak boleh MENELAN WALL_VANISHED ----
+// Histeresis diperkenalkan untuk meredam flap APPEARED<->VANISHED. Versi
+// pertamanya menurunkan `wasWall` dari prevQty di dalam fungsi, sehingga
+// level yang MENGENDUR ke dalam pita (tidak melaporkan apa-apa) dianggap
+// "tidak pernah wall" pada tick berikutnya -- dan WALL_VANISHED-nya hilang
+// SELAMANYA. Konsumen yang melacak wall terbuka akan mengira wall itu masih
+// ada. Itu kegagalan yang lebih buruk daripada churn yang mau dikurangi,
+// dan tidak terlihat oleh test transisi-tunggal mana pun.
+//
+// Helper ini menjalankan state machine PERSIS seperti applyLevels():
+// simpan { qty, isWall }, buang level di bawah track floor.
+function replayLevel(qtySeq, wallMin = 250_000, price = 100, trackFloorFraction = 0.5) {
+  let prevQty = 0;
+  let prevIsWall = false;
+  const events = [];
+  for (const qty of qtySeq) {
+    const t = classifyLevelTransition(prevQty, qty, price, wallMin, prevIsWall);
+    if (t) events.push(t.type);
+    const nextIsWall = resolveWallState(prevIsWall, qty * price, wallMin);
+    if (qty * price >= wallMin * trackFloorFraction) {
+      prevQty = qty;
+      prevIsWall = nextIsWall;
+    } else {
+      prevQty = 0;
+      prevIsWall = false;
+    }
+  }
+  return events;
+}
+
+test("hysteresis never swallows WALL_VANISHED after a dwell inside the band", () => {
+  // $300k -> $220k (di dalam pita, senyap) -> 0. VANISHED WAJIB tetap keluar.
+  assert.deepEqual(replayLevel([3000, 2200, 0]), ["WALL_APPEARED", "WALL_VANISHED"]);
+  // Kontrol: tanpa singgah di pita, perilakunya memang sudah benar sebelumnya.
+  assert.deepEqual(replayLevel([3000, 0]), ["WALL_APPEARED", "WALL_VANISHED"]);
+  // Singgah berkali-kali pun tetap harus menutup.
+  assert.deepEqual(replayLevel([3000, 2200, 2300, 2200, 0]), ["WALL_APPEARED", "WALL_VANISHED"]);
+});
+
+test("hysteresis still does its job: flap around the threshold stays quiet", () => {
+  // Inilah alasan histeresis ada. Tanpa histeresis deret ini menghasilkan
+  // APPEARED/VANISHED berulang; dengan histeresis cuma satu APPEARED.
+  assert.deepEqual(replayLevel([3000, 2200, 3000, 2200, 3000]), ["WALL_APPEARED"]);
+});
+
+test("hysteresis does not let a level sneak in through the band from below", () => {
+  // $240k < ambang penuh $250k -- mendekat dari bawah tidak boleh jadi wall
+  // hanya karena berada di atas exit floor.
+  assert.deepEqual(replayLevel([0, 2400, 2400, 2450]), []);
 });
 
 test("depthWsUrl builds the per-symbol stream path", () => {
