@@ -345,6 +345,31 @@ Full detail (including raw test data per claim): Section 10,
 - **The KV→D1 basis-history migration does NOT backfill old data** — basis
   history that was stored in Workers KV before this migration is gone; the
   24-hour window refills naturally a few hours after deploy.
+- **CVD in `whalescope_full_pipeline` comes from the LAST 100 aggTrades, not
+  a time window** — `getAggTrades(symbol, 100)` takes the last 100 trades as
+  they come. On very liquid pairs that can be as little as **2-10 seconds of
+  tape**, not a picture of an hour of order flow. Since Stage 3 (2026-09-04)
+  the sample width is measured (`cvdSampleSeconds`) and the buy-pressure
+  component is **pulled toward neutral** when the sample is too narrow
+  (`< 10 s` = not trusted at all, `>= 60 s` = fully trusted, linear in
+  between). A genuinely time-based window would need `aggTradesPaginator` —
+  measured at **~115 pages per 60 minutes** on BTCUSDT, so it is not used in
+  the 40-symbol cron because it would trigger a weight ban immediately. The
+  10 s / 60 s thresholds are **not yet calibrated**.
+- **MM sub-scores are split by the DIRECTION of their influence (since Stage
+  3)** — `absorption` + `oiDivergence` SUPPORT a long grid and raise the
+  score; `spoofing` + `stopHunt` + `fundingExtreme` + `basisArb` raise RISK
+  and **subtract** from it. Previously all six were summed into a single
+  positive component weighted 35%, so the more manipulation was detected the
+  higher a pair ranked. The penalty weight (`MM_ADVERSE_PENALTY_WEIGHT`) is
+  **not yet calibrated**.
+- **All indicators are computed from CLOSED candles only (since Stage 3)** —
+  `dropUnclosedKlines()` drops the in-progress candle at the fetch boundary.
+  Previously ADX/ATR/realized-vol/volume-spike/grid-bounds/sweep read a
+  half-formed candle, which made regime classification depend on **which
+  minute the cron happened to run** (:07 vs :52). The trade-off is that a
+  signal is delayed by at most one candle, in exchange for no repaint.
+  `currentPrice` stays real-time (mark price).
 - **`binance_backtest_signal`: forward returns are computed ON-DEMAND from
   historical klines** (nearest 1h candle close to the target time), NOT a
   simulation of real order execution — slippage/fees/partial fills aren't

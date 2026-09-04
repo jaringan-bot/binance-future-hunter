@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
+  MM_ADVERSE_PENALTY_WEIGHT,
+  cvdSampleConfidence,
+  CVD_MIN_CONFIDENCE_SECONDS,
+  CVD_FULL_CONFIDENCE_SECONDS,
   evaluateHardScreen,
   scoreTier1Signals,
   scaleCapitalForTargetLoss,
@@ -148,7 +152,8 @@ function regime(overrides: Partial<RegimeResult> = {}): RegimeResult {
 
 function baseTier1(overrides: Partial<Tier1ScoreInput> = {}): Tier1ScoreInput {
   return {
-    mmTotalScore: 3,
+    mmSupportivePct: 50,
+    mmAdversePct: 0,
     smartMoneyCondition: "NEUTRAL",
     smartMoneyConfidenceScore: 50,
     regime1h: regime(),
@@ -162,9 +167,9 @@ function baseTier1(overrides: Partial<Tier1ScoreInput> = {}): Tier1ScoreInput {
 describe("scoreTier1Signals", () => {
   it("stays within [0, 100]", () => {
     const scenarios: Partial<Tier1ScoreInput>[] = [
-      { mmTotalScore: 6, smartMoneyCondition: "BULLISH_ACCUMULATION", smartMoneyConfidenceScore: 100, obiBidPct20: 100, cvdBuyPct: 100 },
-      { mmTotalScore: 0, smartMoneyCondition: "LONG_LIQUIDATION_RISK", smartMoneyConfidenceScore: 100, obiBidPct20: 0, cvdBuyPct: 0 },
-      { mmTotalScore: 3, regime1h: regime({ regime: "TRENDING_DOWN", confidence: 1 }), regime4h: regime({ regime: "DISTRIBUTION", confidence: 1 }) },
+      { mmSupportivePct: 100, mmAdversePct: 100, smartMoneyCondition: "BULLISH_ACCUMULATION", smartMoneyConfidenceScore: 100, obiBidPct20: 100, cvdBuyPct: 100 },
+      { mmSupportivePct: 0, mmAdversePct: 100, smartMoneyCondition: "LONG_LIQUIDATION_RISK", smartMoneyConfidenceScore: 100, obiBidPct20: 0, cvdBuyPct: 0 },
+      { mmSupportivePct: 50, regime1h: regime({ regime: "TRENDING_DOWN", confidence: 1 }), regime4h: regime({ regime: "DISTRIBUTION", confidence: 1 }) },
     ];
     for (const overrides of scenarios) {
       const result = scoreTier1Signals(baseTier1(overrides));
@@ -187,13 +192,13 @@ describe("scoreTier1Signals", () => {
   });
 
   it("scores higher mmComponent-driven ranking with a higher mmTotalScore, all else equal", () => {
-    const highMm = scoreTier1Signals(baseTier1({ mmTotalScore: 6 }));
-    const lowMm = scoreTier1Signals(baseTier1({ mmTotalScore: 0 }));
+    const highMm = scoreTier1Signals(baseTier1({ mmSupportivePct: 100 }));
+    const lowMm = scoreTier1Signals(baseTier1({ mmSupportivePct: 0 }));
     expect(highMm.rankingScore).toBeGreaterThan(lowMm.rankingScore);
   });
 
   it("returns the 4 components (0-100) and rankingScore is their 35/30/20/15 weighted sum", () => {
-    const r = scoreTier1Signals(baseTier1({ mmTotalScore: 6, smartMoneyCondition: "BULLISH_ACCUMULATION", smartMoneyConfidenceScore: 60, obiBidPct20: 40, cvdBuyPct: 80 }));
+    const r = scoreTier1Signals(baseTier1({ mmSupportivePct: 100, mmAdversePct: 0, smartMoneyCondition: "BULLISH_ACCUMULATION", smartMoneyConfidenceScore: 60, obiBidPct20: 40, cvdBuyPct: 80 }));
     for (const v of Object.values(r.components)) {
       expect(v).toBeGreaterThanOrEqual(0);
       expect(v).toBeLessThanOrEqual(100);
@@ -202,9 +207,10 @@ describe("scoreTier1Signals", () => {
       r.components.mm * 0.35 +
       r.components.smartMoney * 0.3 +
       r.components.regime * 0.2 +
-      r.components.buyPressure * 0.15;
+      r.components.buyPressure * 0.15 -
+      r.components.mmAdverse * MM_ADVERSE_PENALTY_WEIGHT;
     expect(r.rankingScore).toBeCloseTo(weighted, 6);
-    // mmTotalScore 6/6 -> mm component pegged at 100
+    // mmSupportivePct 100 -> mm component pegged at 100
     expect(r.components.mm).toBe(100);
   });
 });
@@ -290,5 +296,77 @@ describe("decidePipelineOutcome", () => {
       gridRiskStatus: "MODERATE",
     });
     expect(result.decision).toBe("WATCH");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// K6 + K7 + K9 REGRESSION GUARDS (2026-09-04, Stage 3).
+// ─────────────────────────────────────────────────────────────
+describe("K6: sinyal manipulasi MENURUNKAN skor, tidak lagi menaikkannya", () => {
+  it("REGRESSION: adverse tinggi menghasilkan skor LEBIH RENDAH, semua yang lain sama", () => {
+    // Dulu keenam sinyal dijumlah jadi satu komponen POSITIF berbobot 35%,
+    // jadi spoofing/stop-hunt/funding-ekstrem/basis-arb justru MENAIKKAN
+    // rankingScore -- makin banyak manipulasi terdeteksi, makin mudah lolos
+    // ambang TRADE 55. Untuk grid mean-reversion itu terbalik.
+    const clean = scoreTier1Signals(baseTier1({ mmSupportivePct: 60, mmAdversePct: 0 }));
+    const manipulated = scoreTier1Signals(baseTier1({ mmSupportivePct: 60, mmAdversePct: 100 }));
+
+    expect(manipulated.rankingScore).toBeLessThan(clean.rankingScore);
+    expect(clean.rankingScore - manipulated.rankingScore).toBeCloseTo(100 * MM_ADVERSE_PENALTY_WEIGHT, 6);
+  });
+
+  it("melaporkan mm dan mmAdverse sebagai dua komponen terpisah (untuk persist + kalibrasi)", () => {
+    const r = scoreTier1Signals(baseTier1({ mmSupportivePct: 80, mmAdversePct: 30 }));
+    expect(r.components.mm).toBe(80);
+    expect(r.components.mmAdverse).toBe(30);
+  });
+});
+
+describe("K7: ACCUMULATION/DISTRIBUTION tidak lagi dianggap hampir sebaik RANGING", () => {
+  it("RANGING mengalahkan ACCUMULATION, dan ACCUMULATION mengalahkan BREAKOUT", () => {
+    const rangingScore = scoreTier1Signals(
+      baseTier1({ regime1h: regime({ regime: "RANGING", confidence: 1 }), regime4h: regime({ regime: "RANGING", confidence: 1 }) }),
+    ).components.regime;
+    const accumulationScore = scoreTier1Signals(
+      baseTier1({ regime1h: regime({ regime: "ACCUMULATION", confidence: 1 }), regime4h: regime({ regime: "ACCUMULATION", confidence: 1 }) }),
+    ).components.regime;
+    const breakoutScore = scoreTier1Signals(
+      baseTier1({ regime1h: regime({ regime: "BREAKOUT", confidence: 1 }), regime4h: regime({ regime: "BREAKOUT", confidence: 1 }) }),
+    ).components.regime;
+
+    expect(rangingScore).toBeGreaterThan(accumulationScore);
+    expect(accumulationScore).toBeGreaterThan(breakoutScore);
+    // Jaraknya ke RANGING harus NYATA -- dulu 0.9 vs 1.0 praktis setara,
+    // padahal ACCUMULATION menurut definisi classifyRegime adalah pola
+    // pra-breakout (OI membangun sementara harga flat).
+    expect(rangingScore - accumulationScore).toBeGreaterThan(20);
+  });
+});
+
+describe("K9: CVD dari sampel tape yang terlalu pendek ditarik ke netral", () => {
+  it("cvdSampleConfidence naik dari 0 ke 1 seiring lebar sampel", () => {
+    expect(cvdSampleConfidence(0)).toBe(0);
+    expect(cvdSampleConfidence(CVD_MIN_CONFIDENCE_SECONDS)).toBe(0);
+    expect(cvdSampleConfidence(CVD_FULL_CONFIDENCE_SECONDS)).toBe(1);
+    expect(cvdSampleConfidence(9999)).toBe(1);
+    const mid = cvdSampleConfidence((CVD_MIN_CONFIDENCE_SECONDS + CVD_FULL_CONFIDENCE_SECONDS) / 2);
+    expect(mid).toBeGreaterThan(0);
+    expect(mid).toBeLessThan(1);
+  });
+
+  it("REGRESSION: CVD ekstrem atas sampel 3 detik TIDAK boleh menggerakkan skor seperti sampel penuh", () => {
+    const thinSample = scoreTier1Signals(baseTier1({ cvdBuyPct: 100, obiBidPct20: 50, cvdSampleSeconds: 3 }));
+    const fullSample = scoreTier1Signals(baseTier1({ cvdBuyPct: 100, obiBidPct20: 50, cvdSampleSeconds: 600 }));
+    const neutral = scoreTier1Signals(baseTier1({ cvdBuyPct: 50, obiBidPct20: 50, cvdSampleSeconds: 600 }));
+
+    expect(fullSample.components.buyPressure).toBeGreaterThan(thinSample.components.buyPressure);
+    // Sampel 3 detik tidak membawa informasi -> diperlakukan netral.
+    expect(thinSample.components.buyPressure).toBeCloseTo(neutral.components.buyPressure, 6);
+  });
+
+  it("caller lama tanpa cvdSampleSeconds tetap mendapat confidence penuh (tidak berubah diam-diam)", () => {
+    const legacy = scoreTier1Signals(baseTier1({ cvdBuyPct: 100, obiBidPct20: 50 }));
+    const explicit = scoreTier1Signals(baseTier1({ cvdBuyPct: 100, obiBidPct20: 50, cvdSampleSeconds: 600 }));
+    expect(legacy.components.buyPressure).toBeCloseTo(explicit.components.buyPressure, 6);
   });
 });

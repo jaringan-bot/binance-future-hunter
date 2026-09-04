@@ -750,6 +750,7 @@ interface RawPipelineDecisionLogRow {
   smart_money_component: number | null;
   regime_component: number | null;
   buy_pressure_component: number | null;
+  mm_adverse_component: number | null;
 }
 
 function mapPipelineDecisionLogRow(r: RawPipelineDecisionLogRow): PipelineDecisionLogRow {
@@ -783,6 +784,7 @@ function mapPipelineDecisionLogRow(r: RawPipelineDecisionLogRow): PipelineDecisi
     smartMoneyComponent: r.smart_money_component,
     regimeComponent: r.regime_component,
     buyPressureComponent: r.buy_pressure_component,
+    mmAdverseComponent: r.mm_adverse_component,
   };
 }
 
@@ -790,8 +792,8 @@ export async function insertPipelineDecisionLogs(rows: PipelineDecisionLogRow[])
   if (rows.length === 0) return;
   const database = requireDb();
   const stmt = database.prepare(
-    "INSERT INTO pipeline_decision_log (run_at, symbol, source, source_ref, decision, ranking_score, hard_screen_passed, hard_screen_reasons, quote_volume_usd, funding_rate, regime_1h, regime_4h, grid_risk_status, lower_price, upper_price, stop_loss, mm_component, smart_money_component, regime_component, buy_pressure_component) " +
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    "INSERT INTO pipeline_decision_log (run_at, symbol, source, source_ref, decision, ranking_score, hard_screen_passed, hard_screen_reasons, quote_volume_usd, funding_rate, regime_1h, regime_4h, grid_risk_status, lower_price, upper_price, stop_loss, mm_component, smart_money_component, regime_component, buy_pressure_component, mm_adverse_component) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
   );
   await database.batch(
     rows.map((r) =>
@@ -816,6 +818,7 @@ export async function insertPipelineDecisionLogs(rows: PipelineDecisionLogRow[])
         r.smartMoneyComponent,
         r.regimeComponent,
         r.buyPressureComponent,
+        r.mmAdverseComponent,
       ),
     ),
   );
@@ -848,7 +851,7 @@ export async function queryPipelineDecisionLog(opts: {
   binds.push(limit);
   const result = await database
     .prepare(
-      `SELECT run_at, symbol, source, source_ref, decision, ranking_score, hard_screen_passed, hard_screen_reasons, quote_volume_usd, funding_rate, regime_1h, regime_4h, grid_risk_status, lower_price, upper_price, stop_loss, mm_component, smart_money_component, regime_component, buy_pressure_component FROM pipeline_decision_log WHERE ${clauses.join(" AND ")} ORDER BY run_at DESC LIMIT ?`,
+      `SELECT run_at, symbol, source, source_ref, decision, ranking_score, hard_screen_passed, hard_screen_reasons, quote_volume_usd, funding_rate, regime_1h, regime_4h, grid_risk_status, lower_price, upper_price, stop_loss, mm_component, smart_money_component, regime_component, buy_pressure_component, mm_adverse_component FROM pipeline_decision_log WHERE ${clauses.join(" AND ")} ORDER BY run_at DESC LIMIT ?`,
     )
     .bind(...binds)
     .all<RawPipelineDecisionLogRow>();

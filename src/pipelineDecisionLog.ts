@@ -17,6 +17,8 @@ export interface PipelineDecisionLogRow {
   /** 4 sub-skor komponen ranking (0-100), migration 0014. null kalau hard
    *  screen gagal sebelum scoreTier1Signals() -- null != 0. */
   mmComponent: number | null;
+  /** K6 (migration 0015): sub-skor MM yang menaikkan risiko. */
+  mmAdverseComponent: number | null;
   smartMoneyComponent: number | null;
   regimeComponent: number | null;
   buyPressureComponent: number | null;
@@ -54,6 +56,7 @@ export function toPipelineDecisionLogRow(
     decision: result.decision,
     rankingScore: result.rankingScore,
     mmComponent: rc ? rc.mm : null,
+    mmAdverseComponent: rc ? rc.mmAdverse : null,
     smartMoneyComponent: rc ? rc.smartMoney : null,
     regimeComponent: rc ? rc.regime : null,
     buyPressureComponent: rc ? rc.buyPressure : null,

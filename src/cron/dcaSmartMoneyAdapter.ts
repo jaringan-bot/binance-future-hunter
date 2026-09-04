@@ -3,8 +3,8 @@
 // STATEFUL via dca_active_plans (D1) untuk entry ke-N / next trigger -- dipersist
 // di entryAlertCron sebelum kirim Telegram.
 //
-// REUSE Phase 1: calculateScenarioC, normalizeFunding, getOIVelocityPercentile.
-import { calculateScenarioC, type ScenarioCInput } from "./smartMoneyPipelineEngine.js";
+// REUSE Phase 1: calculateFlowAlignment, normalizeFunding, getOIVelocityPercentile.
+import { calculateFlowAlignment, type FlowAlignmentInput } from "./smartMoneyPipelineEngine.js";
 import { normalizeFunding, getOIVelocityPercentile, ema, calculateSlope, multiTfAlignScore } from "../tools/smartMoneyMetrics.js";
 import { computeATR, summarizeKlines, type KlineCandle } from "../toolHelpers.js";
 import type { MarketRegime } from "../tools/marketRegime.js";
@@ -70,7 +70,7 @@ export function computeLongSqueezeRisk(fundingPercentile: number): number {
 }
 
 export interface DirectionalTimingComponents {
-  scenarioC: number;
+  flowAlignment: number;
   squeezeBoost: number;
   oiVelocity: number;
   antiSqueeze: number;
@@ -82,11 +82,11 @@ export interface DirectionalTimingComponents {
  */
 export function computeDirectionalTiming(
   side: DcaSide,
-  scenarioCScore: number,
+  flowAlignmentScore: number,
   fundingPercentile: number,
   oiVelocityPercentile: number,
 ): { score: number; components: DirectionalTimingComponents } {
-  const sC = clamp100(scenarioCScore);
+  const sC = clamp100(flowAlignmentScore);
   const shortBoost = computeShortSqueezeBoost(fundingPercentile);
   const longRisk = computeLongSqueezeRisk(fundingPercentile);
   const oi = clamp100(oiVelocityPercentile);
@@ -116,7 +116,7 @@ export function computeDirectionalTiming(
 
   return {
     score: clamp100(score),
-    components: { scenarioC: sC, squeezeBoost, oiVelocity: oi, antiSqueeze },
+    components: { flowAlignment: sC, squeezeBoost, oiVelocity: oi, antiSqueeze },
   };
 }
 
@@ -151,11 +151,11 @@ export interface DcaSafetyResult {
 // computeDirectionalTiming(), bukan desain baru.
 // ─────────────────────────────────────────────────────────────
 export function computeDcaSafetyScore(
-  scenarioCScore: number,
+  flowAlignmentScore: number,
   fundingPercentile: number,
   side: DcaSide = "LONG",
 ): DcaSafetyResult {
-  const sC = clamp100(scenarioCScore);
+  const sC = clamp100(flowAlignmentScore);
   // Arus yang MELAWAN tesis arah ini.
   const flowAgainst = side === "LONG" ? sC < 25 : sC > 75;
   // Squeeze yang MERUGIKAN arah ini: LONG takut long-squeeze (funding
@@ -197,7 +197,7 @@ export function isCapitulation(input: CapitulationInput): boolean {
  */
 export function resolvePauseLevel(
   safetyScore: number,
-  scenarioCScore: number,
+  flowAlignmentScore: number,
   /** Risiko squeeze yang MERUGIKAN arah yang dievaluasi (lihat K10). */
   adverseSqueezeRisk: number,
   capitulation: boolean,
@@ -208,7 +208,7 @@ export function resolvePauseLevel(
   // K10: S_C rendah = arus jual dominan. Itu melawan tesis LONG, tapi
   // MENDUKUNG tesis SHORT -- ambangnya harus dicerminkan, bukan dipakai
   // apa adanya untuk kedua arah.
-  const flowAgainst = side === "LONG" ? scenarioCScore < 25 : scenarioCScore > 75;
+  const flowAgainst = side === "LONG" ? flowAlignmentScore < 25 : flowAlignmentScore > 75;
   if (safetyScore < 70 || flowAgainst) return "PAUSE_SOFT";
   return "NONE";
 }
@@ -250,7 +250,7 @@ export interface DcaSmartMoneyInput {
   symbol: string;
   side: DcaSide;
   currentPrice: number;
-  scenarioC: ScenarioCInput;
+  flowAlignment: FlowAlignmentInput;
   fundingRate: number;
   fundingHistory30d: number[];
   /** Rentang jam yang benar-benar tercakup fundingHistory30d (observabilitas). */
@@ -285,12 +285,12 @@ export interface DcaSmartMoneyResult {
   maxEntries: number;
   fundingPercentile: number;
   oiVelocityPercentile: number;
-  scenarioCScore: number;
+  flowAlignmentScore: number;
   reasons: string[];
 }
 
-export function scenarioCFrom(input: ScenarioCInput): number {
-  return calculateScenarioC(input);
+export function flowAlignmentFrom(input: FlowAlignmentInput): number {
+  return calculateFlowAlignment(input);
 }
 
 /** Rolling OI velocity samples from openInterestHist (window 5). */
@@ -478,16 +478,16 @@ export interface BuildDcaSmParams {
   liqStats?: LiquidationStats;
 }
 
-/** Build Scenario C + funding/OI context from Wave 1/2 pipeline data (0 fetch tambahan). */
+/** Build flow-alignment + funding/OI context dari data Wave 1/2 pipeline. */
 export async function buildAndEvaluateDcaSmartMoney(params: BuildDcaSmParams): Promise<DcaSmartMoneyResult> {
-  const { candles: candles1h } = summarizeKlines(params.klines1h);
-  const { bias: b1h } = summarizeKlines(params.klines1h);
+  const { candles: candles1h, bias: b1h } = summarizeKlines(params.klines1h);
   const { bias: b4h } = summarizeKlines(params.klines4h);
-  const slopeFutures = calculateSlope(candles1h.slice(-20).map((c) => c.close));
-  const scenarioC: ScenarioCInput = {
-    slopeSpot: slopeFutures * 0.85,
-    slopeFutures,
-    takerSpotNorm: params.cvdBuyPct ?? 50,
+  // K3 (Stage 3): `slopeSpot: slopeFutures * 0.85` DIHAPUS di sini. Itu data
+  // spot yang dikarang, dan karena bobotnya paling besar di rumus lama,
+  // separuh skor "divergence" jadi konstanta 28.05. Sekarang skor hanya
+  // dibangun dari dua sinyal yang datanya benar-benar ada.
+  const flowAlignment: FlowAlignmentInput = {
+    takerFlowNorm: params.cvdBuyPct ?? 50,
     multiTfAlign: multiTfAlignScore(b1h, b4h),
   };
   // Dua I/O ini independen -- jalankan paralel, jangan berurutan.
@@ -503,7 +503,7 @@ export async function buildAndEvaluateDcaSmartMoney(params: BuildDcaSmParams): P
     symbol: params.symbol,
     side: params.side,
     currentPrice: params.currentPrice,
-    scenarioC,
+    flowAlignment,
     fundingRate: params.fundingRate,
     fundingHistory30d: funding.rates,
     fundingHistoryHours: funding.hours,
@@ -524,7 +524,7 @@ export function evaluateDcaSmartMoney(input: DcaSmartMoneyInput): DcaSmartMoneyR
   const maxEntries = input.maxEntries ?? DCA_DEFAULT_MAX_ENTRIES;
   const entryCount = input.entryCount ?? 0;
 
-  const scenarioCScore = calculateScenarioC(input.scenarioC);
+  const flowAlignmentScore = calculateFlowAlignment(input.flowAlignment);
   const fundingPercentile = normalizeFunding(input.fundingRate, input.fundingHistory30d);
   const oiVelocityPercentile = getOIVelocityPercentile(input.oiVelocityPerHour, input.oiVelocityHistory);
 
@@ -542,22 +542,22 @@ export function evaluateDcaSmartMoney(input: DcaSmartMoneyInput): DcaSmartMoneyR
 
   const { score: timingScore, components: timingComp } = computeDirectionalTiming(
     input.side,
-    scenarioCScore,
+    flowAlignmentScore,
     fundingPercentile,
     oiVelocityPercentile,
   );
-  const safety = computeDcaSafetyScore(scenarioCScore, fundingPercentile, input.side);
+  const safety = computeDcaSafetyScore(flowAlignmentScore, fundingPercentile, input.side);
   const capitulation = isCapitulation({
     liqSpikeUsd: input.liqSpikeUsd,
     liqMean24hUsd: input.liqMean24hUsd,
     priceDropAbs: input.priceDropAbs,
     atr1h: input.atr1h,
   });
-  let pauseLevel = resolvePauseLevel(safety.score, scenarioCScore, safety.adverseSqueezeRisk, capitulation, input.side);
+  let pauseLevel = resolvePauseLevel(safety.score, flowAlignmentScore, safety.adverseSqueezeRisk, capitulation, input.side);
   let pauseReason: string | null = null;
 
   reasons.push(
-    `D_timing ${timingScore.toFixed(1)} (S_C ${timingComp.scenarioC.toFixed(0)}, squeeze ${timingComp.squeezeBoost.toFixed(0)}, OI ${timingComp.oiVelocity.toFixed(0)}, anti ${timingComp.antiSqueeze.toFixed(0)})`,
+    `D_timing ${timingScore.toFixed(1)} (S_C ${timingComp.flowAlignment.toFixed(0)}, squeeze ${timingComp.squeezeBoost.toFixed(0)}, OI ${timingComp.oiVelocity.toFixed(0)}, anti ${timingComp.antiSqueeze.toFixed(0)})`,
   );
   reasons.push(
     `Safety ${safety.score.toFixed(0)} (distPen ${safety.distributionPenalty}, squeezePen ${safety.squeezePenalty}, adverseSqueeze ${safety.adverseSqueezeRisk.toFixed(0)})`,
@@ -598,7 +598,7 @@ export function evaluateDcaSmartMoney(input: DcaSmartMoneyInput): DcaSmartMoneyR
       maxEntries,
       fundingPercentile,
       oiVelocityPercentile,
-      scenarioCScore,
+      flowAlignmentScore,
       reasons: [...reasons, "🚨 DCA PLAN INVALIDATED - MANUAL REVIEW REQUIRED"],
     };
   }
@@ -623,7 +623,7 @@ export function evaluateDcaSmartMoney(input: DcaSmartMoneyInput): DcaSmartMoneyR
       maxEntries,
       fundingPercentile,
       oiVelocityPercentile,
-      scenarioCScore,
+      flowAlignmentScore,
       reasons: [...reasons, `Pause HARD: ${pauseReason}`],
     };
   }
@@ -631,8 +631,8 @@ export function evaluateDcaSmartMoney(input: DcaSmartMoneyInput): DcaSmartMoneyR
   if (pauseLevel === "PAUSE_SOFT") {
     pauseReason =
       pauseReason ??
-      (scenarioCScore < 25
-        ? `Distribution signal S_C ${scenarioCScore.toFixed(0)} < 25`
+      (flowAlignmentScore < 25
+        ? `Distribution signal S_C ${flowAlignmentScore.toFixed(0)} < 25`
         : `Safety score ${safety.score.toFixed(0)} < 70`);
     return {
       decision: "DCA_PAUSE_SOFT",
@@ -648,7 +648,7 @@ export function evaluateDcaSmartMoney(input: DcaSmartMoneyInput): DcaSmartMoneyR
       maxEntries,
       fundingPercentile,
       oiVelocityPercentile,
-      scenarioCScore,
+      flowAlignmentScore,
       reasons: [...reasons, `Pause SOFT (defer 2 ticks): ${pauseReason}`],
     };
   }
@@ -668,7 +668,7 @@ export function evaluateDcaSmartMoney(input: DcaSmartMoneyInput): DcaSmartMoneyR
       maxEntries,
       fundingPercentile,
       oiVelocityPercentile,
-      scenarioCScore,
+      flowAlignmentScore,
       reasons: [...reasons, "Max entries cap — freeze DCA plan"],
     };
   }
@@ -695,7 +695,7 @@ export function evaluateDcaSmartMoney(input: DcaSmartMoneyInput): DcaSmartMoneyR
       maxEntries,
       fundingPercentile,
       oiVelocityPercentile,
-      scenarioCScore,
+      flowAlignmentScore,
       reasons: [...reasons, pauseReason],
     };
   }
@@ -715,7 +715,7 @@ export function evaluateDcaSmartMoney(input: DcaSmartMoneyInput): DcaSmartMoneyR
     maxEntries,
     fundingPercentile,
     oiVelocityPercentile,
-    scenarioCScore,
+    flowAlignmentScore,
     reasons,
   };
 }

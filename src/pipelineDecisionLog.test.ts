@@ -83,12 +83,13 @@ describe("toPipelineDecisionLogRow", () => {
         symbol: "SOLUSDT",
         decision: "TRADE",
         rankingScore: 62.4,
-        rankingComponents: { mm: 70, smartMoney: 55, regime: 60, buyPressure: 50 },
+        rankingComponents: { mm: 70, mmAdverse: 25, smartMoney: 55, regime: 60, buyPressure: 50 },
       }),
       1,
       "manual",
     );
     expect(row.mmComponent).toBe(70);
+    expect(row.mmAdverseComponent).toBe(25);
     expect(row.smartMoneyComponent).toBe(55);
     expect(row.regimeComponent).toBe(60);
     expect(row.buyPressureComponent).toBe(50);

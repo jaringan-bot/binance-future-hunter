@@ -85,6 +85,7 @@ function logRow(partial: Partial<PipelineDecisionLogRow> = {}): PipelineDecision
     decision: "TRADE",
     rankingScore: 60,
     mmComponent: 55,
+    mmAdverseComponent: 20,
     smartMoneyComponent: 50,
     regimeComponent: 60,
     buyPressureComponent: 45,

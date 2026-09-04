@@ -80,6 +80,8 @@ export interface KlineCandle {
   low: number;
   close: number;
   volume: number;
+  /** Milidetik TERAKHIR candle (index 6 KlineTuple). Opsional -- lihat K8. */
+  closeTime?: number;
 }
 
 export interface KlinesSummary {
@@ -93,6 +95,51 @@ export interface KlinesSummary {
   swingLow: number;
 }
 
+// ─────────────────────────────────────────────────────────────
+// K8 (2026-09-04, Stage 3) -- CANDLE YANG BELUM CLOSE (REPAINT).
+//
+// getKlinesNative() mengembalikan candle BERJALAN sebagai elemen terakhir,
+// dan candle itu dipakai apa adanya oleh ADX, ATR, realized-vol,
+// volumeSpikeRatio, grid bound HH/LL, MM stop-hunt, dan `active.close`
+// deteksi liquidity sweep.
+//
+// DAMPAK TERUKUR: entry-alert cron fire di menit :07/:22/:37/:52. Pada :07
+// candle baru berumur 7 menit, jadi volumenya ~12% dari nilai akhirnya ->
+// volumeSpikeRatio tertekan -> syarat BREAKOUT di classifyRegime
+// (volSpike>2 AND oiΔ>3% AND volumeSpike>2) hampir MUSTAHIL terpenuhi.
+// Pada :52 jauh lebih mudah. Artinya klasifikasi regime adalah FUNGSI DARI
+// MENIT KE BERAPA CRON JALAN -- itu yang melahirkan "RUNEUSDT flicker" dan
+// EMERGENCY PATCH ADX/spike di pipelineEngine.ts (yang menambal gejala).
+//
+// Untuk deteksi sweep lebih parah lagi: menguji "reclaim" pada candle yang
+// belum close adalah repaint klasik -- sinyal bisa muncul lalu hilang
+// sebelum candle-nya selesai.
+//
+// `closeTime` (index 6) sengaja ditambahkan ke KlineCandle sebagai field
+// OPSIONAL supaya additive -- konsumen lain tidak perlu berubah.
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Buang candle yang BELUM CLOSE dari array KlineTuple mentah.
+ *
+ * Binance `closeTime` (index 6) adalah milidetik TERAKHIR candle, jadi
+ * candle dianggap sudah tutup kalau `closeTime < now`. Dipakai SEKALI di
+ * batas fetch (fullPipeline.ts) supaya SEMUA konsumen hilir otomatis
+ * memakai candle tertutup -- bukan ditambal satu per satu di tiap
+ * indikator.
+ *
+ * Tuple tanpa closeTime valid (mis. fixture test lama) diperlakukan sebagai
+ * SUDAH TUTUP -- tidak boleh diam-diam mengosongkan array.
+ */
+export function dropUnclosedKlines(raw: KlineTuple[], now: number = Date.now()): KlineTuple[] {
+  if (raw.length === 0) return raw;
+  return raw.filter((k) => {
+    const closeTime = Number(k[6]);
+    if (!Number.isFinite(closeTime)) return true;
+    return closeTime < now;
+  });
+}
+
 // Format Binance native: [openTime, open, high, low, close, volume, closeTime, ...]
 export function summarizeKlines(raw: KlineTuple[]): KlinesSummary {
   const candles: KlineCandle[] = raw.map((k) => ({
@@ -102,6 +149,7 @@ export function summarizeKlines(raw: KlineTuple[]): KlinesSummary {
     low: parseFloat(k[3]),
     close: parseFloat(k[4]),
     volume: parseFloat(k[5]),
+    closeTime: Number.isFinite(Number(k[6])) ? Number(k[6]) : undefined,
   }));
   const closes = candles.map((c) => c.close);
   const highs = candles.map((c) => c.high);

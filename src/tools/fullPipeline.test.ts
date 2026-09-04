@@ -596,3 +596,64 @@ describe("K5: head Traditional tetap dievaluasi saat hard-screen menolak KARENA 
     expect(binanceProxy.getOpenInterestHistNative).not.toHaveBeenCalledWith("BTCUSDT", "1h", 24);
   });
 });
+
+// ─────────────────────────────────────────────────────────────
+// K8 WIRING GUARD (2026-09-04, Stage 3)
+//
+// dropUnclosedKlines() punya unit test sendiri di toolHelpers.test.ts, TAPI
+// itu tidak membuktikan pipeline benar-benar MEMAKAINYA. Mutation test
+// membuktikan celah itu nyata: mengganti pemanggilannya di runPipelineInternal
+// dengan identity membuat SELURUH suite tetap hijau.
+//
+// Test ini menutupnya: candle terakhir dibuat masih BERJALAN (closeTime di
+// masa depan) dengan high absurd. Kalau pipeline ikut membacanya, bound grid
+// akan meledak.
+// ─────────────────────────────────────────────────────────────
+describe("K8: pipeline mengabaikan candle yang belum close", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    defaultMockSetup();
+  });
+
+  /** Klines datar, TAPI lilin terakhir masih berjalan dan high-nya absurd. */
+  function klinesWithLiveLastCandle(count: number): KlineTuple[] {
+    const now = Date.now();
+    const HOUR = 3_600_000;
+    return Array.from({ length: count }, (_, i) => {
+      const isLast = i === count - 1;
+      // openTime mundur dari sekarang; lilin terakhir buka 5 menit lalu dan
+      // baru tutup ~55 menit lagi -> closeTime di MASA DEPAN.
+      const openTime = now - (count - 1 - i) * HOUR - 5 * 60_000;
+      const closeTime = openTime + HOUR - 1;
+      const close = 100 + i * 0.01;
+      const high = isLast ? 9999 : close + 0.3;
+      return [
+        openTime,
+        close.toFixed(4),
+        high.toFixed(4),
+        (close - 0.3).toFixed(4),
+        close.toFixed(4),
+        "100",
+        closeTime,
+        "0",
+        10,
+        "0",
+        "0",
+        "0",
+      ] as unknown as KlineTuple;
+    });
+  }
+
+  it("REGRESSION: high absurd pada lilin BERJALAN tidak boleh masuk ke bound grid", async () => {
+    vi.mocked(binanceProxy.getKlinesNative).mockImplementation(async (_s, _i, limit) =>
+      klinesWithLiveLastCandle(limit),
+    );
+
+    const r = await runPipelineForSymbol("BTCUSDT", TEST_OPTS);
+
+    expect(r.gridSetup).toBeDefined();
+    // Tanpa K8, hh akan ~9999 dan upperPrice ikut meledak.
+    expect(r.gridSetup!.hh).toBeLessThan(200);
+    expect(r.gridSetup!.upperPrice).toBeLessThan(200);
+  });
+});
