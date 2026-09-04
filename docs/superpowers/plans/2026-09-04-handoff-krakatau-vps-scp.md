@@ -102,14 +102,26 @@ Ulangi untuk KEDUA host:
     scp -i <key> proxy-standalone/handler.mjs ubuntu@<HOST>:/tmp/handler.mjs
     ssh -i <key> ubuntu@<HOST> "sudo install -m 644 /tmp/handler.mjs /opt/whale-binance-proxy/handler.mjs && sudo systemctl restart whale-binance-proxy && systemctl is-active whale-binance-proxy"
 
-### Yang Semeru TIDAK tahu — host relay #2
+### Host relay #2 — KANDIDAT (belum diverifikasi)
 
-Alamat relay kedua **tidak ada di repo**. `CLAUDE.md` hanya menyebut
-`13.212.7.132`. Nilainya ada di secret `PROXY_URL_2`, dan Krakatau yang punya
-akses. `146.235.17.228` muncul di
-`docs/superpowers/specs/2026-08-11-realtime-liquidation-stream-design.md`
-tapi itu spec Oracle lama — **jangan diasumsikan sebagai relay #2.**
-Konfirmasi dari `PROXY_URL_2` dulu, baru kirim.
+Alamat relay kedua tidak ada di repo; nilainya ada di secret `PROXY_URL_2`.
+Dari `~/.ssh/config` di mesin user ada TIGA host:
+
+| Host | IP | Catatan |
+|---|---|---|
+| `svm-vps` | 13.212.7.132 | relay #1 + gateway, sudah pasti |
+| `svm-jkt` | 108.136.219.101 | **kandidat kuat relay #2** — belum diverifikasi |
+| `jaringan-dev` | 146.235.17.228 | host Oracle dari spec 2026-08-11 — **jangan diasumsikan relay #2** |
+
+Semeru TIDAK bisa memverifikasi: SSH diblokir di sesi Claude Code. Krakatau
+harus membuktikan dulu, bukan menebak, sebelum `scp`:
+
+    for h in svm-vps svm-jkt jaringan-dev; do
+      echo "== $h =="
+      ssh $h "systemctl is-active whale-binance-proxy 2>/dev/null || echo TIDAK-ADA; ls -d /opt/whale-* 2>/dev/null"
+    done
+
+Cocokkan hasilnya dengan `PROXY_URL_2` yang sebenarnya sebelum mengirim.
 
 **Kalau hanya satu host yang ter-update, katakan begitu di laporan.** Relay
 campur-versi berarti separuh trafik masih membuang header weight, dan itu
