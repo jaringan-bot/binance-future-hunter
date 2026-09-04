@@ -157,9 +157,52 @@ export function evaluateHardScreen(input: HardScreenInput): HardScreenResult {
 // dicatat di docs/full_pipeline_framework.md Known Limitations, sama seperti
 // threshold-threshold lain di codebase ini (mis. smartMoneyAnalysis.ts).
 // ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// K6 (2026-09-04, Stage 3) -- TANDA SKOR MM DIPERBAIKI.
+//
+// CACAT LAMA: `mmTotalScore` = jumlah 6 sinyal detectMmActivity, dipakai
+// sebagai SATU komponen positif dengan bobot 35% -- bobot TERBESAR dari
+// empat komponen. Tapi enam sinyal itu mengukur ABNORMALITAS / MANIPULASI,
+// bukan kelayakan grid:
+//
+//   Sinyal          | skor naik saat                | untuk LONG grid artinya
+//   ----------------|-------------------------------|------------------------
+//   absorption      | absorpsi beli                 | mendukung  ✅
+//   oiDivergence    | posisi menumpuk, harga flat   | mendukung  ✅
+//   fundingExtreme  | funding makin ekstrem         | BLEED naik ❌
+//   stopHunt        | baru saja ada stop-run        | whipsaw    ❌
+//   spoofing        | ada wall mencurigakan         | book palsu ❌
+//   basisArb        | dislokasi basis               | risiko     ❌
+//
+// Empat dari enam adalah PERINGATAN, tapi semuanya menaikkan rankingScore.
+// Artinya: makin banyak manipulasi terdeteksi -> skor makin tinggi -> makin
+// mudah lolos ambang TRADE 55. Untuk grid mean-reversion itu terbalik, dan
+// ini kandidat penyebab utama "sinyal halu".
+//
+// PERBAIKAN: dipisah jadi dua komponen. Yang supportive tetap menaikkan
+// skor (bobot 35% seperti sebelumnya); yang adverse MENGURANGI.
+//
+// MAGNITUDO PENALTI BELUM DIKALIBRASI. 0.15 dipilih sengaja KONSERVATIF
+// (maksimum -15 poin) supaya perubahan distribusi skor tidak liar sebelum
+// ada data. Stage 4 yang mengkalibrasi lewat
+// scripts/calibrate-ranking-weights.mjs, memakai kolom mm_adverse_component
+// (migration 0015) yang baru mulai terisi setelah deploy ini.
+// ─────────────────────────────────────────────────────────────
+export const MM_SUPPORTIVE_SIGNALS = ["absorption", "oiDivergence"] as const;
+export const MM_ADVERSE_SIGNALS = ["spoofing", "stopHunt", "fundingExtreme", "basisArb"] as const;
+export const MM_ADVERSE_PENALTY_WEIGHT = 0.15;
+
 export interface Tier1ScoreInput {
-  /** Jumlah 6 skor sinyal MM (detectMmActivity.ts pure scorers), rentang 0-6. */
-  mmTotalScore: number;
+  /**
+   * Rata-rata skor sinyal MM yang MENDUKUNG grid (absorption, oiDivergence),
+   * dinormalisasi 0-100.
+   */
+  mmSupportivePct: number;
+  /**
+   * Rata-rata skor sinyal MM yang MENAIKKAN RISIKO grid (spoofing, stopHunt,
+   * fundingExtreme, basisArb), dinormalisasi 0-100. MENGURANGI rankingScore.
+   */
+  mmAdversePct: number;
   smartMoneyCondition: MarketStructureCondition;
   /** confidenceScore dari analyzeSmartMoneyDivergence(), 0-100. */
   smartMoneyConfidenceScore: number;
@@ -169,6 +212,26 @@ export interface Tier1ScoreInput {
   obiBidPct20: number;
   /** cvdBuyPct dari computeCvdFromTrades(), 0-100. */
   cvdBuyPct: number;
+  /**
+   * K9: rentang DETIK yang benar-benar diwakili sampel aggTrades di balik
+   * `cvdBuyPct`. Undefined = tidak diketahui -> diperlakukan sebagai
+   * confidence penuh (perilaku lama, supaya caller lama tidak berubah diam-diam).
+   */
+  cvdSampleSeconds?: number;
+}
+
+// K9: di bawah CVD_MIN_CONFIDENCE_SECONDS sampelnya dianggap tidak
+// informatif sama sekali; di atas CVD_FULL_CONFIDENCE_SECONDS dipercaya
+// penuh; di antaranya linear. ANGKA BELUM DIKALIBRASI -- 60 detik dipilih
+// sebagai "setidaknya satu menit tape", bukan hasil analisis.
+export const CVD_MIN_CONFIDENCE_SECONDS = 10;
+export const CVD_FULL_CONFIDENCE_SECONDS = 60;
+
+export function cvdSampleConfidence(sampleSeconds: number | undefined): number {
+  if (sampleSeconds === undefined || !Number.isFinite(sampleSeconds)) return 1;
+  if (sampleSeconds <= CVD_MIN_CONFIDENCE_SECONDS) return 0;
+  if (sampleSeconds >= CVD_FULL_CONFIDENCE_SECONDS) return 1;
+  return (sampleSeconds - CVD_MIN_CONFIDENCE_SECONDS) / (CVD_FULL_CONFIDENCE_SECONDS - CVD_MIN_CONFIDENCE_SECONDS);
 }
 
 /** 4 sub-skor komponen (0-100 masing-masing) SEBELUM dibobot & dijumlah
@@ -178,7 +241,10 @@ export interface Tier1ScoreInput {
  *  dari data historis. SATU sumber kebenaran -- jangan hitung ulang di
  *  layer lain. */
 export interface Tier1ScoreComponents {
+  /** Sinyal MM yang MENDUKUNG grid, 0-100 (dulu: gabungan keenam sinyal). */
   mm: number;
+  /** K6: sinyal MM yang menaikkan risiko, 0-100. MENGURANGI rankingScore. */
+  mmAdverse: number;
   smartMoney: number;
   regime: number;
   buyPressure: number;
@@ -210,10 +276,38 @@ export interface Tier1ScoreResult {
 // REGIME_FAVORABILITY sempat dipakai. Tapi threshold fallback itu sendiri
 // LOW-MEDIUM confidence (n=1 anchor) dan BELUM final -- jangan anggap celah
 // ini 100% tertutup.
+// ─────────────────────────────────────────────────────────────
+// K7 (2026-09-04, Stage 3) -- KONFLIK DUA TABEL REGIME DISELESAIKAN.
+//
+// Repo ini punya DUA tabel yang menilai regime yang sama dengan tanda
+// BERLAWANAN, tanpa dokumen yang menengahi:
+//
+//   Regime         | REGIME_FAVORABILITY (jalan) | REGIME_SAFETY (dead code)
+//   ACCUMULATION   | 0.9  "kondusif"             | 30  "bahaya, pre-breakout"
+//   DISTRIBUTION   | 0.7  "kondusif"             | 20  "bahaya"
+//
+// PUTUSAN: yang benar adalah pembacaan "pre-breakout". Alasannya bukan
+// selera, melainkan definisi classifyRegime() SENDIRI (marketRegime.ts):
+//   ACCUMULATION = CVD buy dominan + OI NAIK + harga FLAT
+//   DISTRIBUTION = CVD sell dominan + OI TURUN + harga FLAT
+// Keduanya adalah "posisi sedang dibangun sementara harga belum bergerak"
+// -- energi yang menumpuk untuk keluar dari range. Untuk grid yang justru
+// bertaruh harga TETAP di dalam range, itu risiko, bukan berkah.
+//
+// Harga flat memang bagus untuk panen grid, jadi keduanya TIDAK diturunkan
+// sampai serendah TRENDING/BREAKOUT -- cuma tidak lagi diperlakukan hampir
+// sebaik RANGING murni. Nilai baru KOMPROMI dan BELUM DIKALIBRASI:
+// dipilih moderat supaya distribusi skor tidak berubah liar dalam satu
+// langkah. Stage 4 yang menyelesaikannya dengan data
+// (scripts/calibrate-ranking-weights.mjs).
+//
+// gridSmartMoneyAdapter.REGIME_SAFETY sudah DIHAPUS di Stage 3 -- tabel di
+// bawah ini sekarang satu-satunya sumber kebenaran.
+// ─────────────────────────────────────────────────────────────
 const REGIME_FAVORABILITY: Record<MarketRegime, number> = {
   RANGING: 1.0,
-  ACCUMULATION: 0.9,
-  DISTRIBUTION: 0.7,
+  ACCUMULATION: 0.6, // 0.9 -> 0.6 (pre-breakout, lihat K7)
+  DISTRIBUTION: 0.5, // 0.7 -> 0.5 (pre-breakout, lihat K7)
   TRENDING_UP: 0.5,
   TRENDING_DOWN: 0.4,
   BREAKOUT: 0,
@@ -222,9 +316,14 @@ const REGIME_FAVORABILITY: Record<MarketRegime, number> = {
 export function scoreTier1Signals(input: Tier1ScoreInput): Tier1ScoreResult {
   const notes: string[] = [];
 
-  // Komponen 1 (bobot 35%): skor MM composite (0-6 dari 6 sinyal detectMmActivity.ts) -> 0-100.
-  const mmComponent = clampPct((input.mmTotalScore / 6) * 100);
-  notes.push(`Skor MM composite ${input.mmTotalScore.toFixed(2)}/6 -> komponen ${mmComponent.toFixed(1)}/100 (bobot 35%).`);
+  // Komponen 1 (bobot 35%): sinyal MM yang MENDUKUNG grid saja (K6).
+  const mmComponent = clampPct(input.mmSupportivePct);
+  const mmAdverseComponent = clampPct(input.mmAdversePct);
+  notes.push(
+    `MM supportive ${mmComponent.toFixed(1)}/100 (bobot 35%), MM adverse ${mmAdverseComponent.toFixed(1)}/100 ` +
+      `(penalti x${MM_ADVERSE_PENALTY_WEIGHT} = -${(mmAdverseComponent * MM_ADVERSE_PENALTY_WEIGHT).toFixed(1)}). ` +
+      `Sinyal manipulasi (spoofing/stop-hunt/funding-ekstrem/basis-arb) MENGURANGI skor, tidak lagi menaikkannya -- lihat K6.`,
+  );
 
   // Komponen 2 (bobot 30%): arah smart money vs retail. BULLISH_ACCUMULATION
   // mendukung long-grid (dorong skor naik), LONG_LIQUIDATION_RISK jadi
@@ -260,17 +359,35 @@ export function scoreTier1Signals(input: Tier1ScoreInput): Tier1ScoreResult {
   // Komponen 4 (bobot 15%): tekanan beli (OBI depth-20 + CVD) -- tool ini
   // cuma dukung LONG grid (gridRiskEngine.ts, SIDE=+1, satu-satunya arah yang
   // didukung), jadi tekanan beli lebih tinggi = kondisi lebih mendukung.
-  const buyPressureComponent = clampPct((input.obiBidPct20 + input.cvdBuyPct) / 2);
+  //
+  // K9 (Stage 3): CVD berasal dari 100 aggTrades TERAKHIR -- bukan window
+  // waktu. Di pair likuid itu bisa 2-10 detik tape, yaitu noise. Kalau
+  // sampelnya terlalu sempit, bagian CVD ditarik ke NETRAL (50) alih-alih
+  // dipercaya penuh; OBI (snapshot buku, tidak punya masalah window ini)
+  // tetap dipakai apa adanya. Confidence naik linear sampai
+  // CVD_FULL_CONFIDENCE_SECONDS.
+  const cvdConfidence = cvdSampleConfidence(input.cvdSampleSeconds);
+  const cvdEffective = 50 + (input.cvdBuyPct - 50) * cvdConfidence;
+  const buyPressureComponent = clampPct((input.obiBidPct20 + cvdEffective) / 2);
   notes.push(
-    `Tekanan beli (OBI depth-20 ${input.obiBidPct20.toFixed(1)}%, CVD buy ${input.cvdBuyPct.toFixed(1)}%) -> komponen ${buyPressureComponent.toFixed(1)}/100 (bobot 15%).`,
+    `Tekanan beli (OBI depth-20 ${input.obiBidPct20.toFixed(1)}%, CVD buy ${input.cvdBuyPct.toFixed(1)}% ` +
+      `atas sampel ${input.cvdSampleSeconds === undefined ? "n/a" : `${input.cvdSampleSeconds.toFixed(0)}s`} ` +
+      `-> confidence ${(cvdConfidence * 100).toFixed(0)}%, efektif ${cvdEffective.toFixed(1)}%) ` +
+      `-> komponen ${buyPressureComponent.toFixed(1)}/100 (bobot 15%).`,
   );
 
-  const rankingScore = mmComponent * 0.35 + smartMoneyComponent * 0.3 + regimeComponent * 0.2 + buyPressureComponent * 0.15;
+  const rankingScore =
+    mmComponent * 0.35 +
+    smartMoneyComponent * 0.3 +
+    regimeComponent * 0.2 +
+    buyPressureComponent * 0.15 -
+    mmAdverseComponent * MM_ADVERSE_PENALTY_WEIGHT;
 
   return {
     rankingScore: clampPct(rankingScore),
     components: {
       mm: mmComponent,
+      mmAdverse: mmAdverseComponent,
       smartMoney: smartMoneyComponent,
       regime: regimeComponent,
       buyPressure: buyPressureComponent,

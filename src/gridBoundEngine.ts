@@ -72,6 +72,43 @@ function computeGridCount(rangePercentage: number): number {
   return clamp(raw, MIN_GRID_COUNT, MAX_GRID_COUNT);
 }
 
+export interface GridShape {
+  rangePercentage: number;
+  gridType: GridBoundType;
+  gridCount: number;
+}
+
+/**
+ * Bentuk grid (gridType + gridCount) SEMATA-MATA dari lower/upper.
+ *
+ * Diekstrak dari computeGridBounds() supaya ada SATU definisi: fungsi ini
+ * yang dipakai computeGridBounds sendiri, DAN yang dipakai Stage 4.2 untuk
+ * merekonstruksi bentuk grid dari `lower_price`/`upper_price` di
+ * pipeline_decision_log -- tabel itu tidak menyimpan gridCount/gridType.
+ *
+ * JUJUR TENTANG BATASNYA: hasilnya REKONSTRUKSI, bukan nilai yang dipersist.
+ * Kalau lower/upper yang tersimpan sudah dibulatkan ke tick size oleh
+ * gridBotConfig, gridCount hasil rekonstruksi bisa meleset satu level dari
+ * yang benar-benar dipakai saat keputusan dibuat. Cukup untuk metrik outcome
+ * agregat; JANGAN dipakai untuk merekonstruksi order.
+ */
+export function deriveGridShape(lowerPrice: number, upperPrice: number): GridShape | null {
+  if (
+    !Number.isFinite(lowerPrice) ||
+    !Number.isFinite(upperPrice) ||
+    lowerPrice <= 0 ||
+    upperPrice <= lowerPrice
+  ) {
+    return null;
+  }
+  const rangePercentage = ((upperPrice - lowerPrice) / lowerPrice) * 100;
+  return {
+    rangePercentage,
+    gridType: rangePercentage > GEOMETRIC_RANGE_THRESHOLD_PCT ? "GEOMETRIC" : "ARITHMETIC",
+    gridCount: computeGridCount(rangePercentage),
+  };
+}
+
 /**
  * computeGridBounds() -- tahap "Compass-equivalent" pipeline: dari candle 1h
  * (Wave 1 fullPipeline.ts) + harga saat ini, hasilkan SEMUA parameter grid
@@ -111,9 +148,14 @@ export function computeGridBounds(
   // dengan ATR besar relatif (jarang, tapi mencegah NaN/negative propagation).
   const lowerPrice = Math.max(lowerRaw, currentPrice * 0.001);
 
-  const rangePercentage = lowerPrice > 0 ? ((upperPrice - lowerPrice) / lowerPrice) * 100 : 0;
-  const gridType: GridBoundType = rangePercentage > GEOMETRIC_RANGE_THRESHOLD_PCT ? "GEOMETRIC" : "ARITHMETIC";
-  const gridCount = computeGridCount(rangePercentage);
+  // deriveGridShape() mengembalikan null hanya kalau lower/upper tidak
+  // membentuk range valid (upper <= lower, mis. ATR nol pada pair yang datar
+  // total). Fallback-nya jalur MIN_GRID_COUNT/ARITHMETIC yang PERSIS sama
+  // dengan perilaku sebelumnya -- lihat computeGridCount(0).
+  const shape = deriveGridShape(lowerPrice, upperPrice);
+  const rangePercentage = shape?.rangePercentage ?? 0;
+  const gridType: GridBoundType = shape?.gridType ?? "ARITHMETIC";
+  const gridCount = shape?.gridCount ?? computeGridCount(rangePercentage);
 
   const slBeforeBuffer = lowerPrice - atr * opts.slExtraAtr;
   const stopLossPrice = Math.max(slBeforeBuffer * (1 - opts.slPctBuffer / 100), currentPrice * 0.0001);

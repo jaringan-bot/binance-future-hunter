@@ -17,6 +17,8 @@ export interface PipelineDecisionLogRow {
   /** 4 sub-skor komponen ranking (0-100), migration 0014. null kalau hard
    *  screen gagal sebelum scoreTier1Signals() -- null != 0. */
   mmComponent: number | null;
+  /** K6 (migration 0015): sub-skor MM yang menaikkan risiko. */
+  mmAdverseComponent: number | null;
   smartMoneyComponent: number | null;
   regimeComponent: number | null;
   buyPressureComponent: number | null;
@@ -32,10 +34,40 @@ export interface PipelineDecisionLogRow {
   stopLoss: number | null;
 }
 
+// Batas bucket skor -- SATU sumber kebenaran. scoreBucket() (jalur TS,
+// dipakai backtest detail) dan scoreBucketSqlCase() (jalur agregat SQL,
+// Stage 4.1) DITURUNKAN dari konstanta yang sama supaya tidak bisa
+// menghasilkan bucket berbeda untuk skor yang sama.
+//
+// CATATAN: label bucket ("40_55", "gte_55") MENGKODEKAN angka di bawah.
+// Kalau threshold diubah, label wajib ikut diubah -- kalau tidak, output
+// akan berbohong tentang isi bucket-nya.
+export const SCORE_BUCKET_MID_MIN = 40;
+export const SCORE_BUCKET_HIGH_MIN = 55;
+
 export function scoreBucket(rankingScore: number): ScoreBucket {
-  if (rankingScore >= 55) return "gte_55";
-  if (rankingScore >= 40) return "40_55";
+  if (rankingScore >= SCORE_BUCKET_HIGH_MIN) return "gte_55";
+  if (rankingScore >= SCORE_BUCKET_MID_MIN) return "40_55";
   return "lt_40";
+}
+
+/**
+ * Ekspresi SQL CASE yang memberi bucket IDENTIK dengan scoreBucket().
+ * Dipakai queryPipelineDecisionAggregates() supaya agregasi bisa dilakukan
+ * di SQL atas SELURUH rentang, bukan atas 80 baris terbaru.
+ *
+ * `column` adalah nama kolom milik KODE (bukan input user) -- di-assert
+ * identifier polos supaya tidak ada jalur interpolasi yang bisa
+ * disalahgunakan kalau nanti ada caller lain.
+ */
+export function scoreBucketSqlCase(column = "ranking_score"): string {
+  if (!/^[a-z_][a-z0-9_]*$/.test(column)) {
+    throw new Error(`scoreBucketSqlCase: nama kolom tidak valid: ${column}`);
+  }
+  return (
+    `CASE WHEN ${column} >= ${SCORE_BUCKET_HIGH_MIN} THEN 'gte_55' ` +
+    `WHEN ${column} >= ${SCORE_BUCKET_MID_MIN} THEN '40_55' ELSE 'lt_40' END`
+  );
 }
 
 export function toPipelineDecisionLogRow(
@@ -54,6 +86,7 @@ export function toPipelineDecisionLogRow(
     decision: result.decision,
     rankingScore: result.rankingScore,
     mmComponent: rc ? rc.mm : null,
+    mmAdverseComponent: rc ? rc.mmAdverse : null,
     smartMoneyComponent: rc ? rc.smartMoney : null,
     regimeComponent: rc ? rc.regime : null,
     buyPressureComponent: rc ? rc.buyPressure : null,

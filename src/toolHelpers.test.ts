@@ -3,6 +3,7 @@ import {
   computeCvdFromTrades,
   classifyPriceBias,
   summarizeKlines,
+  dropUnclosedKlines,
   truncateRows,
   calculateADX,
   computeIsolatedSwingLevels,
@@ -91,9 +92,51 @@ describe("summarizeKlines", () => {
     expect(result.bias).toBe("BULLISH");
   });
 
-  it("maps candle fields (openTime/open/high/low/close/volume) as numbers", () => {
+  it("maps candle fields (openTime/open/high/low/close/volume/closeTime) as numbers", () => {
     const result = summarizeKlines([kline("100", "105", "98", "102", "42.5")]);
-    expect(result.candles[0]).toEqual({ openTime: 0, open: 100, high: 105, low: 98, close: 102, volume: 42.5 });
+    // closeTime (index 6) ditambahkan di Stage 3 untuk K8 -- lihat
+    // dropUnclosedKlines(). Additive, tidak mengubah field lain.
+    expect(result.candles[0]).toEqual({
+      openTime: 0,
+      open: 100,
+      high: 105,
+      low: 98,
+      close: 102,
+      volume: 42.5,
+      closeTime: result.candles[0].closeTime,
+    });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// K8 (2026-09-04, Stage 3) -- candle belum close.
+// ─────────────────────────────────────────────────────────────
+describe("dropUnclosedKlines", () => {
+  const HOUR = 3_600_000;
+  function tuple(openTime: number): KlineTuple {
+    return [openTime, "1", "2", "0.5", "1.5", "10", openTime + HOUR - 1, "0", 1, "0", "0", "0"] as unknown as KlineTuple;
+  }
+
+  it("drops the in-progress candle and keeps every closed one", () => {
+    const now = 10 * HOUR + 7 * 60_000; // menit :07 -- persis jadwal cron
+    const raw = [tuple(7 * HOUR), tuple(8 * HOUR), tuple(9 * HOUR), tuple(10 * HOUR)];
+    const closed = dropUnclosedKlines(raw, now);
+    expect(closed).toHaveLength(3);
+    expect(closed[closed.length - 1][0]).toBe(9 * HOUR);
+  });
+
+  it("keeps everything when all candles are closed", () => {
+    const raw = [tuple(7 * HOUR), tuple(8 * HOUR)];
+    expect(dropUnclosedKlines(raw, 20 * HOUR)).toHaveLength(2);
+  });
+
+  it("treats a tuple without a usable closeTime as CLOSED (never silently empties the array)", () => {
+    const noCloseTime = [[0, "1", "2", "0.5", "1.5", "10"]] as unknown as KlineTuple[];
+    expect(dropUnclosedKlines(noCloseTime, 1)).toHaveLength(1);
+  });
+
+  it("handles an empty array", () => {
+    expect(dropUnclosedKlines([], Date.now())).toEqual([]);
   });
 });
 

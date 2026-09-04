@@ -13,6 +13,7 @@ import {
   unwrapDataset,
   parseDataset,
   calibrate,
+  assertSingleMmSemantics,
   EXISTING_WEIGHTS,
   FEATURE_KEYS,
 } from "./calibrate-ranking-weights.mjs";
@@ -226,5 +227,36 @@ describe("calibrate (end-to-end)", () => {
       { mm: 5, sm: 6, regime: 7, bp: 8, forwardReturn: 0.02 },
     ];
     expect(() => calibrate(rows)).toThrow(/degenerate/);
+  });
+});
+
+// Stage 4.5 prasyarat: dataset yang mencampur baris pra- dan pasca-migration
+// 0015 memberi satu bobot untuk DUA besaran berbeda di kolom mm_component.
+// Hasilnya tampak wajar tapi tidak berarti -- karena itu ditolak keras.
+describe("assertSingleMmSemantics", () => {
+  const post = { mm_component: 40, mm_adverse_component: 10, smart_money_component: 50, regime_component: 60, buy_pressure_component: 45, forward_return_4h: 0.01 };
+  const pre = { mm_component: 70, smart_money_component: 50, regime_component: 60, buy_pressure_component: 45, forward_return_4h: 0.01 };
+
+  it("accepts a dataset that is entirely post-0015", () => {
+    expect(assertSingleMmSemantics([post, post])).toEqual({ withAdverse: 2, withoutAdverse: 0 });
+  });
+
+  it("accepts a dataset that is entirely pre-0015", () => {
+    expect(assertSingleMmSemantics([pre, pre])).toEqual({ withAdverse: 0, withoutAdverse: 2 });
+  });
+
+  it("REJECTS a mixed dataset and names the fix", () => {
+    expect(() => assertSingleMmSemantics([pre, post])).toThrow(/mm_adverse_component IS NOT NULL/);
+  });
+
+  it("treats an explicit NULL mm_adverse_component as pre-0015, not as zero", () => {
+    // NULL != "nilainya 0" -- migration 0015 menyatakan ini eksplisit.
+    expect(() => assertSingleMmSemantics([{ ...post, mm_adverse_component: null }, post])).toThrow(/mencampur/);
+  });
+
+  it("is enforced by parseDataset, not only callable on its own", () => {
+    // Guard yang cuma bisa dipanggil manual bukan guard. Ini memastikan
+    // jalur yang BENAR-BENAR dipakai CLI ikut menolak.
+    expect(() => parseDataset([pre, post])).toThrow(/mencampur/);
   });
 });

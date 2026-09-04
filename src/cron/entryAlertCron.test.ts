@@ -10,6 +10,7 @@ import type { DcaHeadResult } from "../dcaPipelineEngine.js";
 import type { TraditionalFuturesResult } from "./traditionalPipelineEngine.js";
 import type { DcaSmartMoneyResult, DcaSmDecision } from "./dcaSmartMoneyAdapter.js";
 import * as pacing from "../pacing.js";
+import { DAILY_LOSS_COUNT_LIMIT, DAILY_LOSS_USD_LIMIT } from "../engine/riskCircuitBreaker.js";
 
 vi.mock("../tools/fullPipeline.js", () => ({ runTriplePipelineForSymbol: vi.fn() }));
 vi.mock("../binanceProxyClient.js", () => ({
@@ -70,6 +71,33 @@ function mockWatchlist(symbols: string[]): void {
   );
 }
 
+// evaluateDcaEntry() SELALU mengisi dcaBotConfig saat mengembalikan
+// DCA_TRADE (itu satu-satunya jalan keluar DCA_TRADE -- lihat
+// dcaPipelineEngine.ts: `cfg == null` -> downgrade ke DCA_WATCH). Fixture
+// wajib mencerminkan kontrak itu, kalau tidak guard risiko K2 (yang memang
+// menolak DCA_TRADE tanpa SL) akan menolaknya dan test menguji kondisi yang
+// tidak pernah ada di produksi.
+function stubDcaBotConfig(): NonNullable<DcaHeadResult["dcaBotConfig"]> {
+  return {
+    direction: "LONG",
+    priceDropStepPct: 1.2,
+    priceDeviationMultiplier: 1.15,
+    dcaOrderSizeMultiplier: 1,
+    maxDcaOrders: 4,
+    takeProfitPerRoundPct: 1.25,
+    leverage: 6,
+    baseOrderMarginUsd: 12,
+    dcaOrderMarginUsd: 12,
+    stopLossPrice: 92,
+    stopLossPct: 8,
+    estLiquidationPrice: 85,
+    projectedMaxLossUsd: 19.4,
+    totalAccumulationDistPct: 9.1,
+    modalRefUsd: 200,
+    marginModeCaveat: "",
+  };
+}
+
 function stubDca(symbol: string, decision: DcaHeadResult["decision"] = "DCA_NO_TRADE"): DcaHeadResult {
   return {
     symbol,
@@ -80,6 +108,7 @@ function stubDca(symbol: string, decision: DcaHeadResult["decision"] = "DCA_NO_T
     effGateAdx4h: 38,
     effCapAdx1d: 44,
     rejectReason: decision === "DCA_NO_TRADE" ? "dead_market" : null,
+    ...(decision === "DCA_TRADE" ? { dcaBotConfig: stubDcaBotConfig() } : {}),
     reasoning: [],
   };
 }
@@ -91,13 +120,15 @@ function stubDcaSm(decision: DcaSmDecision, over: Partial<DcaSmartMoneyResult> =
     safetyScore: decision === "DCA_STOP" ? 10 : decision === "DCA_PAUSE_HARD" ? 40 : 60,
     intervalPct: 2,
     nextTriggerPrice: 98,
+    currentPrice: 100,
+    side: "LONG",
     pauseLevel: decision === "DCA_STOP" ? "STOP" : decision === "DCA_PAUSE_HARD" ? "PAUSE_HARD" : decision === "DCA_PAUSE_SOFT" ? "PAUSE_SOFT" : "NONE",
     pauseReason: decision === "DCA_PAUSE_SOFT" ? "Safety score 60 < 70" : decision === "DCA_PAUSE_HARD" ? "Safety score 40 < 50" : decision === "DCA_STOP" ? "Safety score 10 < 20" : null,
     entryCount: 0,
     maxEntries: 6,
     fundingPercentile: 40,
     oiVelocityPercentile: 50,
-    scenarioCScore: 40,
+    flowAlignmentScore: 40,
     reasons: [],
     ...over,
   };
@@ -133,12 +164,27 @@ function dual(
   return { grid, dca: stubDca(grid.symbol, dcaDecision), trad: stubTrad(tradDecision), dcaSm: null };
 }
 
+// runPipelineInternal() SELALU membangun gridBotConfig untuk symbol yang
+// lolos hard screen (dibangun tanpa syarat sebelum decidePipelineOutcome),
+// jadi grid TRADE tanpa stopLoss tidak pernah terjadi di produksi. Fixture
+// mengikuti kontrak itu supaya guard risiko K2 menguji bug, bukan fixture.
 function tradeResult(symbol: string): SymbolPipelineResult {
   return {
     symbol,
     decision: "TRADE",
     rankingScore: 80,
     hardScreen: { passed: true, reasons: [], quoteVolumeUsd: 1, fundingRate: 0, regime1h: "RANGING", regime4h: "RANGING" },
+    gridBotConfig: {
+      lower: 90,
+      upper: 110,
+      gridCount: 20,
+      gridType: "ARITHMETIC",
+      leverage: 5,
+      marginMode: "ISOLATED",
+      stopLoss: 88,
+      takeProfit: 112,
+      marginModeCaveat: "",
+    },
     reasoning: [],
   } as unknown as SymbolPipelineResult;
 }
@@ -444,8 +490,29 @@ describe("checkEntryAlertForSymbol", () => {
     expect(telegram.sendTelegramAlert).toHaveBeenCalledTimes(1);
   });
 
-  it("does not alert on WATCH at/above the TRADE threshold even without HIGH_RISK (shouldn't happen from the real pipeline, defensive)", async () => {
-    vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue(dual(lowScoreWatchResult("BTCUSDT", "MODERATE", 60)));
+  // G1 (2026-09-04, Stage 2). Test ini DULU meng-assert bahwa WATCH dengan
+  // skor >= ambang TRADE TIDAK dialert -- pita lama `>= 50 && < 55`.
+  // Konsekuensinya kasus paling penting ikut terbuang DIAM-DIAM: skor
+  // tinggi + gridRisk HIGH_RISK (decidePipelineOutcome memberi WATCH untuk
+  // HIGH_RISK berapa pun skornya). Justru itu yang harus dilihat manusia.
+  it("alerts a HIGH_RISK WATCH with a high score, and labels the risk explicitly", async () => {
+    vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue(
+      dual(lowScoreWatchResult("BTCUSDT", "HIGH_RISK", 72)),
+    );
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
+
+    await checkEntryAlertForSymbol("BTCUSDT", ENV, 1_000_000);
+
+    expect(telegram.sendTelegramAlert).toHaveBeenCalledTimes(1);
+    const msg = vi.mocked(telegram.sendTelegramAlert).mock.calls[0][1];
+    expect(msg).toContain("HIGH RISK");
+    expect(msg).not.toContain("GRID TRADE");
+  });
+
+  it("still mutes a WATCH below the alert floor", async () => {
+    vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue(
+      dual(lowScoreWatchResult("BTCUSDT", "MODERATE", 30)),
+    );
     vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
 
     await checkEntryAlertForSymbol("BTCUSDT", ENV, 1_000_000);
@@ -599,7 +666,7 @@ describe("checkEntryAlertForSymbol", () => {
     expect(telegram.sendTelegramAlert).not.toHaveBeenCalled();
     expect(d1Client.upsertEntryAlertState).toHaveBeenCalledWith({
       symbol: "BTCUSDT",
-      lastDecision: "NO_TRADE/DCA_PAUSE_SOFT/TRAD_NO_TRADE",
+      lastDecision: "NO_TRADE/DCA_WATCH+DCA_PAUSE_SOFT/TRAD_NO_TRADE",
       lastAlertAt: null,
     });
   });
@@ -613,7 +680,7 @@ describe("checkEntryAlertForSymbol", () => {
     });
     vi.mocked(d1Client.getEntryAlertState).mockResolvedValue({
       symbol: "BTCUSDT",
-      lastDecision: "NO_TRADE/DCA_PAUSE_SOFT/TRAD_NO_TRADE",
+      lastDecision: "NO_TRADE/DCA_WATCH+DCA_PAUSE_SOFT/TRAD_NO_TRADE",
       lastAlertAt: 1_000_000,
     });
 
@@ -660,7 +727,7 @@ describe("checkEntryAlertForSymbol", () => {
     expect(msg).toContain("DCA LAYAK ENTRY");
     expect(d1Client.upsertEntryAlertState).toHaveBeenCalledWith({
       symbol: "ETHUSDT",
-      lastDecision: "NO_TRADE/DCA_TRADE/TRAD_NO_TRADE",
+      lastDecision: "NO_TRADE/DCA_TRADE+DCA_TRADE/TRAD_NO_TRADE",
       lastAlertAt: 1_000_000,
     });
   });
@@ -696,7 +763,7 @@ describe("checkEntryAlertForSymbol", () => {
   it("mutes TRADE alerts when the daily-loss circuit is tripped and sends one circuit warning", async () => {
     vi.mocked(kvConfig.getJson).mockImplementation(async (key: string) => {
       if (key === "state:daily_loss_circuit") {
-        return { count: 3, total_loss: 60, window_start: 1 };
+        return { count: DAILY_LOSS_COUNT_LIMIT, total_loss: DAILY_LOSS_USD_LIMIT, window_start: 1 };
       }
       return null;
     });
@@ -706,7 +773,7 @@ describe("checkEntryAlertForSymbol", () => {
     await checkEntryAlertForSymbol("BTCUSDT", ENV, 1_000_000);
 
     expect(telegram.sendTelegramAlert).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(telegram.sendTelegramAlert).mock.calls[0][1]).toContain("Circuit Breaker");
+    expect(vi.mocked(telegram.sendTelegramAlert).mock.calls[0][1]).toContain("Alert budget harian");
     expect(vi.mocked(telegram.sendTelegramAlert).mock.calls[0][1]).not.toContain("GRID TRADE");
     expect(d1Client.upsertEntryAlertState).toHaveBeenCalledWith({
       symbol: "BTCUSDT",
@@ -718,7 +785,7 @@ describe("checkEntryAlertForSymbol", () => {
   it("still sends high-quality WATCH when the daily-loss circuit is tripped", async () => {
     vi.mocked(kvConfig.getJson).mockImplementation(async (key: string) => {
       if (key === "state:daily_loss_circuit") {
-        return { count: 3, total_loss: 60, window_start: 1, last_notified_at: 1_000_000 };
+        return { count: DAILY_LOSS_COUNT_LIMIT, total_loss: DAILY_LOSS_USD_LIMIT, window_start: 1, last_notified_at: 1_000_000 };
       }
       return null;
     });
@@ -998,5 +1065,144 @@ describe("runEntryAlertCheck", () => {
     expect(fullPipeline.runTriplePipelineForSymbol).toHaveBeenCalledWith("BTCUSDT", expect.anything(), expect.anything(), undefined);
     expect(fullPipeline.runTriplePipelineForSymbol).toHaveBeenCalledWith("ETHUSDT", expect.anything(), expect.anything(), undefined);
     expect(telegram.sendTelegramAlert).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// K1 + K2 REGRESSION GUARDS (2026-09-04, Stage 1 signal-integrity)
+//
+// Kelas test yang ABSEN sebelumnya. 849 test hijau tidak menangkap bahwa
+// DCA Smart Money V3 mem-bypass seluruh hard gate legacy, karena setiap
+// test menstub kedua engine SEPAKAT. Test di bawah sengaja membuat mereka
+// BERSELISIH -- itu satu-satunya cara cacatnya kelihatan.
+// ─────────────────────────────────────────────────────────────
+describe("K1: legacy DCA engine adalah pre-gate wajib", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(kvConfig.getJson).mockReset().mockResolvedValue(null);
+    vi.mocked(kvConfig.putJson).mockReset().mockResolvedValue(undefined);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("does NOT alert when V3 says DCA_TRADE but the legacy engine hard-rejected the symbol", async () => {
+    // Ini SKENARIO BUG ASLINYA: legacy menolak (mis. funding_extreme /
+    // macro_trend_opposing / liquidity), V3 tidak tahu apa-apa soal gate itu
+    // dan bilang TRADE. Sebelum perbaikan, alert TETAP terkirim.
+    vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue({
+      grid: noTradeResult("SCAMUSDT"),
+      dca: { ...stubDca("SCAMUSDT", "DCA_NO_TRADE"), direction: "LONG", rejectReason: "funding_extreme (|0.0450%| > 0.03%)" },
+      trad: stubTrad(),
+      dcaSm: stubDcaSm("DCA_TRADE"),
+    });
+
+    await checkEntryAlertForSymbol("SCAMUSDT", ENV, 1_000_000);
+
+    expect(telegram.sendTelegramAlert).not.toHaveBeenCalled();
+  });
+
+  it("downgrades to WATCH when legacy says WATCH and V3 says TRADE (severity minimum, never the max)", async () => {
+    vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue({
+      grid: noTradeResult("ETHUSDT"),
+      dca: stubDca("ETHUSDT", "DCA_WATCH"),
+      trad: stubTrad(),
+      dcaSm: stubDcaSm("DCA_TRADE"),
+    });
+
+    await checkEntryAlertForSymbol("ETHUSDT", ENV, 1_000_000);
+
+    expect(telegram.sendTelegramAlert).toHaveBeenCalledTimes(1);
+    const msg = vi.mocked(telegram.sendTelegramAlert).mock.calls[0][1];
+    expect(msg).toContain("DCA TUNGGU");
+    expect(msg).not.toContain("DCA LAYAK ENTRY");
+  });
+
+  it("still blocks when legacy says TRADE but V3 pauses (V3 may also only lower)", async () => {
+    vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue({
+      grid: noTradeResult("BTCUSDT"),
+      dca: stubDca("BTCUSDT", "DCA_TRADE"),
+      trad: stubTrad(),
+      dcaSm: stubDcaSm("DCA_PAUSE_HARD"),
+    });
+
+    await checkEntryAlertForSymbol("BTCUSDT", ENV, 1_000_000);
+
+    expect(telegram.sendTelegramAlert).not.toHaveBeenCalled();
+  });
+
+  it("alerts DCA_TRADE only when BOTH engines agree", async () => {
+    vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue({
+      grid: noTradeResult("SOLUSDT"),
+      dca: stubDca("SOLUSDT", "DCA_TRADE"),
+      trad: stubTrad(),
+      dcaSm: stubDcaSm("DCA_TRADE"),
+    });
+
+    await checkEntryAlertForSymbol("SOLUSDT", ENV, 1_000_000);
+
+    expect(telegram.sendTelegramAlert).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(telegram.sendTelegramAlert).mock.calls[0][1]).toContain("DCA LAYAK ENTRY");
+  });
+});
+
+describe("K2: alert actionable wajib membawa parameter risiko", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(kvConfig.getJson).mockReset().mockResolvedValue(null);
+    vi.mocked(kvConfig.putJson).mockReset().mockResolvedValue(undefined);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("refuses to send a DCA_TRADE alert that carries no dcaBotConfig (no SL / leverage / sizing)", async () => {
+    // Kedua engine sepakat TRADE, tapi parameter risikonya hilang. Sebelum
+    // perbaikan, formatEntryAlert() meleset di ketiga cabang blok DCA dan
+    // user menerima "🔵 DCA LAYAK ENTRY" tanpa satu baris angka pun.
+    const dcaNoConfig: DcaHeadResult = { ...stubDca("XRPUSDT", "DCA_TRADE") };
+    delete (dcaNoConfig as { dcaBotConfig?: unknown }).dcaBotConfig;
+    vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue({
+      grid: noTradeResult("XRPUSDT"),
+      dca: dcaNoConfig,
+      trad: stubTrad(),
+      dcaSm: stubDcaSm("DCA_TRADE"),
+    });
+
+    await checkEntryAlertForSymbol("XRPUSDT", ENV, 1_000_000);
+
+    expect(telegram.sendTelegramAlert).not.toHaveBeenCalled();
+  });
+
+  it("cancels the whole alert when an actionable head lacks a stop-loss (invariant guard)", async () => {
+    // Grid TRADE tanpa gridBotConfig -- tidak mungkin di produksi, tapi
+    // guard-nya justru untuk jalur kode yang belum terbayang.
+    const gridNoConfig = { ...tradeResult("ADAUSDT") } as SymbolPipelineResult;
+    delete (gridNoConfig as { gridBotConfig?: unknown }).gridBotConfig;
+    vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue({
+      grid: gridNoConfig,
+      dca: stubDca("ADAUSDT"),
+      trad: stubTrad(),
+      dcaSm: null,
+    });
+
+    await checkEntryAlertForSymbol("ADAUSDT", ENV, 1_000_000);
+
+    expect(telegram.sendTelegramAlert).not.toHaveBeenCalled();
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining("alert DIBATALKAN"));
+  });
+
+  it("labels a DCA WATCH alert explicitly as NOT an entry signal", async () => {
+    vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue({
+      grid: noTradeResult("DOGEUSDT"),
+      dca: stubDca("DOGEUSDT", "DCA_WATCH"),
+      trad: stubTrad(),
+      dcaSm: stubDcaSm("DCA_WATCH"),
+    });
+
+    await checkEntryAlertForSymbol("DOGEUSDT", ENV, 1_000_000);
+
+    expect(telegram.sendTelegramAlert).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(telegram.sendTelegramAlert).mock.calls[0][1]).toContain("BUKAN sinyal entry");
   });
 });
