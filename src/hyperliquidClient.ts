@@ -80,6 +80,13 @@ interface HyperliquidRawPosition {
 
 interface HyperliquidClearinghouseResponse {
   assetPositions: { position: HyperliquidRawPosition; type: string }[];
+  marginSummary?: {
+    accountValue?: string;
+    totalNtlPos?: string;
+    totalRawUsd?: string;
+    totalMarginUsed?: string;
+  };
+  withdrawable?: string;
 }
 
 export interface HyperliquidPosition {
@@ -90,7 +97,38 @@ export interface HyperliquidPosition {
   leverage: number | null;
 }
 
-export async function getUserClearinghouseState(address: string): Promise<HyperliquidPosition[]> {
+export interface HyperliquidClearinghouseSnapshot {
+  address: string;
+  accountValue: number | null;
+  withdrawable: number | null;
+  totalMarginUsed: number | null;
+  positions: HyperliquidPosition[];
+}
+
+function parsePositions(data: HyperliquidClearinghouseResponse): HyperliquidPosition[] {
+  return (data.assetPositions ?? [])
+    .map(({ position }): HyperliquidPosition | null => {
+      const szi = parseFloat(position.szi);
+      if (szi === 0 || Number.isNaN(szi)) return null;
+      const entryPx = parseFloat(position.entryPx);
+      return {
+        coin: position.coin,
+        side: szi > 0 ? "long" : "short",
+        size: Math.abs(szi),
+        entryPrice: Number.isNaN(entryPx) ? null : entryPx,
+        leverage: position.leverage?.value ?? null,
+      };
+    })
+    .filter((p): p is HyperliquidPosition => p !== null);
+}
+
+function parseOptionalFloat(value: string | undefined): number | null {
+  if (value === undefined) return null;
+  const n = parseFloat(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+async function fetchClearinghouse(address: string): Promise<HyperliquidClearinghouseResponse> {
   const response = await cachedFetch(
     HYPERLIQUID_INFO_URL,
     {
@@ -106,20 +144,21 @@ export async function getUserClearinghouseState(address: string): Promise<Hyperl
     throw new Error(`Hyperliquid HTTP ${response.status}: ${(await response.text()).slice(0, 200)}`);
   }
 
-  const data = (await response.json()) as HyperliquidClearinghouseResponse;
+  return (await response.json()) as HyperliquidClearinghouseResponse;
+}
 
-  return data.assetPositions
-    .map(({ position }): HyperliquidPosition | null => {
-      const szi = parseFloat(position.szi);
-      if (szi === 0 || Number.isNaN(szi)) return null;
-      const entryPx = parseFloat(position.entryPx);
-      return {
-        coin: position.coin,
-        side: szi > 0 ? "long" : "short",
-        size: Math.abs(szi),
-        entryPrice: Number.isNaN(entryPx) ? null : entryPx,
-        leverage: position.leverage?.value ?? null,
-      };
-    })
-    .filter((p): p is HyperliquidPosition => p !== null);
+export async function getUserClearinghouseState(address: string): Promise<HyperliquidPosition[]> {
+  return parsePositions(await fetchClearinghouse(address));
+}
+
+/** Snapshot untuk validasi kandidat whale -- posisi + equity ringkas (marginSummary). */
+export async function getUserClearinghouseSnapshot(address: string): Promise<HyperliquidClearinghouseSnapshot> {
+  const data = await fetchClearinghouse(address);
+  return {
+    address,
+    accountValue: parseOptionalFloat(data.marginSummary?.accountValue),
+    withdrawable: parseOptionalFloat(data.withdrawable),
+    totalMarginUsed: parseOptionalFloat(data.marginSummary?.totalMarginUsed),
+    positions: parsePositions(data),
+  };
 }

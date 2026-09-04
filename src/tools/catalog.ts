@@ -148,6 +148,12 @@ const CATALOG_METADATA: Record<string, CatalogMetadata> = {
     useCase: "Agregat posisi wallet whale Hyperliquid (watchlist) per coin",
     dependencies: [],
   },
+  hyperliquid_validate_candidate_wallet: {
+    category: "cross-exchange",
+    tokenCost: "low",
+    useCase: "Validasi 1 address kandidat (equity + posisi) sebelum masuk watchlist",
+    dependencies: [],
+  },
   whalescope_compare_orderbook_depth: {
     category: "cross-exchange",
     tokenCost: "medium",
@@ -165,6 +171,12 @@ const CATALOG_METADATA: Record<string, CatalogMetadata> = {
     tokenCost: "medium",
     useCase: "Trend CFTC COT multi-minggu dari histori lokal D1 (rate-of-change, bukan cuma WoW)",
     dependencies: ["history"],
+  },
+  binance_get_options_positioning: {
+    category: "cross-exchange",
+    tokenCost: "medium",
+    useCase: "Put/call OI skew options Deribit (BTC/ETH), belum dikalibrasi",
+    dependencies: [],
   },
   whalescope_get_stablecoin_supply: {
     category: "composite",
