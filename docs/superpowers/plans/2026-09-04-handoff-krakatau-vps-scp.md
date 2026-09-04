@@ -28,10 +28,12 @@ ini, dan cron-nya harus tetap tercabut (lihat CLAUDE.md).
   `package.json` cuma punya script `start`. Perubahan handler.mjs berangkat
   **tanpa jaring pengaman unit test** sehingga verifikasi WAJIB perilaku
   pasca-deploy (bagian Verifikasi 2), bukan sekadar "service aktif".
-- **Test gateway tidak tercakup `npm test` root.** `vitest.config.ts` cuma
-  include `src/**/*.test.ts` + `scripts/**/*.test.mjs`. Test `stream-gateway/`
-  hanya jalan kalau dipanggil manual dari direktorinya. Jadi "npm test hijau"
-  di root **bukan** bukti gateway sehat. Layak dibereskan terpisah.
+- **DIPERBAIKI 2026-09-04:** test gateway dulu TIDAK tercakup `npm test` root
+  (`vitest.config.ts` cuma include `src/**` + `scripts/**`). Sekarang script
+  `test` di package.json root menjalankan gateway dulu, baru vitest:
+  **59 + 951 = 1010 test**. Kegagalan gateway sekarang benar-benar
+  menggagalkan `npm test` (diverifikasi lewat mutasi, exit 1). Jadi
+  "npm test hijau" SEKARANG sudah mencakup gateway.
 
 ---
 

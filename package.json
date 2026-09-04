@@ -8,7 +8,9 @@
     "build": "tsc --noEmit",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "npm --prefix stream-gateway test && vitest run",
+    "test:worker": "vitest run",
+    "test:gateway": "npm --prefix stream-gateway test",
     "token-audit": "node scripts/token-audit.mjs"
   },
   "dependencies": {
