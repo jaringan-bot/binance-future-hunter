@@ -5,16 +5,43 @@
 > | Stage | Isi | Status | Commit | Deploy |
 > |---|---|---|---|---|
 > | 0 | Plan file ini | ✅ [Semeru] 2026-09-04 | — | — |
-> | 1 | Blocker: uang, uptime, buta (K1, K2, I1, I2, B1/B2) | ✅ **KODE SELESAI** [Semeru] 2026-09-04 — menunggu commit + acc deploy | — | ⏳ |
-> | 2 | Reachability (K4/D3, K5, G1, I6, D1/D2, G6) + **K10 baru** | ✅ **KODE SELESAI** [Semeru] 2026-09-04 | — | ⏳ |
-> | 3 | Kualitas sinyal / anti-halu (K8, K3, K6, K9, G3-G5, K7) + migration 0015 | ✅ **KODE SELESAI** [Semeru] 2026-09-04 | — | ⏳ |
-> | 4 | Backtest valid + observability + kalibrasi (B3, B4, backfill, I7) | ✅ **KODE SELESAI** [Semeru] 2026-09-04 (4.5 terkunci — lihat di bawah) | — | ⏳ |
+> | 1 | Blocker: uang, uptime, buta (K1, K2, I1, I2, B1/B2) | ✅ **MERGED** [Semeru] 2026-09-04 (PR #12) | `71e0564` | ⏳ |
+> | 2 | Reachability (K4/D3, K5, G1, I6, D1/D2, G6) + **K10 baru** | ✅ **MERGED** [Semeru] 2026-09-04 (PR #12) | `71e0564` | ⏳ |
+> | 3 | Kualitas sinyal / anti-halu (K8, K3, K6, K9, G3-G5, K7) + migration 0015 | ✅ **MERGED** [Semeru] 2026-09-04 (PR #13) | `585f730` | ⏳ |
+> | 4 | Backtest valid + observability + kalibrasi (B3, B4, backfill, I7) + migration 0016 | ✅ **MERGED** [Semeru] 2026-09-04 (PR #15) — 4.4 & 4.5 lihat di bawah | `f4ae447` | ⏳ |
 >
-> ⚠️ **KOREKSI PENTING 2026-09-04 — Stage 1/2/3 TIDAK PERNAH DI-DEPLOY.**
-> Diperiksa langsung ke produksi; ketiganya masih hanya ada di branch.
-> Detail bukti di bagian "Verifikasi live" paling bawah. Semua "perubahan
-> perilaku yang DIHARAPKAN" di blok Stage 1/2/3 di bawah masih **prediksi
-> yang belum diuji**, bukan hasil.
+> ### ⏭️ SATU-SATUNYA yang tersisa: Krakatau (GATED, user sudah acc "merge + deploy")
+>
+> Keempat stage sudah di `main` (`f4ae447`), `tsc` bersih + **951 test hijau**
+> diverifikasi di tree `main` hasil merge. Repo ini **tidak punya CI**, jadi
+> verifikasi lokal itulah satu-satunya gate — tidak ada yang mengeceknya lagi
+> di sisi GitHub.
+>
+> **Urutan WAJIB — migration DULU, baru deploy.** Kalau dibalik, worker baru
+> akan meng-INSERT `mm_adverse_component` / membaca `outcome_attempts` ke
+> tabel yang belum punya kolomnya → seluruh `pipeline_decision_log` write
+> gagal dan backfill mati, diam-diam.
+>
+> ```bash
+> npx wrangler d1 migrations apply binance-future-hunter-db --remote   # 0015 + 0016
+> npx wrangler deploy
+> npx wrangler secret put ADMIN_SECRET                                 # 4.4 / I7
+> ```
+>
+> Menyusul, tidak memblokir Worker (Stage 1.4 — relay teruskan header weight
+> + timeout + fix prototype-pollution): `scp proxy-standalone/handler.mjs` +
+> restart di **kedua** host relay.
+>
+> **Lapor balik di chat** (Semeru yang tulis ke plan file ini): version id
+> hasil `wrangler deploy`, output `migrations apply`, dan tick cron pertama
+> pasca-deploy.
+> ⚠️ **KOREKSI PENTING 2026-09-04 — Stage 1/2/3 belum pernah menyentuh
+> produksi.** Diperiksa langsung ke worker live pukul ~10:20 UTC: saat itu
+> ketiganya masih hanya ada di branch (sekarang sudah di `main`, tapi
+> **belum di-deploy**). Detail bukti di bagian "Verifikasi live" paling
+> bawah. Semua "perubahan perilaku yang DIHARAPKAN" di blok Stage 1/2/3/4
+> di bawah masih **prediksi yang belum diuji**, bukan hasil — dan baru bisa
+> diuji setelah `migrations apply` + `wrangler deploy` di atas.
 >
 > **Keputusan user 2026-09-04:** legacy DCA jadi pre-gate wajib · fidelitas data
 > tanpa call Binance tambahan · backtest fix aritmetika + metrik grid-native ·
@@ -847,10 +874,15 @@ benar untuk KEDUANYA — yang salah cuma kalimat prediksinya.
 
 ### Konsekuensi
 
-Urutan deploy Krakatau sekarang: **0015 → 0016 → `wrangler deploy`**, dan
-seluruh "perubahan perilaku yang DIHARAPKAN" di blok Stage 1/2/3 baru bisa
-diuji setelah itu. Jam nol untuk 4.5 (">= 2 minggu data pasca-Stage-3") juga
-baru mulai dari situ.
+Urutan deploy Krakatau: **0015 → 0016 → `wrangler deploy`** (perintah lengkap
+di blok status paling atas), dan seluruh "perubahan perilaku yang DIHARAPKAN"
+di blok Stage 1/2/3/4 baru bisa diuji setelah itu. Jam nol untuk 4.5
+(">= 2 minggu data pasca-Stage-3") juga baru mulai dari situ.
+
+**Ukur ulang tepat setelah deploy, pakai baseline di tabel atas sebagai
+pembanding** — dan potong di timestamp deploy, jangan campur baris pra- dan
+pasca-deploy dalam satu agregat (`mm_component` dan `forward_return_*` punya
+semantik berbeda di kedua sisi).
 
 ---
 
