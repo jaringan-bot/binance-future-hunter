@@ -8,8 +8,17 @@ import { z } from "zod";
 import * as binanceProxy from "../binanceProxyClient.js";
 import type { KlineTuple } from "../binanceProxyClient.js";
 import { errorResult, parseTimeParam } from "../shared.js";
-import { queryPipelineDecisionLog, type PipelineDecisionLogRow } from "../d1Client.js";
+import {
+  queryPipelineDecisionLog,
+  queryPipelineDecisionAggregates,
+  type PipelineDecisionLogRow,
+  type PipelineDecisionAggregateGroup,
+  type PipelineDecisionAggregates,
+} from "../d1Client.js";
 import { PIPELINE_DECISION_LOG_SOURCES, didStopLossTouch, scoreBucket, type ScoreBucket } from "../pipelineDecisionLog.js";
+import { deriveGridShape, type GridBoundType } from "../gridBoundEngine.js";
+import { computeGridVelocity } from "../gridVelocity.js";
+import type { KlineCandle } from "../toolHelpers.js";
 import { registerSafeTool } from "../toolWrapper.js";
 import { ToolResponseBuilder } from "../responseBuilder.js";
 import { fmtTime } from "../format.js";
@@ -98,38 +107,194 @@ export function evaluateDecisionForward(candles: KlineTuple[], stopLoss: number 
   };
 }
 
+// ─────────────────────────────────────────────────────────────
+// B4 / Stage 4.2 -- METRIK GRID-NATIVE
+//
+// Directional long return BUKAN PnL grid. Harga bisa +5% (return "menang")
+// sementara grid-nya justru rugi karena keluar range ke atas: order jual
+// habis, posisi jadi flat di harga rendah, dan kenaikan sisanya tidak
+// diikuti. Sebaliknya harga bisa berakhir rata (return ~0) sementara grid
+// untung karena bolak-balik di dalam range berkali-kali.
+//
+// Empat metrik di bawah dihitung dari klines 5m YANG SUDAH DIAMBIL untuk
+// forward return (nol fetch tambahan) plus lower/upper yang SUDAH ada di
+// pipeline_decision_log -- karena itu TIDAK BUTUH migration.
+//
+// BATASNYA, eksplisit:
+//  * gridCount/gridType TIDAK dipersist di pipeline_decision_log; keduanya
+//    DIREKONSTRUKSI dari lower/upper lewat deriveGridShape() -- fungsi yang
+//    sama yang dipakai computeGridBounds(). Kalau lower/upper yang tersimpan
+//    sudah dibulatkan ke tick size, gridCount bisa meleset satu level.
+//  * `crossingCandles` memakai proxy computeGridVelocity() apa adanya
+//    (range candle >= step grid), jadi ia MEWARISI caveat proxy itu: bukan
+//    bukti match penuh benar-benar terjadi, cuma indikasi pergerakan cukup
+//    lebar untuk melintasi satu step.
+//  * Ini TETAP bukan simulasi fill. Tidak ada order book, tidak ada antrian,
+//    tidak ada fee per match. Jangan baca angkanya sebagai PnL.
+// ─────────────────────────────────────────────────────────────
+export interface GridOutcomeMetrics {
+  gridCount: number;
+  gridType: GridBoundType;
+  stepSize: number;
+  /** Harga pernah keluar [lower, upper] di jendela ini (arah mana pun). */
+  exitedRange: boolean;
+  exitedAbove: boolean;
+  exitedBelow: boolean;
+  sampleCandles: number;
+  candlesInRange: number;
+  /** Fraksi candle yang CLOSE-nya di dalam [lower, upper]. */
+  timeInRangePct: number;
+  crossingCandles: number;
+  crossingRate: number;
+}
+
+export function evaluateGridOutcome(
+  raw: KlineTuple[],
+  lowerPrice: number | null,
+  upperPrice: number | null,
+): GridOutcomeMetrics | null {
+  if (lowerPrice == null || upperPrice == null || raw.length === 0) return null;
+  const shape = deriveGridShape(lowerPrice, upperPrice);
+  if (!shape) return null;
+
+  const candles: KlineCandle[] = raw.map((k) => ({
+    openTime: k[0],
+    open: parseFloat(k[1]),
+    high: parseFloat(k[2]),
+    low: parseFloat(k[3]),
+    close: parseFloat(k[4]),
+    volume: parseFloat(k[5]),
+  }));
+  const usable = candles.filter(
+    (c) => Number.isFinite(c.high) && Number.isFinite(c.low) && Number.isFinite(c.close),
+  );
+  if (usable.length === 0) return null;
+
+  const exitedAbove = usable.some((c) => c.high > upperPrice);
+  const exitedBelow = usable.some((c) => c.low < lowerPrice);
+  const candlesInRange = usable.filter((c) => c.close >= lowerPrice && c.close <= upperPrice).length;
+
+  // computeGridVelocity() dipakai APA ADANYA -- bukan rumus crossing baru --
+  // supaya definisi "crossing" di backtest identik dengan yang dilaporkan
+  // whalescope_full_pipeline. matchesNeeded 0: estimasi break-even tidak
+  // relevan di sini, cuma crossingCandles/crossingRate yang dipakai.
+  const velocity = computeGridVelocity({
+    candles: usable,
+    lowerPrice,
+    upperPrice,
+    gridCount: shape.gridCount,
+    gridType: shape.gridType,
+    matchesNeeded: 0,
+    candleDurationHours: 5 / 60,
+  });
+
+  return {
+    gridCount: shape.gridCount,
+    gridType: shape.gridType,
+    stepSize: velocity.stepSize,
+    exitedRange: exitedAbove || exitedBelow,
+    exitedAbove,
+    exitedBelow,
+    sampleCandles: usable.length,
+    candlesInRange,
+    timeInRangePct: candlesInRange / usable.length,
+    crossingCandles: velocity.crossingCandles,
+    crossingRate: velocity.crossingRate,
+  };
+}
+
+/** Ringkasan metrik grid atas sampel detail -- rata-rata sederhana. */
+export function summarizeGridOutcomes(metrics: GridOutcomeMetrics[]): {
+  sampleSize: number;
+  exitedRangeRate: number;
+  exitedAboveRate: number;
+  exitedBelowRate: number;
+  avgTimeInRangePct: number;
+  avgCrossingRate: number;
+} | null {
+  if (metrics.length === 0) return null;
+  const n = metrics.length;
+  const mean = (pick: (m: GridOutcomeMetrics) => number) => metrics.reduce((a, m) => a + pick(m), 0) / n;
+  return {
+    sampleSize: n,
+    exitedRangeRate: mean((m) => (m.exitedRange ? 1 : 0)),
+    exitedAboveRate: mean((m) => (m.exitedAbove ? 1 : 0)),
+    exitedBelowRate: mean((m) => (m.exitedBelow ? 1 : 0)),
+    avgTimeInRangePct: mean((m) => m.timeInRangePct),
+    avgCrossingRate: mean((m) => m.crossingRate),
+  };
+}
+
 export function emptyBucket(): BucketStats {
   return { sampleSize: 0, winRate: 0, avgReturn: 0, slTouchRate: null, slTouchSample: 0 };
 }
 
-export function aggregateKeyedRows(
-  rows: { key: string; forwardReturn: number; slTouch: boolean | null }[],
+// B3 (Stage 4.1): agregasi TIDAK LAGI dilakukan di TypeScript atas baris
+// yang di-fetch. `aggregateKeyedRows()` yang lama dihapus bersama test-nya:
+// ia menghitung dengan benar, tapi HANYA atas <= 80 baris terbaru, jadi
+// test-nya membuktikan aritmetika yang benar atas sampel yang salah. Dua
+// fungsi di bawah menerjemahkan hasil GROUP BY dari SQL (seluruh rentang)
+// ke bentuk tampilan yang sama.
+
+/** Biaya eksekusi diterapkan di sini, bukan di SQL: SQL menyimpan gross. */
+export function aggregateGroupToStats(
+  g: PipelineDecisionAggregateGroup,
+  execCostRoundTrip: number,
+): BucketStats {
+  return {
+    sampleSize: g.sampleSize,
+    winRate: g.sampleSize ? g.winCount / g.sampleSize : 0,
+    avgReturn: g.sampleSize ? g.avgGrossReturn - execCostRoundTrip : 0,
+    slTouchRate: g.slKnown ? g.slHits / g.slKnown : null,
+    slTouchSample: g.slKnown,
+  };
+}
+
+export function aggregateGroupsToStats(
+  groups: PipelineDecisionAggregateGroup[],
+  execCostRoundTrip: number,
 ): Record<string, BucketStats> {
-  const groups = new Map<string, { returns: number[]; slHits: number; slKnown: number }>();
-  for (const r of rows) {
-    let g = groups.get(r.key);
-    if (!g) {
-      g = { returns: [], slHits: 0, slKnown: 0 };
-      groups.set(r.key, g);
-    }
-    g.returns.push(r.forwardReturn);
-    if (r.slTouch !== null) {
-      g.slKnown += 1;
-      if (r.slTouch) g.slHits += 1;
-    }
-  }
   const out: Record<string, BucketStats> = {};
-  for (const [key, g] of groups) {
-    const winCount = g.returns.filter((x) => x > 0).length;
-    out[key] = {
-      sampleSize: g.returns.length,
-      winRate: g.returns.length ? winCount / g.returns.length : 0,
-      avgReturn: g.returns.length ? g.returns.reduce((a, b) => a + b, 0) / g.returns.length : 0,
-      slTouchRate: g.slKnown ? g.slHits / g.slKnown : null,
-      slTouchSample: g.slKnown,
-    };
-  }
+  for (const g of groups) out[g.key] = aggregateGroupToStats(g, execCostRoundTrip);
   return out;
+}
+
+/**
+ * Gabungkan grup jadi satu total. VALID karena `decision` MEMPARTISI baris:
+ * tiap baris punya tepat satu decision, jadi menjumlahkan sampleSize dan
+ * merata-rata berbobot tidak menghitung baris dua kali. JANGAN dipakai
+ * mencampur byDecision dengan byScoreBucket -- keduanya partisi atas
+ * himpunan yang SAMA, menggabungkannya akan menghitung ganda.
+ */
+export function sumAggregateGroups(groups: PipelineDecisionAggregateGroup[]): PipelineDecisionAggregateGroup {
+  let sampleSize = 0;
+  let winCount = 0;
+  let weightedGross = 0;
+  let slHits = 0;
+  let slKnown = 0;
+  let min = Infinity;
+  let max = -Infinity;
+  for (const g of groups) {
+    sampleSize += g.sampleSize;
+    winCount += g.winCount;
+    weightedGross += g.avgGrossReturn * g.sampleSize;
+    slHits += g.slHits;
+    slKnown += g.slKnown;
+    if (g.sampleSize > 0) {
+      min = Math.min(min, g.minGrossReturn);
+      max = Math.max(max, g.maxGrossReturn);
+    }
+  }
+  return {
+    key: "all",
+    sampleSize,
+    winCount,
+    avgGrossReturn: sampleSize ? weightedGross / sampleSize : 0,
+    minGrossReturn: sampleSize ? min : 0,
+    maxGrossReturn: sampleSize ? max : 0,
+    slHits,
+    slKnown,
+  };
 }
 
 function fmtPct(n: number): string {
@@ -207,6 +372,20 @@ export function registerPipelineDecisionBacktestTools(server: McpServer): void {
           return errorResult(new Error("startTime harus lebih awal dari endTime, dan keduanya wajib diisi."));
         }
 
+        const execCostRoundTripPre = 2 * (fee_bps + slippage_bps) / 10_000;
+        // B3: agregat DULU, atas seluruh rentang, tanpa satu pun fetch
+        // klines. `rows` di bawah cuma sampel detail untuk tabel tampilan
+        // (dan satu-satunya yang memakai kuota kline lookup).
+        const aggregates = await queryPipelineDecisionAggregates({
+          startTime: startMs,
+          endTime: endMs,
+          symbol,
+          source: source === "all" ? undefined : source,
+          sourceRef: source_ref,
+          window: forwardWindow,
+          execCostRoundTrip: execCostRoundTripPre,
+        });
+
         const rows = await queryPipelineDecisionLog({
           startTime: startMs,
           endTime: endMs,
@@ -216,7 +395,7 @@ export function registerPipelineDecisionBacktestTools(server: McpServer): void {
           limit,
         });
 
-        if (rows.length === 0) {
+        if (aggregates.rowsInRange === 0) {
           return {
             content: [
               {
@@ -230,9 +409,13 @@ export function registerPipelineDecisionBacktestTools(server: McpServer): void {
         }
 
         const windowCandles = FORWARD_WINDOW_CANDLES[forwardWindow];
-        const execCostRoundTrip = 2 * (fee_bps + slippage_bps) / 10_000;
+        const execCostRoundTrip = execCostRoundTripPre;
         const evaluated: (PipelineDecisionLogRow &
-          PipelineForwardResult & { grossReturn: number; scoreBucket: ScoreBucket })[] = [];
+          PipelineForwardResult & {
+            grossReturn: number;
+            scoreBucket: ScoreBucket;
+            gridOutcome: GridOutcomeMetrics | null;
+          })[] = [];
 
         for (const row of rows) {
           let candles: KlineTuple[] = [];
@@ -265,39 +448,72 @@ export function registerPipelineDecisionBacktestTools(server: McpServer): void {
             grossReturn: fwd.forwardReturn,
             forwardReturn: applyExecutionCost(fwd.forwardReturn, fee_bps, slippage_bps),
             scoreBucket: scoreBucket(row.rankingScore),
+            // B4: dihitung dari candle YANG SAMA -- nol fetch tambahan.
+            gridOutcome: evaluateGridOutcome(
+              candles.slice(0, windowCandles + 1),
+              row.lowerPrice,
+              row.upperPrice,
+            ),
           });
         }
 
-        const byDecision = aggregateKeyedRows(evaluated.map((r) => ({ key: String(r.decision), forwardReturn: r.forwardReturn, slTouch: r.slTouch })));
-        const byScore = aggregateKeyedRows(evaluated.map((r) => ({ key: r.scoreBucket, forwardReturn: r.forwardReturn, slTouch: r.slTouch })));
-        const overall = aggregateKeyedRows(evaluated.map((r) => ({ key: "all", forwardReturn: r.forwardReturn, slTouch: r.slTouch }))).all ?? emptyBucket();
+        // Agregat dari SQL atas SELURUH rentang (B3) -- bukan dari
+        // `evaluated`, yang cuma sampel detail berukuran `limit`.
+        const byDecision = aggregateGroupsToStats(aggregates.byDecision, execCostRoundTrip);
+        const byScore = aggregateGroupsToStats(aggregates.byScoreBucket, execCostRoundTrip);
+        const overall = aggregateGroupToStats(sumAggregateGroups(aggregates.byDecision), execCostRoundTrip);
+        const gridSummary = summarizeGridOutcomes(
+          evaluated.map((r) => r.gridOutcome).filter((g): g is GridOutcomeMetrics => g !== null),
+        );
+        const coveragePct = aggregates.rowsInRange
+          ? (aggregates.rowsWithOutcome / aggregates.rowsInRange) * 100
+          : 0;
+        const decisionKeys = [
+          ...new Set(["TRADE", "WATCH", "NO_TRADE", ...aggregates.byDecision.map((g) => g.key)]),
+        ];
 
         const builder = new ToolResponseBuilder()
           .header("Backtest Keputusan Pipeline")
           .row("Forward Window", forwardWindow)
-          .row("Rows in range", String(rows.length))
-          .row("Evaluated (punya klines)", `${evaluated.length}`)
+          .row("Baris dalam rentang", String(aggregates.rowsInRange))
+          .row(
+            "Punya outcome (agregat)",
+            `${aggregates.rowsWithOutcome} (${coveragePct.toFixed(1)}% cakupan)`,
+          )
+          .row("Sampel detail (fetch klines)", `${evaluated.length} dari ${rows.length} baris terbaru`)
           .row("Overall win rate (net)", overall.sampleSize ? `${(overall.winRate * 100).toFixed(1)}%` : "-")
           .row("Overall avg return (net)", overall.sampleSize ? fmtPct(overall.avgReturn) : "-")
           .row(
-            "Overall SL-touch",
+            "Overall SL-touch (24h)",
             overall.slTouchRate == null ? "-" : `${(overall.slTouchRate * 100).toFixed(1)}% (${overall.slTouchSample})`,
           )
           .row("Biaya eksekusi", `fee ${fee_bps}bps + slippage ${slippage_bps}bps per sisi -> ${(execCostRoundTrip * 100).toFixed(3)}% round-trip`)
-          .subheader("Per keputusan")
+          .subheader("Per keputusan (seluruh rentang, dari SQL)")
           .table(
-            ["Keputusan", "N", "Win rate", "Avg return", "SL-touch"],
-            fmtBucketTable(byDecision, ["TRADE", "WATCH", "NO_TRADE"]),
+            ["Keputusan", "N", "Win rate", "Avg return", "SL-touch 24h"],
+            fmtBucketTable(byDecision, decisionKeys),
           )
-          .subheader("Per bucket skor")
+          .subheader("Per bucket skor (seluruh rentang, dari SQL)")
           .table(
-            ["Bucket", "N", "Win rate", "Avg return", "SL-touch"],
+            ["Bucket", "N", "Win rate", "Avg return", "SL-touch 24h"],
             fmtBucketTable(byScore, ["lt_40", "40_55", "gte_55"]),
           );
 
+        if (gridSummary) {
+          builder
+            .subheader(`Metrik grid-native (sampel detail, n=${gridSummary.sampleSize})`)
+            .row("Keluar range", `${(gridSummary.exitedRangeRate * 100).toFixed(1)}%`)
+            .row(
+              "  ke atas / ke bawah",
+              `${(gridSummary.exitedAboveRate * 100).toFixed(1)}% / ${(gridSummary.exitedBelowRate * 100).toFixed(1)}%`,
+            )
+            .row("Time-in-range (close)", `${(gridSummary.avgTimeInRangePct * 100).toFixed(1)}%`)
+            .row("Crossing rate (proxy)", `${(gridSummary.avgCrossingRate * 100).toFixed(1)}% candle 5m`);
+        }
+
         if (evaluated.length > 0) {
-          builder.table(
-            ["Waktu", "Symbol", "Keputusan", "Skor", `Gross ${forwardWindow}`, `Net ${forwardWindow}`, "SL"],
+          builder.subheader("Sampel detail").table(
+            ["Waktu", "Symbol", "Keputusan", "Skor", `Gross ${forwardWindow}`, `Net ${forwardWindow}`, "SL", "Keluar range", "In-range"],
             evaluated.slice(0, 15).map((r) => [
               fmtTime(r.runAt),
               r.symbol,
@@ -306,12 +522,20 @@ export function registerPipelineDecisionBacktestTools(server: McpServer): void {
               fmtPct(r.grossReturn),
               fmtPct(r.forwardReturn),
               r.slTouch == null ? "-" : r.slTouch ? "yes" : "no",
+              r.gridOutcome == null ? "-" : r.gridOutcome.exitedRange ? (r.gridOutcome.exitedAbove ? "atas" : "bawah") : "no",
+              r.gridOutcome == null ? "-" : `${(r.gridOutcome.timeInRangePct * 100).toFixed(0)}%`,
             ]),
           );
         }
 
         builder.note(
-          "Forward return = (close akhir jendela − close candle pertama) / close pertama. Bukan PnL grid. " +
+          "Agregat (tabel per keputusan & per bucket) dihitung DI SQL atas SELURUH rentang, dari kolom " +
+            "forward_return_* yang di-backfill cron -- nol fetch klines. Baris yang outcome-nya belum matang " +
+            "(< 26 jam) tidak ikut: baca angka cakupan di atas sebelum mempercayai agregatnya. " +
+            "SL-touch pada agregat SELALU jendela 24 jam (hanya itu yang dipersist), termasuk saat forwardWindow 1h/4h. " +
+            "Forward return = (close akhir jendela − OPEN candle pertama) / open. Bukan PnL grid -- metrik grid-native " +
+            "(keluar range / time-in-range / crossing) dihitung terpisah, HANYA atas sampel detail, dan gridCount-nya " +
+            "DIREKONSTRUKSI dari lower/upper, bukan nilai yang dipersist. " +
             `"Net" = sesudah dikurangi fee_bps+slippage_bps di entry & exit (flat ${(execCostRoundTrip * 100).toFixed(3)}% round-trip), ` +
             "BUKAN replay order-book historis -- market impact per ukuran order tidak dimodelkan. Sample <20 = confidence rendah. " +
             "Hasil ini TIDAK menulis ulang bobot ranking atau threshold 55.",
@@ -322,11 +546,14 @@ export function registerPipelineDecisionBacktestTools(server: McpServer): void {
           .struct("feeBps", fee_bps)
           .struct("slippageBps", slippage_bps)
           .struct("execCostRoundTrip", execCostRoundTrip)
-          .struct("rowCount", rows.length)
-          .struct("evaluatedCount", evaluated.length)
+          .struct("rowsInRange", aggregates.rowsInRange)
+          .struct("rowsWithOutcome", aggregates.rowsWithOutcome)
+          .struct("outcomeCoveragePct", coveragePct)
+          .struct("detailSampleSize", evaluated.length)
           .struct("overall", overall)
           .struct("byDecision", byDecision)
           .struct("byScoreBucket", byScore)
+          .struct("gridOutcomeSummary", gridSummary)
           .struct(
             "rows",
             evaluated.slice(0, 15).map((r) => ({
@@ -341,6 +568,7 @@ export function registerPipelineDecisionBacktestTools(server: McpServer): void {
               forwardReturn: r.forwardReturn,
               slTouch: r.slTouch,
               stopLoss: r.stopLoss,
+              gridOutcome: r.gridOutcome,
             })),
           )
           .build();

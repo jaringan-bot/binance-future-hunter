@@ -5,6 +5,7 @@
 // setter sama seperti kvConfig.ts/binanceProxyClient.ts -- di-set sekali di
 // awal fetch()/scheduled() sebelum tool logic jalan.
 import type { PipelineDecisionLogRow } from "./pipelineDecisionLog.js";
+import { scoreBucketSqlCase } from "./pipelineDecisionLog.js";
 export type { PipelineDecisionLogRow };
 
 let db: D1Database | undefined;
@@ -858,6 +859,159 @@ export async function queryPipelineDecisionLog(opts: {
   return (result.results ?? []).map(mapPipelineDecisionLogRow);
 }
 
+// ── B3 / Stage 4.1: agregasi di SQL, bukan atas 80 baris terbaru ─────────
+//
+// CACAT LAMA: whalescope_backtest_pipeline_decisions memanggil
+// queryPipelineDecisionLog(limit <= 80) dengan ORDER BY run_at DESC, lalu
+// menghitung win-rate di TypeScript. Entry-alert menulis ~40 baris per tick
+// dan tick-nya 4x/jam -> ~3.840 baris/hari. Jadi permintaan "backtest 30
+// hari" sebenarnya hanya melihat DUA tick terakhir (~20 menit). Itu bukan
+// sampel dari rentang; itu potongan sembarang di ujung rentang. Diverifikasi
+// pada data live 2026-09-04: satu panggilan rentang 9 jam mengembalikan 50
+// baris yang SELURUHNYA ber-run_at identik.
+//
+// Fungsi ini menghitung COUNT/AVG/MIN/MAX/win-rate DI SQL atas SELURUH
+// rentang, memakai kolom forward_return_* yang SUDAH di-backfill cron
+// (pipelineDecisionOutcomeCron.ts) -- NOL fetch klines.
+//
+// DUA HAL YANG WAJIB DIPAHAMI PEMBACA HASILNYA:
+//
+//  1. `sl_touched_24h` adalah fakta 24 JAM, satu-satunya yang dipersist.
+//     Untuk window 1h/4h angka SL-touch di sini TETAP angka 24 jam -- bukan
+//     "SL kena dalam 1 jam". Jalur detail on-demand menghitung SL-touch
+//     sesuai window; jalur agregat tidak bisa, dan sengaja TIDAK berpura-pura
+//     bisa. Konsumen wajib melabelinya "24h".
+//  2. Baris yang forward return-nya masih NULL (belum matang 26 jam, atau
+//     backfill-nya gagal) TIDAK ikut. Karena itu `rowsInRange` vs
+//     `rowsWithOutcome` dikembalikan terpisah: rasio keduanya adalah
+//     cakupan, dan cakupan rendah bikin agregat tidak representatif.
+export const FORWARD_RETURN_COLUMN = {
+  "1h": "forward_return_1h",
+  "4h": "forward_return_4h",
+  "24h": "forward_return_24h",
+} as const;
+export type ForwardWindowKey = keyof typeof FORWARD_RETURN_COLUMN;
+
+export interface PipelineDecisionAggregateGroup {
+  key: string;
+  /** Baris yang punya forward return untuk window ini (bukan total baris). */
+  sampleSize: number;
+  /** Baris dengan return NET (gross - biaya eksekusi) > 0. */
+  winCount: number;
+  avgGrossReturn: number;
+  minGrossReturn: number;
+  maxGrossReturn: number;
+  /** SELALU jendela 24 jam -- lihat catatan (1) di atas. */
+  slHits: number;
+  slKnown: number;
+}
+
+export interface PipelineDecisionAggregates {
+  rowsInRange: number;
+  rowsWithOutcome: number;
+  oldestRunAt: number | null;
+  newestRunAt: number | null;
+  byDecision: PipelineDecisionAggregateGroup[];
+  byScoreBucket: PipelineDecisionAggregateGroup[];
+}
+
+interface RawAggregateGroupRow {
+  k: string | null;
+  n: number;
+  wins: number;
+  avg_gross: number | null;
+  min_gross: number | null;
+  max_gross: number | null;
+  sl_hits: number;
+  sl_known: number;
+}
+
+interface RawAggregateCoverageRow {
+  rows_in_range: number;
+  rows_with_outcome: number;
+  oldest: number | null;
+  newest: number | null;
+}
+
+function mapAggregateGroup(r: RawAggregateGroupRow): PipelineDecisionAggregateGroup {
+  return {
+    key: r.k ?? "(null)",
+    sampleSize: r.n,
+    winCount: r.wins,
+    avgGrossReturn: r.avg_gross ?? 0,
+    minGrossReturn: r.min_gross ?? 0,
+    maxGrossReturn: r.max_gross ?? 0,
+    slHits: r.sl_hits,
+    slKnown: r.sl_known,
+  };
+}
+
+export async function queryPipelineDecisionAggregates(opts: {
+  startTime: number;
+  endTime: number;
+  symbol?: string;
+  source?: string;
+  sourceRef?: string;
+  window: ForwardWindowKey;
+  /** Biaya eksekusi round-trip sebagai fraksi (mis. 0.0012). Win = gross > biaya. */
+  execCostRoundTrip: number;
+}): Promise<PipelineDecisionAggregates> {
+  const database = requireDb();
+  // Kolom diambil dari map konstan yang di-key oleh union type -- TIDAK ADA
+  // string dari user yang pernah masuk ke SQL di sini.
+  const col = FORWARD_RETURN_COLUMN[opts.window];
+  if (!col) throw new Error(`window forward tidak dikenal: ${String(opts.window)}`);
+  const cost = Number.isFinite(opts.execCostRoundTrip) ? opts.execCostRoundTrip : 0;
+
+  const clauses = ["run_at BETWEEN ? AND ?"];
+  const binds: unknown[] = [opts.startTime, opts.endTime];
+  if (opts.symbol) {
+    clauses.push("symbol = ?");
+    binds.push(opts.symbol.toUpperCase());
+  }
+  if (opts.source) {
+    clauses.push("source = ?");
+    binds.push(opts.source);
+  }
+  if (opts.sourceRef) {
+    clauses.push("source_ref = ?");
+    binds.push(opts.sourceRef);
+  }
+  const where = clauses.join(" AND ");
+
+  const groupSql = (keyExpr: string) =>
+    `SELECT ${keyExpr} AS k, COUNT(*) AS n, ` +
+    `SUM(CASE WHEN ${col} > ? THEN 1 ELSE 0 END) AS wins, ` +
+    `AVG(${col}) AS avg_gross, MIN(${col}) AS min_gross, MAX(${col}) AS max_gross, ` +
+    "SUM(CASE WHEN sl_touched_24h = 1 THEN 1 ELSE 0 END) AS sl_hits, " +
+    "SUM(CASE WHEN sl_touched_24h IS NOT NULL THEN 1 ELSE 0 END) AS sl_known " +
+    `FROM pipeline_decision_log WHERE ${where} AND ${col} IS NOT NULL GROUP BY k`;
+
+  // `cost` mendahului binds WHERE karena placeholder-nya muncul lebih dulu
+  // di SELECT list.
+  const [coverage, byDecision, byBucket] = await database.batch<unknown>([
+    database
+      .prepare(
+        "SELECT COUNT(*) AS rows_in_range, " +
+          `SUM(CASE WHEN ${col} IS NOT NULL THEN 1 ELSE 0 END) AS rows_with_outcome, ` +
+          `MIN(run_at) AS oldest, MAX(run_at) AS newest FROM pipeline_decision_log WHERE ${where}`,
+      )
+      .bind(...binds),
+    database.prepare(groupSql("decision")).bind(cost, ...binds),
+    database.prepare(groupSql(scoreBucketSqlCase("ranking_score"))).bind(cost, ...binds),
+  ]);
+
+  const cov = ((coverage.results ?? [])[0] ?? null) as RawAggregateCoverageRow | null;
+  return {
+    rowsInRange: cov?.rows_in_range ?? 0,
+    rowsWithOutcome: cov?.rows_with_outcome ?? 0,
+    oldestRunAt: cov?.oldest ?? null,
+    newestRunAt: cov?.newest ?? null,
+    byDecision: ((byDecision.results ?? []) as RawAggregateGroupRow[]).map(mapAggregateGroup),
+    byScoreBucket: ((byBucket.results ?? []) as RawAggregateGroupRow[]).map(mapAggregateGroup),
+  };
+}
+
 export async function pruneOldPipelineDecisionLog(cutoffMs: number): Promise<void> {
   await requireDb().prepare("DELETE FROM pipeline_decision_log WHERE run_at < ?").bind(cutoffMs).run();
 }
@@ -872,6 +1026,8 @@ export interface PendingPipelineDecisionOutcomeRow {
   runAt: number;
   symbol: string;
   stopLoss: number | null;
+  /** Berapa kali baris ini sudah dicoba DAN gagal (migration 0016). */
+  attempts: number;
 }
 
 interface RawPendingPipelineDecisionOutcomeRow {
@@ -879,23 +1035,56 @@ interface RawPendingPipelineDecisionOutcomeRow {
   run_at: number;
   symbol: string;
   stop_loss: number | null;
+  outcome_attempts: number | null;
 }
 
 export async function queryPendingPipelineDecisionOutcomes(
   readyBeforeMs: number,
   notOlderThanMs: number,
   limit: number,
+  maxAttempts: number,
 ): Promise<PendingPipelineDecisionOutcomeRow[]> {
   const result = await requireDb()
     .prepare(
-      "SELECT id, run_at, symbol, stop_loss FROM pipeline_decision_log " +
-        "WHERE forward_return_24h IS NULL AND run_at < ? AND run_at > ? " +
-        "ORDER BY run_at ASC LIMIT ?",
+      "SELECT id, run_at, symbol, stop_loss, outcome_attempts FROM pipeline_decision_log " +
+        "WHERE forward_return_24h IS NULL AND run_at < ? AND run_at > ? AND outcome_attempts < ? " +
+        // 4.3: outcome_attempts LEBIH DULU dari run_at. Dengan `run_at ASC`
+        // sendirian, >= LIMIT baris yang gagal permanen (symbol delisted,
+        // klines < 289 candle) akan terpilih ulang SETIAP tick selama 14
+        // hari dan tidak menyisakan satu slot pun untuk baris baru --
+        // antrian macet tanpa error yang terlihat. Dengan attempts sebagai
+        // kunci pertama, baris yang sudah pernah gagal turun ke belakang
+        // baris yang belum pernah dicoba, jadi antrian selalu mengalir.
+        "ORDER BY outcome_attempts ASC, run_at ASC LIMIT ?",
     )
-    .bind(readyBeforeMs, notOlderThanMs, limit)
+    .bind(readyBeforeMs, notOlderThanMs, maxAttempts, limit)
     .all<RawPendingPipelineDecisionOutcomeRow>();
 
-  return result.results.map((r) => ({ id: r.id, runAt: r.run_at, symbol: r.symbol, stopLoss: r.stop_loss }));
+  return result.results.map((r) => ({
+    id: r.id,
+    runAt: r.run_at,
+    symbol: r.symbol,
+    stopLoss: r.stop_loss,
+    attempts: r.outcome_attempts ?? 0,
+  }));
+}
+
+/**
+ * Naikkan penghitung percobaan untuk baris yang DICOBA DAN GAGAL.
+ *
+ * Sengaja TIDAK dipanggil untuk baris yang berhasil: baris itu sudah keluar
+ * dari himpunan pending lewat forward_return_24h yang terisi, jadi menaikkan
+ * counter-nya cuma menambah tulisan tanpa arti.
+ */
+export async function bumpPipelineDecisionOutcomeAttempts(ids: number[]): Promise<void> {
+  if (ids.length === 0) return;
+  const placeholders = ids.map(() => "?").join(", ");
+  await requireDb()
+    .prepare(
+      `UPDATE pipeline_decision_log SET outcome_attempts = outcome_attempts + 1 WHERE id IN (${placeholders})`,
+    )
+    .bind(...ids)
+    .run();
 }
 
 export interface PipelineDecisionOutcomeUpdate {

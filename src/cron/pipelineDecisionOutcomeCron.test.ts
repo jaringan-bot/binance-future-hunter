@@ -10,6 +10,7 @@ vi.mock("../binanceProxyClient.js", () => ({
 vi.mock("../d1Client.js", () => ({
   queryPendingPipelineDecisionOutcomes: vi.fn(),
   updatePipelineDecisionOutcome: vi.fn(),
+  bumpPipelineDecisionOutcomeAttempts: vi.fn(),
 }));
 
 // [openTime, open, high, low, close, ...] -- `open` SENGAJA berbeda dari
@@ -33,24 +34,25 @@ describe("backfillPipelineDecisionOutcomes", () => {
     vi.mocked(binanceProxy.getKlinesNative).mockReset();
     vi.mocked(d1Client.queryPendingPipelineDecisionOutcomes).mockReset();
     vi.mocked(d1Client.updatePipelineDecisionOutcome).mockReset();
+    vi.mocked(d1Client.bumpPipelineDecisionOutcomeAttempts).mockReset();
   });
 
   it("does nothing when there are no pending rows", async () => {
     vi.mocked(d1Client.queryPendingPipelineDecisionOutcomes).mockResolvedValue([]);
     const result = await backfillPipelineDecisionOutcomes(2_000_000);
-    expect(result).toEqual({ attempted: 0, updated: 0 });
+    expect(result).toEqual({ attempted: 0, updated: 0, penalized: 0 });
     expect(d1Client.updatePipelineDecisionOutcome).not.toHaveBeenCalled();
   });
 
   it("computes 1h/4h/24h forward return + SL-touch from ONE 5m-window fetch and persists it", async () => {
     vi.mocked(d1Client.queryPendingPipelineDecisionOutcomes).mockResolvedValue([
-      { id: 42, runAt: 1_000_000, symbol: "BTCUSDT", stopLoss: 90 },
+      { id: 42, runAt: 1_000_000, symbol: "BTCUSDT", stopLoss: 90, attempts: 0 },
     ]);
     vi.mocked(binanceProxy.getKlinesNative).mockResolvedValue(fullWindowCandles());
 
     const result = await backfillPipelineDecisionOutcomes(2_000_000);
 
-    expect(result).toEqual({ attempted: 1, updated: 1 });
+    expect(result).toEqual({ attempted: 1, updated: 1, penalized: 0 });
     expect(binanceProxy.getKlinesNative).toHaveBeenCalledTimes(1); // one fetch, not three
     expect(binanceProxy.getKlinesNative).toHaveBeenCalledWith("BTCUSDT", "5m", FULL_WINDOW, 1_000_000, expect.any(Number));
 
@@ -73,7 +75,7 @@ describe("backfillPipelineDecisionOutcomes", () => {
   // -0.12% dan win rate 0% -- backtest tidak pernah mengukur apa pun.
   it("produces a NON-zero, distinct 1h forward return (the old 1h window was always exactly 0)", async () => {
     vi.mocked(d1Client.queryPendingPipelineDecisionOutcomes).mockResolvedValue([
-      { id: 7, runAt: 1_000_000, symbol: "BTCUSDT", stopLoss: null },
+      { id: 7, runAt: 1_000_000, symbol: "BTCUSDT", stopLoss: null, attempts: 0 },
     ]);
     vi.mocked(binanceProxy.getKlinesNative).mockResolvedValue(fullWindowCandles());
 
@@ -85,37 +87,99 @@ describe("backfillPipelineDecisionOutcomes", () => {
     expect(persisted.forwardReturn4h).not.toBe(persisted.forwardReturn24h);
   });
 
+  // 4.3: kegagalan transport SENDIRIAN (tidak ada baris yang berhasil) =
+  // dugaan relay down, JANGAN hukum barisnya.
   it("skips a row (leaves it pending) when the klines fetch fails, without throwing", async () => {
     vi.mocked(d1Client.queryPendingPipelineDecisionOutcomes).mockResolvedValue([
-      { id: 1, runAt: 1_000_000, symbol: "DELISTEDUSDT", stopLoss: null },
+      { id: 1, runAt: 1_000_000, symbol: "DELISTEDUSDT", stopLoss: null, attempts: 0 },
     ]);
     vi.mocked(binanceProxy.getKlinesNative).mockRejectedValue(new Error("Invalid symbol"));
 
     const result = await backfillPipelineDecisionOutcomes(2_000_000);
-    expect(result).toEqual({ attempted: 1, updated: 0 });
+    expect(result).toEqual({ attempted: 1, updated: 0, penalized: 0 });
     expect(d1Client.updatePipelineDecisionOutcome).not.toHaveBeenCalled();
+    expect(d1Client.bumpPipelineDecisionOutcomeAttempts).toHaveBeenCalledWith([]);
   });
 
   it("skips a row (leaves it pending) when fewer than a full 5m window comes back", async () => {
     vi.mocked(d1Client.queryPendingPipelineDecisionOutcomes).mockResolvedValue([
-      { id: 1, runAt: 1_000_000, symbol: "NEWUSDT", stopLoss: null },
+      { id: 1, runAt: 1_000_000, symbol: "NEWUSDT", stopLoss: null, attempts: 0 },
     ]);
     vi.mocked(binanceProxy.getKlinesNative).mockResolvedValue(fullWindowCandles().slice(0, 10)); // gap/new listing
 
     const result = await backfillPipelineDecisionOutcomes(2_000_000);
-    expect(result).toEqual({ attempted: 1, updated: 0 });
+    expect(result).toEqual({ attempted: 1, updated: 0, penalized: 1 });
     expect(d1Client.updatePipelineDecisionOutcome).not.toHaveBeenCalled();
+    // Candle kurang = VONIS tentang baris ini (delisted / gap data), bukan
+    // soal infrastruktur -- attempt WAJIB naik supaya tidak jadi zombie.
+    expect(d1Client.bumpPipelineDecisionOutcomeAttempts).toHaveBeenCalledWith([1]);
   });
 
+  // ── 4.3 head-of-line blocking ────────────────────────────────────────
+  it("passes MAX_OUTCOME_ATTEMPTS to the query so exhausted rows stop being selected", async () => {
+    vi.mocked(d1Client.queryPendingPipelineDecisionOutcomes).mockResolvedValue([]);
+    await backfillPipelineDecisionOutcomes(2_000_000);
+    // arg ke-4 = batas attempt. Tanpa ini, query tidak punya cara
+    // mengeluarkan baris yang gagal permanen dari kandidat.
+    const call = vi.mocked(d1Client.queryPendingPipelineDecisionOutcomes).mock.calls[0];
+    expect(call).toHaveLength(4);
+    expect(call[3]).toBeGreaterThan(0);
+  });
+
+  it("penalizes transport failures when at least one row in the same tick succeeded", async () => {
+    vi.mocked(d1Client.queryPendingPipelineDecisionOutcomes).mockResolvedValue([
+      { id: 1, runAt: 1_000_000, symbol: "GOODUSDT", stopLoss: null, attempts: 0 },
+      { id: 2, runAt: 1_100_000, symbol: "DEADUSDT", stopLoss: null, attempts: 3 },
+    ]);
+    vi.mocked(binanceProxy.getKlinesNative)
+      .mockResolvedValueOnce(fullWindowCandles())
+      .mockRejectedValueOnce(new Error("Invalid symbol"));
+
+    const result = await backfillPipelineDecisionOutcomes(2_000_000);
+    // Relay jelas hidup (satu baris sukses), jadi kegagalan baris kedua
+    // adalah soal baris itu sendiri -> attempt naik.
+    expect(result).toEqual({ attempted: 2, updated: 1, penalized: 1 });
+    expect(d1Client.bumpPipelineDecisionOutcomeAttempts).toHaveBeenCalledWith([2]);
+  });
+
+  it("penalizes NOBODY when every row in the tick failed transport (relay outage)", async () => {
+    vi.mocked(d1Client.queryPendingPipelineDecisionOutcomes).mockResolvedValue([
+      { id: 1, runAt: 1_000_000, symbol: "BTCUSDT", stopLoss: null, attempts: 0 },
+      { id: 2, runAt: 1_100_000, symbol: "ETHUSDT", stopLoss: null, attempts: 0 },
+    ]);
+    vi.mocked(binanceProxy.getKlinesNative).mockRejectedValue(new Error("ECONNREFUSED"));
+
+    const result = await backfillPipelineDecisionOutcomes(2_000_000);
+    // BTCUSDT/ETHUSDT jelas bukan symbol delisted -- menghukum keduanya
+    // karena relay mati akan membuang data yang masih bisa di-backfill.
+    expect(result).toEqual({ attempted: 2, updated: 0, penalized: 0 });
+    expect(d1Client.bumpPipelineDecisionOutcomeAttempts).toHaveBeenCalledWith([]);
+  });
+
+  it("still penalizes data-shape failures during a transport outage", async () => {
+    vi.mocked(d1Client.queryPendingPipelineDecisionOutcomes).mockResolvedValue([
+      { id: 1, runAt: 1_000_000, symbol: "BTCUSDT", stopLoss: null, attempts: 0 },
+      { id: 2, runAt: 1_100_000, symbol: "NEWUSDT", stopLoss: null, attempts: 0 },
+    ]);
+    vi.mocked(binanceProxy.getKlinesNative)
+      .mockRejectedValueOnce(new Error("ECONNREFUSED"))
+      .mockResolvedValueOnce(fullWindowCandles().slice(0, 10));
+
+    const result = await backfillPipelineDecisionOutcomes(2_000_000);
+    // Bukan outage total (satu fetch BERHASIL, cuma candle-nya kurang), jadi
+    // guard tidak aktif -- tapi yang dihukum tetap hanya yang data-shape.
+    expect(result.penalized).toBe(2);
+    expect(d1Client.bumpPipelineDecisionOutcomeAttempts).toHaveBeenCalledWith([2, 1]);
+  });
   it("processes multiple pending rows independently", async () => {
     vi.mocked(d1Client.queryPendingPipelineDecisionOutcomes).mockResolvedValue([
-      { id: 1, runAt: 1_000_000, symbol: "BTCUSDT", stopLoss: null },
-      { id: 2, runAt: 1_100_000, symbol: "ETHUSDT", stopLoss: null },
+      { id: 1, runAt: 1_000_000, symbol: "BTCUSDT", stopLoss: null, attempts: 0 },
+      { id: 2, runAt: 1_100_000, symbol: "ETHUSDT", stopLoss: null, attempts: 0 },
     ]);
     vi.mocked(binanceProxy.getKlinesNative).mockResolvedValue(fullWindowCandles());
 
     const result = await backfillPipelineDecisionOutcomes(2_000_000);
-    expect(result).toEqual({ attempted: 2, updated: 2 });
+    expect(result).toEqual({ attempted: 2, updated: 2, penalized: 0 });
     expect(d1Client.updatePipelineDecisionOutcome).toHaveBeenCalledTimes(2);
   });
 });
