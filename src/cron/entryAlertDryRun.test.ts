@@ -208,6 +208,12 @@ describe("DRY-RUN: subrequest count per entry-alert tick (post-dedup)", () => {
   //   Reduksi (a) incremental: 2507 -> 395 = -84.2%
   // BASELINE = (+DEDUP total 2507) + 1251 (1 ticker-refetch + 5*250
   // fetchMarketContext yang dulu unconditional di Wave 1).
+  // Timeout eksplisit 30 s (arg ke-3 `it`): test ini menjalankan pipeline
+  // REAL untuk 250 pair, 209 survivor masuk Wave 2. Sendirian ~1,0 s; di
+  // bawah beban paralel full suite terukur 1,0-2,0 s -- terlalu dekat ke
+  // default vitest 5 s, dan sesekali lewat. 30 s = ~15x worst case terukur,
+  // tapi tetap ketat supaya test yang BENAR-BENAR hang gagal cepat. Sengaja
+  // hanya di test ini, BUKAN testTimeout global.
   it("no pre-filter (top_n >= watchlist): locks post-dedup count + phase split", async () => {
     vi.mocked(kvConfig.getJson).mockResolvedValue(9999);
     await runEntryAlertCheck({ TELEGRAM_BOT_TOKEN: "x", TELEGRAM_CHAT_ID: "y" } as never);
@@ -237,7 +243,7 @@ describe("DRY-RUN: subrequest count per entry-alert tick (post-dedup)", () => {
 
     expect(total).toBe(DEDUP_TOTAL);
     expect(SURVIVORS_NO_FILTER).toBe(survivors);
-  });
+  }, 30_000);
 
   it("top_n=40: locks post-dedup+top-N subrequest count", async () => {
     vi.mocked(kvConfig.getJson).mockResolvedValue(40);

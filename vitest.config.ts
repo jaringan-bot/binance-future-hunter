@@ -10,5 +10,15 @@ export default defineConfig({
     // TIDAK di-typecheck (di luar tsconfig include) tapi bagian pure-nya
     // tetap dites -- lihat scripts/calibrate-ranking-weights.test.mjs.
     include: ["src/**/*.test.ts", "scripts/**/*.test.mjs"],
+    // stream-gateway/**/*.test.mjs SENGAJA TIDAK di sini. File-file itu
+    // memakai `node:test` (`import { test } from "node:test"`), bukan API
+    // vitest -- gateway adalah deployable zero-dep yang harus bisa dites di
+    // VPS dengan `node --test` polos, tanpa vitest terpasang. Menambahkan
+    // glob-nya ke sini TIDAK bekerja: callback-nya mendaftar ke runner Node
+    // yang tidak pernah jalan di bawah vitest, hasilnya `No test suite found`
+    // untuk kelima file. Karena itu ke-59 test gateway dijalankan lewat
+    // runner-nya sendiri dari script `test` di package.json root, dan
+    // `npm test` tetap menjalankan keduanya. Lihat juga `npm run test:worker`
+    // (vitest saja) dan `npm run test:gateway` (gateway saja).
   },
 });
