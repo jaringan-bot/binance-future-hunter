@@ -192,3 +192,51 @@ export async function checkRelayHealth(env: NotifyEnv, now: number = Date.now())
   await dispatchNotification(env, `🚨 *REST Relay*: ${downList} DOWN. ${tail}`);
   await recordNotified(RELAY_HEALTH_KV_KEY, now, NOTIFY_KV_TTL_SECONDS);
 }
+
+// ─────────────────────────────────────────────────────────────
+// 5. Bromo — worker public uptime (external HTTPS probe)
+// ─────────────────────────────────────────────────────────────
+// Poll the Worker origin from the cron isolate. This is NOT a third-party
+// status page (UptimeRobot/Better Stack tetap opsional jangka panjang) --
+// ini lapisan alert internal supaya Telegram dapat sinyal kalau workers.dev
+// sendiri 5xx/unreachable, yang checkRelayHealth tidak lihat.
+
+const WORKER_PUBLIC_KV_KEY = "bromo_worker_public_last_notified_at";
+export const WORKER_PUBLIC_TIMEOUT_MS = 5_000;
+export const DEFAULT_WORKER_PUBLIC_URL = "https://binance-future-hunter.jaringan.workers.dev/";
+
+export async function checkWorkerPublicHealth(
+  env: NotifyEnv & { WORKER_PUBLIC_URL?: string },
+  now: number = Date.now(),
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  const url = (env.WORKER_PUBLIC_URL?.trim() || DEFAULT_WORKER_PUBLIC_URL).replace(/\/?$/, "/");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), WORKER_PUBLIC_TIMEOUT_MS);
+  let problem: string | null = null;
+  try {
+    const res = await fetchImpl(url, { signal: controller.signal, headers: { Accept: "application/json" } });
+    if (!res.ok) {
+      problem = `HTTP ${res.status}`;
+    } else {
+      const body = (await res.json().catch(() => null)) as { name?: string } | null;
+      if (body?.name !== "binance-future-hunter") {
+        problem = "body tidak mengandung name=binance-future-hunter";
+      }
+    }
+  } catch (err) {
+    const name = (err as Error)?.name;
+    problem = name === "AbortError" ? "timeout 5s" : ((err as Error)?.message ?? "unreachable");
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (problem == null) return;
+  if (await withinCooldown(WORKER_PUBLIC_KV_KEY, now, INFRA_NOTIFY_COOLDOWN_MS)) return;
+
+  await dispatchNotification(
+    env,
+    `🚨 *Bromo*: Worker public \`${url}\` DOWN (${problem}). Cek Cloudflare Workers status + deploy terbaru. Relay/stream check terpisah.`,
+  );
+  await recordNotified(WORKER_PUBLIC_KV_KEY, now, NOTIFY_KV_TTL_SECONDS);
+}

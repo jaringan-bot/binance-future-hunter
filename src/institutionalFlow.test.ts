@@ -169,6 +169,62 @@ describe("computeInstitutionalFlowScore", () => {
     expect(score.fundingDivergenceNote).toContain("tidak sepakat");
   });
 
+  it("votes SHORT for Deribit put-heavy PCR and LONG for call-heavy PCR", () => {
+    const shortScore = computeInstitutionalFlowScore({
+      fundingDivergence: null,
+      crossVenueWalls: null,
+      hyperliquidWhale: null,
+      cftcTrend: null,
+      deribitOptions: {
+        currency: "BTC",
+        instrumentCount: 2,
+        callCount: 1,
+        putCount: 1,
+        totalCallOi: 100,
+        totalPutOi: 200,
+        putCallRatio: 2,
+        totalVolume: 0,
+      },
+    });
+    const shortOpt = shortScore.components.find((c) => c.name === "deribit_options")!;
+    expect(shortOpt.available).toBe(true);
+    expect(shortOpt.direction).toBe("SHORT");
+    expect(shortOpt.strength).toBe(1);
+    expect(shortScore.netDirection).toBe("SHORT");
+
+    const longScore = computeInstitutionalFlowScore({
+      fundingDivergence: null,
+      crossVenueWalls: null,
+      hyperliquidWhale: null,
+      cftcTrend: null,
+      deribitOptions: {
+        currency: "ETH",
+        instrumentCount: 2,
+        callCount: 1,
+        putCount: 1,
+        totalCallOi: 200,
+        totalPutOi: 100,
+        putCallRatio: 0.5,
+        totalVolume: 0,
+      },
+    });
+    const longOpt = longScore.components.find((c) => c.name === "deribit_options")!;
+    expect(longOpt.direction).toBe("LONG");
+    expect(longOpt.strength).toBe(1);
+  });
+
+  it("treats missing deribit options as unavailable fourth component", () => {
+    const score = computeInstitutionalFlowScore({
+      fundingDivergence: null,
+      crossVenueWalls: null,
+      hyperliquidWhale: null,
+      cftcTrend: null,
+      deribitOptions: null,
+    });
+    expect(score.components).toHaveLength(4);
+    expect(score.components.find((c) => c.name === "deribit_options")!.available).toBe(false);
+  });
+
   it("does not flag funding divergence below the threshold", () => {
     const score = computeInstitutionalFlowScore({
       fundingDivergence: divergence(0.0005),

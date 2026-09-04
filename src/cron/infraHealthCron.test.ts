@@ -17,6 +17,7 @@ import {
   checkMarketSnapshotFreshness,
   checkD1Capacity,
   checkRelayHealth,
+  checkWorkerPublicHealth,
   STREAM_GATEWAY_STALE_THRESHOLD_MS,
   MARKET_SNAPSHOT_STALE_THRESHOLD_MS,
   INFRA_NOTIFY_COOLDOWN_MS,
@@ -316,5 +317,38 @@ describe("checkRelayHealth", () => {
       { at: NOW },
       { expirationTtl: 24 * 60 * 60 },
     );
+  });
+});
+
+describe("checkWorkerPublicHealth (Bromo)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+  });
+
+  it("alerts when the worker public URL returns non-ok", async () => {
+    vi.clearAllMocks();
+    const fetchMock = vi.fn().mockResolvedValue(new Response("x", { status: 503 }));
+    vi.mocked(kvConfig.getJson).mockResolvedValue(null);
+
+    await checkWorkerPublicHealth(ENV, NOW, fetchMock as unknown as typeof fetch);
+
+    expect(telegram.sendTelegramAlert).toHaveBeenCalled();
+    expect(String(vi.mocked(telegram.sendTelegramAlert).mock.calls.at(-1)?.[1])).toContain("Bromo");
+  });
+
+  it("skips alert when body name matches", async () => {
+    vi.clearAllMocks();
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ name: "binance-future-hunter" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.mocked(kvConfig.getJson).mockResolvedValue(null);
+
+    await checkWorkerPublicHealth(ENV, NOW, fetchMock as unknown as typeof fetch);
+
+    expect(telegram.sendTelegramAlert).not.toHaveBeenCalled();
   });
 });
