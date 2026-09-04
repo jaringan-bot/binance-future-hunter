@@ -36,23 +36,54 @@ export const DEFAULT_WALL_MIN_NOTIONAL_USD = 250_000;
 // Batas bawah yang dipaksakan buat threshold per-watch -- di bawah ini,
 // hampir semua pair likuid bikin event ring penuh dalam hitungan detik.
 export const MIN_WALL_NOTIONAL_USD = 25_000;
-export const EVENT_BUFFER_PER_SYMBOL = 500;
+// 500 -> 2000 (2026-09-04): di pair likuid @ threshold volume-scaled masih
+// ~2 event/s; ring 500 = ~4 menit history. Poll lambat / sinceMs=0 cuma
+// lihat ujung. 2000 ≈ ~15 menit @ rate itu, muat 1 TTL default (5 mnt)
+// dengan headroom. Memory: ~8 watch × 2000 event kecil << 1GB VPS.
+export const EVENT_BUFFER_PER_SYMBOL = 2000;
 export const DEFAULT_WARMUP_MS = 1_500;
 // Track levels down to 50% of the wall threshold so we can watch one grow
 // INTO a wall, not just snap into existence.
 const TRACK_FLOOR_FRACTION = 0.5;
 // While still a wall, only report a resize once qty moves >= 40%.
 const RESIZE_MIN_RATIO = 0.4;
+// Exit hysteresis: once a level is a wall, it stays a wall until notional
+// drops below threshold * (1 - band). Cuts APPEARED↔VANISHED flap when
+// size oscillates around the threshold (common on BTC/ETH books).
+export const WALL_EXIT_HYSTERESIS = 0.15;
+
+/**
+ * Pure: apakah sebuah level DIANGGAP wall setelah update ini.
+ *
+ * Masuk di ambang PENUH, keluar hanya setelah menembus pita histeresis di
+ * bawahnya. Diekspor supaya caller (applyLevels) memakai definisi yang
+ * PERSIS SAMA saat menyimpan state -- kalau dua tempat menghitungnya
+ * sendiri-sendiri, keduanya akan berbeda pendapat dan event-nya bocor.
+ */
+export function resolveWallState(prevIsWall, nextNotionalUsd, wallMinNotionalUsd) {
+  const exitFloor = wallMinNotionalUsd * (1 - WALL_EXIT_HYSTERESIS);
+  return prevIsWall ? nextNotionalUsd >= exitFloor : nextNotionalUsd >= wallMinNotionalUsd;
+}
 
 /**
  * Pure: classify a single price-level quantity change.
+ *
+ * `prevIsWall` WAJIB datang dari state yang disimpan caller, bukan
+ * diturunkan dari `prevQty`. Histeresis itu punya MEMORI: level yang
+ * mengendur ke DALAM pita (mis. 88% dari ambang) tetap dihitung wall dan
+ * tidak melaporkan apa-apa. Kalau tick berikutnya `wasWall` dihitung ulang
+ * dari `prevQty` saja, level itu mendadak dianggap "tidak pernah wall" --
+ * dan WALL_VANISHED-nya HILANG SELAMANYA. Konsumen yang melacak wall
+ * terbuka akan mengira wall-nya masih ada, padahal sudah lenyap. Itu
+ * kegagalan yang lebih buruk daripada churn yang mau dikurangi.
+ *
  * @returns {null | {type, notionalUsd, qty, changePct?}}
  */
-export function classifyLevelTransition(prevQty, nextQty, price, wallMinNotionalUsd) {
+export function classifyLevelTransition(prevQty, nextQty, price, wallMinNotionalUsd, prevIsWall) {
   const prevNotional = prevQty * price;
   const nextNotional = nextQty * price;
-  const wasWall = prevNotional >= wallMinNotionalUsd;
-  const isWall = nextNotional >= wallMinNotionalUsd;
+  const wasWall = prevIsWall;
+  const isWall = resolveWallState(wasWall, nextNotional, wallMinNotionalUsd);
 
   if (!wasWall && isWall) {
     return { type: "WALL_APPEARED", notionalUsd: nextNotional, qty: nextQty };
@@ -110,8 +141,13 @@ export function createDepthWatcher(opts = {}) {
       const qty = Number(entry[1]);
       if (!Number.isFinite(price) || !Number.isFinite(qty) || price <= 0 || qty < 0) continue;
 
-      const prevQty = book.get(price) ?? 0;
-      const t = classifyLevelTransition(prevQty, qty, price, wallMin);
+      // Nilai book = { qty, isWall }, bukan qty telanjang. Status wall HARUS
+      // ikut disimpan: histeresis di classifyLevelTransition() punya memori,
+      // dan menurunkan ulang statusnya dari qty akan menghapus memori itu.
+      const prev = book.get(price);
+      const prevQty = prev?.qty ?? 0;
+      const prevIsWall = prev?.isWall ?? false;
+      const t = classifyLevelTransition(prevQty, qty, price, wallMin, prevIsWall);
       // Warmup: don't spam WALL_APPEARED for walls that were already resting
       // when we connected. GREW/SHRANK/VANISHED need a prior tracked state,
       // which can't exist yet, so this only suppresses the connect burst.
@@ -129,7 +165,11 @@ export function createDepthWatcher(opts = {}) {
         });
       }
 
-      if (qty * price >= wallMin * TRACK_FLOOR_FRACTION) book.set(price, qty);
+      // resolveWallState() yang sama dipakai classifyLevelTransition() di
+      // atas -- satu definisi, jadi state tersimpan tidak bisa berbeda
+      // pendapat dengan event yang barusan dipancarkan.
+      const nextIsWall = resolveWallState(prevIsWall, qty * price, wallMin);
+      if (qty * price >= wallMin * TRACK_FLOOR_FRACTION) book.set(price, { qty, isWall: nextIsWall });
       else book.delete(price);
     }
   }

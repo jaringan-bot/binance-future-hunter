@@ -47,8 +47,9 @@ function mkLiqs(n: number) {
 
 describe("wallThresholdForVolume", () => {
   it("tiers by 24h quote volume, more permissive for thinner books", () => {
-    expect(wallThresholdForVolume(30_000_000_000)).toBe(2_000_000); // BTC
-    expect(wallThresholdForVolume(5_000_000_000)).toBe(2_000_000);
+    expect(wallThresholdForVolume(30_000_000_000)).toBe(3_000_000); // mega BTC
+    expect(wallThresholdForVolume(10_000_000_000)).toBe(3_000_000);
+    expect(wallThresholdForVolume(5_000_000_000)).toBe(2_000_000); // ETH / quieter BTC
     expect(wallThresholdForVolume(2_000_000_000)).toBe(800_000); // SOL
     expect(wallThresholdForVolume(300_000_000)).toBe(350_000); // mid alt
     expect(wallThresholdForVolume(50_000_000)).toBe(150_000);
@@ -60,7 +61,7 @@ describe("wallThresholdForVolume", () => {
     expect(wallThresholdForVolume(Number.NaN)).toBe(250_000);
   });
   it("is monotonic — a thinner pair never gets a higher threshold", () => {
-    const vols = [1e7, 5e7, 3e8, 2e9, 1e10];
+    const vols = [1e7, 5e7, 3e8, 2e9, 5e9, 1e10, 3e10];
     const thr = vols.map(wallThresholdForVolume);
     for (let i = 1; i < thr.length; i++) expect(thr[i]).toBeGreaterThanOrEqual(thr[i - 1]);
   });
@@ -136,8 +137,8 @@ describe("realtime stream tools", () => {
   describe("binance_watch_orderbook_realtime", () => {
     it("arms/renews the watch then returns wall-lifecycle events", async () => {
       const r = await call("binance_watch_orderbook_realtime", { symbol: "BTCUSDT", ttlMs: 60000, sinceMs: 1 });
-      // 3rd arg = volume-scaled threshold ($30B -> $2M tier)
-      expect(gw.watchOrderBook).toHaveBeenCalledWith("BTCUSDT", 60000, 2_000_000);
+      // 3rd arg = volume-scaled threshold ($30B -> $3M mega tier)
+      expect(gw.watchOrderBook).toHaveBeenCalledWith("BTCUSDT", 60000, 3_000_000);
       expect(gw.fetchDepthDiff).toHaveBeenCalledWith("BTCUSDT", 1);
       const sc = r.structuredContent!;
       expect(sc.armed).toBe(true);
