@@ -172,3 +172,58 @@ Jendela 24 jam blok A buka **2026-09-05 11:52 UTC**. Idealnya kedua `scp` ini
 mendarat **sebelum** itu, supaya 24 jam pertama mengukur satu konfigurasi utuh.
 Kalau mendarat di tengah jendela, **catat jamnya** — data akan terbelah
 sebelum/sesudah, persis jenis kontaminasi yang menyulitkan di batas 11:52 kemarin.
+
+---
+
+## HASIL EKSEKUSI — 2026-09-05 (ditulis Semeru dari laporan terminal user)
+
+Dieksekusi **user langsung di terminal**, bukan Krakatau dan bukan Semeru:
+SSH/`scp` diblokir classifier auto mode di sesi Claude Code, dan izin user di
+chat tidak mengangkat blokir itu.
+
+### Target 1 — gateway: MENDARAT, konstanta BELUM diverifikasi
+
+- `install.sh` jalan di `svm-vps`, service `active`.
+- Health: `ok:true`, `reconnectCount:0`, `malformedCount:0`, `lastError:null`,
+  `liqRowCount` 38812 utuh, `depthWatch.count` 0 (on-demand, wajar).
+- **`connectedSince` = 2026-09-05T00:00:01Z — 11,9 jam SEBELUM jendela blok A
+  (11:52Z).** Seluruh 24 jam pengukuran berjalan di atas satu konfigurasi
+  gateway, tidak terbelah. Ini yang dikejar.
+- `grep` konstanta GAGAL: `Permission denied` — `install.sh` men-set
+  `/opt/whale-stream-gateway` mode 750 milik user lain, butuh `sudo`.
+  **`active` hanya berarti service hidup, bukan bukti file barunya yang jalan.**
+  Belum boleh disebut tuntas sampai `2000` dan `0.15` terlihat.
+
+### Target 2 — relay: SELESAI, terverifikasi checksum
+
+| Host | service | sha256 `/opt/whale-binance-proxy/handler.mjs` |
+|---|---|---|
+| `svm-vps` | active | `224db0ad9f7cfc9f8...` cocok |
+| `jaringan-dev` | active | `224db0ad9f7cfc9f8...` cocok |
+
+Cocok byte-per-byte dengan `main`. Karena KEDUA host relay kini menjalankan
+kode yang sama, identitas `PROXY_URL_2` tidak perlu dipecahkan — risiko relay
+campur-versi hilang apa pun jawabannya.
+
+### INSIDEN — relay utama sempat menjalankan kode tak dikenal
+
+Percobaan pertama memakai rantai perintah `;` (bukan `&&`) yang **disusun
+Semeru**. `scp` gagal (cwd salah: `stream-gateway/`, bukan root repo), tapi
+`sudo install` TETAP jalan. Di `svm-vps` kebetulan ada sisa `/tmp/handler.mjs`
+entah dari kapan, sehingga file itu ter-install ke `/opt` dan relay di-restart
+dengan kode yang tidak diketahui versinya. `jaringan-dev` selamat hanya karena
+tidak punya sisa file (`install: cannot stat`).
+
+Tertutup oleh redeploy terverifikasi di atas. **Pelajaran: rantai perintah
+deploy WAJIB `&&`, dan buktinya checksum, bukan `systemctl is-active`.**
+
+### Masih terbuka
+
+1. Konstanta gateway belum terbukti:
+   `ssh svm-vps "sudo grep -E 'EVENT_BUFFER_PER_SYMBOL|WALL_EXIT_HYSTERESIS' /opt/whale-stream-gateway/depthWatch.mjs"`
+2. `jaringan-dev` punya `/opt/whale-stream-gateway`. Kalau service itu aktif,
+   ada DUA gateway berjalan — pola yang sama dengan duplikasi cron
+   whalescope-mcp. **Cek ini sebelum menyimpulkan apa pun soal churn
+   depth-watch besok.**
+3. `svm-jkt` (108.136.219.101) SSH timeout port 22, belum terjelaskan. Bukan
+   bukti host mati — :443 bisa tetap melayani.
