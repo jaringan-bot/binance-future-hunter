@@ -168,17 +168,28 @@ export default {
       return new Response(null, { status: 204, headers: CORS_HEADERS });
     }
 
-    if (url.pathname === "/" && request.method === "GET") {
+    // GET *dan* HEAD. Per RFC 9110 HEAD wajib menjawab identik dengan GET
+    // minus body -- dan ini bukan soal kepatuhan teoretis: uptime monitor
+    // umumnya default ke HEAD untuk hemat bandwidth. Sebelum ini HEAD jatuh
+    // ke catch-all 404 di bawah, sehingga monitor eksternal melaporkan worker
+    // "DOWN (HTTP 404)" sementara browser dan MCP connector melihat 200.
+    // Kejadian nyata 2026-09-05: alert Bromo berulang, worker sehat.
+    if (url.pathname === "/" && (request.method === "GET" || request.method === "HEAD")) {
+      const body = JSON.stringify({
+        name: "binance-future-hunter",
+        status: "ok",
+        endpoint: "/mcp",
+        note: "Daftarkan URL <this-worker-url>/mcp sebagai custom MCP connector.",
+      });
       return withCors(
-        new Response(
-          JSON.stringify({
-            name: "binance-future-hunter",
-            status: "ok",
-            endpoint: "/mcp",
-            note: "Daftarkan URL <this-worker-url>/mcp sebagai custom MCP connector.",
-          }),
-          { headers: { "Content-Type": "application/json" } },
-        ),
+        new Response(request.method === "HEAD" ? null : body, {
+          headers: {
+            "Content-Type": "application/json",
+            // HEAD tidak membawa body, tapi Content-Length harus tetap
+            // mencerminkan body GET yang setara.
+            "Content-Length": String(new TextEncoder().encode(body).length),
+          },
+        }),
       );
     }
 
