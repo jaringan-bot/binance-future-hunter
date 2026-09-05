@@ -5,7 +5,7 @@ import type { PipelineDecision, SymbolPipelineResult } from "./tools/fullPipelin
 export const PIPELINE_DECISION_LOG_SOURCES = ["entry_alert", "manual", "dropstab"] as const;
 export type PipelineDecisionLogSource = (typeof PIPELINE_DECISION_LOG_SOURCES)[number];
 
-export type ScoreBucket = "lt_40" | "40_55" | "gte_55";
+export type ScoreBucket = (typeof SCORE_BUCKETS)[number];
 
 export interface PipelineDecisionLogRow {
   runAt: number;
@@ -39,16 +39,45 @@ export interface PipelineDecisionLogRow {
 // Stage 4.1) DITURUNKAN dari konstanta yang sama supaya tidak bisa
 // menghasilkan bucket berbeda untuk skor yang sama.
 //
-// CATATAN: label bucket ("40_55", "gte_55") MENGKODEKAN angka di bawah.
-// Kalau threshold diubah, label wajib ikut diubah -- kalau tidak, output
-// akan berbohong tentang isi bucket-nya.
+// ─────────────────────────────────────────────────────────────
+// T8 (2026-09-05) -- BATAS 50 DITAMBAHKAN.
+//
+// CACAT LAMA: bucket-nya lt_40 / 40_55 / gte_55, sementara gate yang
+// SEBENARNYA menentukan apa yang sampai ke manusia adalah
+// `isGridAlertWorthy()` di entryAlertCron.ts -- ia mengirim alert WATCH pada
+// rankingScore >= 50. Batas 50 itu berada persis di TENGAH bucket "40_55",
+// jadi tidak ada satu pun analisis yang pernah mengukur apa yang terjadi di
+// seberangnya. Backtest melaporkan angka untuk pita yang tidak dipakai
+// siapa pun mengambil keputusan.
+//
+// SCORE_BUCKET_DISPATCH_MIN WAJIB sama dengan WATCH_MIN_ALERT_SCORE
+// (entryAlertCron.ts). Keduanya tidak di-import silang -- pipelineDecisionLog
+// sengaja tetap bebas dependensi ke layer cron -- jadi invariannya ditegakkan
+// oleh TEST (pipelineDecisionLog.test.ts), bukan oleh tipe. Kalau gate
+// dispatch digeser sendirian, test itu merah.
+//
+// Label bucket DITURUNKAN dari angkanya lewat template literal di bawah,
+// bukan ditulis tangan. Komentar lama di sini memperingatkan "kalau
+// threshold diubah, label wajib ikut diubah, kalau tidak output akan
+// berbohong tentang isi bucket-nya" -- sekarang label itu TIDAK BISA lagi
+// berbohong, karena ia dihasilkan dari konstanta yang sama.
+// ─────────────────────────────────────────────────────────────
 export const SCORE_BUCKET_MID_MIN = 40;
+export const SCORE_BUCKET_DISPATCH_MIN = 50;
 export const SCORE_BUCKET_HIGH_MIN = 55;
 
+export const SCORE_BUCKETS = [
+  `lt_${SCORE_BUCKET_MID_MIN}`,
+  `${SCORE_BUCKET_MID_MIN}_${SCORE_BUCKET_DISPATCH_MIN}`,
+  `${SCORE_BUCKET_DISPATCH_MIN}_${SCORE_BUCKET_HIGH_MIN}`,
+  `gte_${SCORE_BUCKET_HIGH_MIN}`,
+] as const;
+
 export function scoreBucket(rankingScore: number): ScoreBucket {
-  if (rankingScore >= SCORE_BUCKET_HIGH_MIN) return "gte_55";
-  if (rankingScore >= SCORE_BUCKET_MID_MIN) return "40_55";
-  return "lt_40";
+  if (rankingScore >= SCORE_BUCKET_HIGH_MIN) return SCORE_BUCKETS[3];
+  if (rankingScore >= SCORE_BUCKET_DISPATCH_MIN) return SCORE_BUCKETS[2];
+  if (rankingScore >= SCORE_BUCKET_MID_MIN) return SCORE_BUCKETS[1];
+  return SCORE_BUCKETS[0];
 }
 
 /**
@@ -65,8 +94,10 @@ export function scoreBucketSqlCase(column = "ranking_score"): string {
     throw new Error(`scoreBucketSqlCase: nama kolom tidak valid: ${column}`);
   }
   return (
-    `CASE WHEN ${column} >= ${SCORE_BUCKET_HIGH_MIN} THEN 'gte_55' ` +
-    `WHEN ${column} >= ${SCORE_BUCKET_MID_MIN} THEN '40_55' ELSE 'lt_40' END`
+    `CASE WHEN ${column} >= ${SCORE_BUCKET_HIGH_MIN} THEN '${SCORE_BUCKETS[3]}' ` +
+    `WHEN ${column} >= ${SCORE_BUCKET_DISPATCH_MIN} THEN '${SCORE_BUCKETS[2]}' ` +
+    `WHEN ${column} >= ${SCORE_BUCKET_MID_MIN} THEN '${SCORE_BUCKETS[1]}' ` +
+    `ELSE '${SCORE_BUCKETS[0]}' END`
   );
 }
 

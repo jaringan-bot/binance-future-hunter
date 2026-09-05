@@ -35,6 +35,11 @@ function group(partial: Partial<PipelineDecisionAggregateGroup> & { key: string 
     maxGrossReturn: 0,
     slHits: 0,
     slKnown: 0,
+    gridExited: 0,
+    gridExitedBelow: 0,
+    gridKnown: 0,
+    avgTimeInRangePct: null,
+    avgCrossingRate: null,
     ...partial,
   };
 }
@@ -139,6 +144,41 @@ describe("aggregate group adapters (B3 / Stage 4.1)", () => {
     ]);
     expect(total.minGrossReturn).toBeCloseTo(0.05, 10);
     expect(total.maxGrossReturn).toBeCloseTo(0.2, 10);
+  });
+
+  // ── F3 (2026-09-05): metrik grid ikut diagregasi ───────────────────────
+  it("menjumlah metrik grid dengan penyebutnya SENDIRI, bukan sampleSize", () => {
+    // Grup A: 100 baris, tapi cuma 10 yang punya bound grid (90 NO_TRADE
+    // tanpa bound -> kolom grid NULL). 5 dari 10 itu jebol.
+    // Grup B: 10 baris, 10 terukur, 1 jebol.
+    //
+    // Jawaban BENAR: (5+1) / (10+10) = 30%.
+    // Kalau penyebutnya sampleSize: 6 / 110 = 5,5% -- terlihat empat kali
+    // lebih aman dari kenyataan, semata karena baris yang tidak punya grid
+    // ikut dihitung sebagai "grid yang tidak jebol".
+    const total = sumAggregateGroups([
+      group({ key: "A", sampleSize: 100, gridExited: 5, gridExitedBelow: 4, gridKnown: 10, avgTimeInRangePct: 0.5, avgCrossingRate: 0.2 }),
+      group({ key: "B", sampleSize: 10, gridExited: 1, gridExitedBelow: 1, gridKnown: 10, avgTimeInRangePct: 0.9, avgCrossingRate: 0.4 }),
+    ]);
+    expect(total.gridKnown).toBe(20);
+    expect(total.gridExited).toBe(6);
+    expect(total.gridExited / total.gridKnown).toBeCloseTo(0.3, 10);
+    // Rata-rata dibobot gridKnown (10 vs 10 -> tepat di tengah), BUKAN
+    // sampleSize (100 vs 10 -> akan condong ke 0,54).
+    expect(total.avgTimeInRangePct).toBeCloseTo(0.7, 10);
+    expect(total.avgCrossingRate).toBeCloseTo(0.3, 10);
+  });
+
+  it("melaporkan rata-rata grid null (bukan 0) saat tidak ada baris terukur", () => {
+    const total = sumAggregateGroups([
+      group({ key: "A", sampleSize: 50, gridKnown: 0, avgTimeInRangePct: null }),
+      group({ key: "B", sampleSize: 20, gridKnown: 0, avgTimeInRangePct: null }),
+    ]);
+    expect(total.gridKnown).toBe(0);
+    // null = tidak ada yang diukur. 0 akan terbaca "grid tidak pernah di
+    // dalam range", klaim yang sama sekali berbeda.
+    expect(total.avgTimeInRangePct).toBeNull();
+    expect(total.avgCrossingRate).toBeNull();
   });
 
   it("returns zeros (not NaN) for an entirely empty set", () => {
@@ -267,27 +307,27 @@ describe("summarizeGridOutcomesByScoreBucket (F1 -- uji falsifikasi)", () => {
     // Bucket yang tidak punya satu pun baris -> null, BUKAN nol. Nol berarti
     // "diukur, hasilnya 0%"; null berarti "tidak ada data" -- beda arti, dan
     // tabel output menampilkannya sebagai "-".
-    expect(result["40_55"]).toBeNull();
+    expect(result["40_50"]).toBeNull();
   });
 
   it("membuang baris tanpa gridOutcome tanpa menggeser bucket lain", () => {
     const result = summarizeGridOutcomesByScoreBucket([
-      { scoreBucket: "40_55", gridOutcome: null },
-      { scoreBucket: "40_55", gridOutcome: blownBelow() },
+      { scoreBucket: "40_50", gridOutcome: null },
+      { scoreBucket: "40_50", gridOutcome: blownBelow() },
       { scoreBucket: "lt_40", gridOutcome: null },
     ]);
 
-    expect(result["40_55"]?.sampleSize).toBe(1);
-    expect(result["40_55"]?.exitedRangeRate).toBe(1);
+    expect(result["40_50"]?.sampleSize).toBe(1);
+    expect(result["40_50"]?.exitedRangeRate).toBe(1);
     // Semua baris lt_40 punya gridOutcome null -> tidak ada yang bisa
     // diringkas, jadi null (bukan sampleSize 0 yang menyesatkan).
     expect(result.lt_40).toBeNull();
   });
 
-  it("mengembalikan ketiga bucket sebagai null saat input kosong", () => {
+  it("mengembalikan SEMUA bucket sebagai null saat input kosong", () => {
     const result = summarizeGridOutcomesByScoreBucket([]);
     expect(result.lt_40).toBeNull();
-    expect(result["40_55"]).toBeNull();
+    expect(result["40_50"]).toBeNull();
     expect(result.gte_55).toBeNull();
   });
 });

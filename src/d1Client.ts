@@ -904,6 +904,20 @@ export interface PipelineDecisionAggregateGroup {
   /** SELALU jendela 24 jam -- lihat catatan (1) di atas. */
   slHits: number;
   slKnown: number;
+  // ── Metrik grid-native (migration 0017, jendela 24 jam) ──────────────
+  //
+  // `gridKnown` TERPISAH dari `sampleSize` dan itu WAJIB: kolom grid NULL
+  // berarti TIDAK DIUKUR (keputusan tanpa bound grid -- mayoritas NO_TRADE,
+  // plus semua baris pra-migration-0017). Memakai `sampleSize` sebagai
+  // penyebut akan mengencerkan tingkat "keluar range" dengan ribuan baris
+  // yang tidak pernah punya grid untuk keluar darinya, dan hasilnya akan
+  // terlihat jauh lebih aman dari kenyataan.
+  gridExited: number;
+  gridExitedBelow: number;
+  gridKnown: number;
+  /** Rata-rata HANYA atas baris yang terukur (SQL AVG mengabaikan NULL). */
+  avgTimeInRangePct: number | null;
+  avgCrossingRate: number | null;
 }
 
 export interface PipelineDecisionAggregates {
@@ -924,6 +938,11 @@ interface RawAggregateGroupRow {
   max_gross: number | null;
   sl_hits: number;
   sl_known: number;
+  grid_exited: number | null;
+  grid_exited_below: number | null;
+  grid_known: number | null;
+  avg_in_range: number | null;
+  avg_crossing: number | null;
 }
 
 interface RawAggregateCoverageRow {
@@ -943,6 +962,14 @@ function mapAggregateGroup(r: RawAggregateGroupRow): PipelineDecisionAggregateGr
     maxGrossReturn: r.max_gross ?? 0,
     slHits: r.sl_hits,
     slKnown: r.sl_known,
+    gridExited: r.grid_exited ?? 0,
+    gridExitedBelow: r.grid_exited_below ?? 0,
+    gridKnown: r.grid_known ?? 0,
+    // Sengaja TIDAK di-default ke 0: AVG() atas nol baris terukur
+    // mengembalikan NULL, dan itu berarti "tidak ada data", bukan "nol
+    // persen waktu di dalam range".
+    avgTimeInRangePct: r.avg_in_range,
+    avgCrossingRate: r.avg_crossing,
   };
 }
 
@@ -984,7 +1011,13 @@ export async function queryPipelineDecisionAggregates(opts: {
     `SUM(CASE WHEN ${col} > ? THEN 1 ELSE 0 END) AS wins, ` +
     `AVG(${col}) AS avg_gross, MIN(${col}) AS min_gross, MAX(${col}) AS max_gross, ` +
     "SUM(CASE WHEN sl_touched_24h = 1 THEN 1 ELSE 0 END) AS sl_hits, " +
-    "SUM(CASE WHEN sl_touched_24h IS NOT NULL THEN 1 ELSE 0 END) AS sl_known " +
+    "SUM(CASE WHEN sl_touched_24h IS NOT NULL THEN 1 ELSE 0 END) AS sl_known, " +
+    // F3: metrik grid-native. COUNT() mengabaikan NULL, jadi grid_known
+    // adalah jumlah baris yang BENAR-BENAR terukur -- penyebut yang benar.
+    "SUM(CASE WHEN grid_exited_range = 1 THEN 1 ELSE 0 END) AS grid_exited, " +
+    "SUM(CASE WHEN grid_exited_below = 1 THEN 1 ELSE 0 END) AS grid_exited_below, " +
+    "COUNT(grid_exited_range) AS grid_known, " +
+    "AVG(grid_time_in_range_pct) AS avg_in_range, AVG(grid_crossing_rate) AS avg_crossing " +
     `FROM pipeline_decision_log WHERE ${where} AND ${col} IS NOT NULL GROUP BY k`;
 
   // `cost` mendahului binds WHERE karena placeholder-nya muncul lebih dulu
@@ -1009,6 +1042,44 @@ export async function queryPipelineDecisionAggregates(opts: {
     newestRunAt: cov?.newest ?? null,
     byDecision: ((byDecision.results ?? []) as RawAggregateGroupRow[]).map(mapAggregateGroup),
     byScoreBucket: ((byBucket.results ?? []) as RawAggregateGroupRow[]).map(mapAggregateGroup),
+  };
+}
+
+// F4 (2026-09-05): satu query untuk checkOutcomeBackfillHealth()
+// (src/cron/signalIntegrityCron.ts). Tiga hitungan dalam SATU scan, bukan
+// tiga query -- ini jalan 3x/hari di tick heartbeat bareng checkD1Capacity.
+//
+// `recentBackfilled` memakai run_at, bukan "kapan di-backfill": tidak ada
+// kolom backfilled_at, dan menambahnya cuma untuk monitor tidak sepadan.
+// Proksinya valid karena baris matang justru pada jendela itu.
+export interface OutcomeBackfillHealthRow {
+  pendingMatured: number;
+  recentBackfilled: number;
+  recentGridNull: number;
+}
+
+export async function queryOutcomeBackfillHealth(opts: {
+  /** run_at di bawah ini = jendela 24 jam sudah lewat (caller: now - 26 jam). */
+  maturedBefore: number;
+  /** run_at di atas ini = "baru-baru ini" (caller: now - beberapa hari). */
+  recentSince: number;
+  maxAttempts: number;
+}): Promise<OutcomeBackfillHealthRow> {
+  const row = await requireDb()
+    .prepare(
+      "SELECT " +
+        "SUM(CASE WHEN forward_return_24h IS NULL AND run_at < ? AND outcome_attempts < ? THEN 1 ELSE 0 END) AS pending_matured, " +
+        "SUM(CASE WHEN forward_return_24h IS NOT NULL AND run_at >= ? THEN 1 ELSE 0 END) AS recent_backfilled, " +
+        "SUM(CASE WHEN forward_return_24h IS NOT NULL AND run_at >= ? AND grid_exited_range IS NULL THEN 1 ELSE 0 END) AS recent_grid_null " +
+        "FROM pipeline_decision_log",
+    )
+    .bind(opts.maturedBefore, opts.maxAttempts, opts.recentSince, opts.recentSince)
+    .first<{ pending_matured: number | null; recent_backfilled: number | null; recent_grid_null: number | null }>();
+
+  return {
+    pendingMatured: row?.pending_matured ?? 0,
+    recentBackfilled: row?.recent_backfilled ?? 0,
+    recentGridNull: row?.recent_grid_null ?? 0,
   };
 }
 

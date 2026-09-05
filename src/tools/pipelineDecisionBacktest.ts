@@ -15,7 +15,7 @@ import {
   type PipelineDecisionAggregateGroup,
   type PipelineDecisionAggregates,
 } from "../d1Client.js";
-import { PIPELINE_DECISION_LOG_SOURCES, didStopLossTouch, scoreBucket, type ScoreBucket } from "../pipelineDecisionLog.js";
+import { PIPELINE_DECISION_LOG_SOURCES, didStopLossTouch, scoreBucket, SCORE_BUCKETS, type ScoreBucket } from "../pipelineDecisionLog.js";
 import { deriveGridShape, type GridBoundType } from "../gridBoundEngine.js";
 import { computeGridVelocity } from "../gridVelocity.js";
 import type { KlineCandle } from "../toolHelpers.js";
@@ -254,20 +254,25 @@ export function summarizeGridOutcomes(metrics: GridOutcomeMetrics[]): GridOutcom
 export function summarizeGridOutcomesByScoreBucket(
   entries: { scoreBucket: ScoreBucket; gridOutcome: GridOutcomeMetrics | null }[],
 ): Record<ScoreBucket, GridOutcomeSummary | null> {
-  const groups: Record<ScoreBucket, GridOutcomeMetrics[]> = { lt_40: [], "40_55": [], gte_55: [] };
+  // Kunci DITURUNKAN dari SCORE_BUCKETS, tidak ditulis tangan -- T8
+  // menambahkan batas 50 dan versi hardcoded lama harus diedit di tiga
+  // tempat sekaligus. Sekarang menggeser batas cukup di pipelineDecisionLog.ts.
+  const groups = Object.fromEntries(SCORE_BUCKETS.map((b) => [b, [] as GridOutcomeMetrics[]])) as Record<
+    ScoreBucket,
+    GridOutcomeMetrics[]
+  >;
   for (const entry of entries) {
     if (entry.gridOutcome === null) continue;
     const bucket = groups[entry.scoreBucket];
-    // scoreBucket datang dari scoreBucket(), jadi selalu salah satu dari
-    // tiga kunci -- guard ini murni jaring pengaman kalau tipe dilonggarkan.
+    // scoreBucket datang dari scoreBucket(), jadi selalu salah satu kunci --
+    // guard ini murni jaring pengaman kalau tipe dilonggarkan.
     if (bucket === undefined) continue;
     bucket.push(entry.gridOutcome);
   }
-  return {
-    lt_40: summarizeGridOutcomes(groups.lt_40),
-    "40_55": summarizeGridOutcomes(groups["40_55"]),
-    gte_55: summarizeGridOutcomes(groups.gte_55),
-  };
+  return Object.fromEntries(SCORE_BUCKETS.map((b) => [b, summarizeGridOutcomes(groups[b])])) as Record<
+    ScoreBucket,
+    GridOutcomeSummary | null
+  >;
 }
 
 export function emptyBucket(): BucketStats {
@@ -319,12 +324,27 @@ export function sumAggregateGroups(groups: PipelineDecisionAggregateGroup[]): Pi
   let slKnown = 0;
   let min = Infinity;
   let max = -Infinity;
+  // F3: metrik grid dijumlah dengan penyebutnya SENDIRI (gridKnown), bukan
+  // sampleSize. Rata-rata dibobot gridKnown -- memakai sampleSize akan
+  // memberi bobot ke grup yang tidak punya satu pun baris grid terukur.
+  let gridExited = 0;
+  let gridExitedBelow = 0;
+  let gridKnown = 0;
+  let weightedInRange = 0;
+  let weightedCrossing = 0;
   for (const g of groups) {
     sampleSize += g.sampleSize;
     winCount += g.winCount;
     weightedGross += g.avgGrossReturn * g.sampleSize;
     slHits += g.slHits;
     slKnown += g.slKnown;
+    gridExited += g.gridExited;
+    gridExitedBelow += g.gridExitedBelow;
+    gridKnown += g.gridKnown;
+    if (g.gridKnown > 0) {
+      weightedInRange += (g.avgTimeInRangePct ?? 0) * g.gridKnown;
+      weightedCrossing += (g.avgCrossingRate ?? 0) * g.gridKnown;
+    }
     if (g.sampleSize > 0) {
       min = Math.min(min, g.minGrossReturn);
       max = Math.max(max, g.maxGrossReturn);
@@ -339,6 +359,13 @@ export function sumAggregateGroups(groups: PipelineDecisionAggregateGroup[]): Pi
     maxGrossReturn: sampleSize ? max : 0,
     slHits,
     slKnown,
+    gridExited,
+    gridExitedBelow,
+    gridKnown,
+    // null (bukan 0) kalau tidak ada satu pun baris terukur -- 0 berarti
+    // "diukur, rata-ratanya nol", dan itu klaim yang berbeda.
+    avgTimeInRangePct: gridKnown ? weightedInRange / gridKnown : null,
+    avgCrossingRate: gridKnown ? weightedCrossing / gridKnown : null,
   };
 }
 
@@ -368,7 +395,7 @@ export function registerPipelineDecisionBacktestTools(server: McpServer): void {
       description:
         "Uji maju keputusan yang tersimpan di pipeline_decision_log (entry-alert Phase 2 + persist manual/Dropstab). " +
         "Hitung forward return harga (close 1h) dan apakah low menyentuh stop-loss dalam jendela 1h/4h/24h. " +
-        "Agregat per keputusan (TRADE/WATCH/NO_TRADE) dan bucket skor (lt_40 / 40_55 / gte_55). " +
+        `Agregat per keputusan (TRADE/WATCH/NO_TRADE) dan bucket skor (${SCORE_BUCKETS.join(" / ")}). ` +
         `Forward return ON-DEMAND dari klines, bukan kolom precompute. Default ${DEFAULT_ROWS} row terbaru, maks ${MAX_ROWS}. ` +
         `Forward return dikurangi biaya eksekusi flat: fee_bps (default ${DEFAULT_FEE_BPS}) + slippage_bps (default ${DEFAULT_SLIPPAGE_BPS}), ` +
         "dikali 2 (entry+exit), sebelum win rate/avg return dihitung. Ini BUKAN replay order-book historis penuh -- market impact " +
@@ -510,9 +537,14 @@ export function registerPipelineDecisionBacktestTools(server: McpServer): void {
         const gridSummary = summarizeGridOutcomes(
           evaluated.map((r) => r.gridOutcome).filter((g): g is GridOutcomeMetrics => g !== null),
         );
-        // F1: tabulasi silang metrik grid x bucket skor -- lihat komentar
-        // panjang di summarizeGridOutcomesByScoreBucket().
+        // F1: tabulasi silang metrik grid x bucket skor atas sampel detail.
+        // Masih dipakai untuk struct output (per-baris), TAPI tabel yang
+        // ditampilkan sekarang memakai `byScoreGrid` dari SQL -- lihat F3.
         const gridByScoreBucket = summarizeGridOutcomesByScoreBucket(evaluated);
+        // F3: metrik grid per bucket dari agregat SQL (seluruh rentang).
+        const byScoreGrid = Object.fromEntries(
+          aggregates.byScoreBucket.map((g) => [g.key, g]),
+        ) as Partial<Record<ScoreBucket, PipelineDecisionAggregateGroup>>;
         const coveragePct = aggregates.rowsInRange
           ? (aggregates.rowsWithOutcome / aggregates.rowsInRange) * 100
           : 0;
@@ -544,7 +576,7 @@ export function registerPipelineDecisionBacktestTools(server: McpServer): void {
           .subheader("Per bucket skor (seluruh rentang, dari SQL)")
           .table(
             ["Bucket", "N", "Win rate", "Avg return", "SL-touch 24h"],
-            fmtBucketTable(byScore, ["lt_40", "40_55", "gte_55"]),
+            fmtBucketTable(byScore, [...SCORE_BUCKETS]),
           );
 
         if (gridSummary) {
@@ -557,23 +589,31 @@ export function registerPipelineDecisionBacktestTools(server: McpServer): void {
             )
             .row("Time-in-range (close)", `${(gridSummary.avgTimeInRangePct * 100).toFixed(1)}%`)
             .row("Crossing rate (proxy)", `${(gridSummary.avgCrossingRate * 100).toFixed(1)}% candle 5m`);
+        }
 
-          // F1: inilah tabel yang menjawab "apakah skor memisahkan grid yang
-          // bertahan dari yang jebol". Baca bareng peringatan korelasi
-          // intra-tick di note bawah -- N di sini bukan N independen.
-          builder.subheader("Metrik grid per bucket skor (sampel detail)").table(
-            ["Bucket", "N", "Keluar range", "  ke bawah", "Time-in-range", "Crossing rate"],
-            (["lt_40", "40_55", "gte_55"] as const).map((key) => {
-              const g = gridByScoreBucket[key];
-              return g === null
+        {
+          // F3 (2026-09-05): tabel ini SEKARANG dari SQL atas SELURUH rentang
+          // (kolom migration 0017), bukan lagi dari sampel detail 1-2 tick.
+          // Inilah tabel yang menjawab "apakah skor memisahkan grid yang
+          // bertahan dari yang jebol", dan sekarang ia punya N yang berarti.
+          //
+          // `gridKnown` adalah penyebutnya, BUKAN `sampleSize`: baris tanpa
+          // bound grid (mayoritas NO_TRADE) dan baris pra-0017 punya kolom
+          // grid NULL, dan memasukkannya ke penyebut akan membuat tingkat
+          // "keluar range" terlihat jauh lebih rendah dari kenyataan.
+          builder.subheader("Metrik grid per bucket skor (SELURUH rentang, dari SQL)").table(
+            ["Bucket", "N terukur", "Keluar range", "  ke bawah", "Time-in-range", "Crossing rate"],
+            SCORE_BUCKETS.map((key) => {
+              const g = byScoreGrid[key];
+              return g === undefined || g.gridKnown === 0
                 ? [key, "0", "-", "-", "-", "-"]
                 : [
                     key,
-                    String(g.sampleSize),
-                    `${(g.exitedRangeRate * 100).toFixed(1)}%`,
-                    `${(g.exitedBelowRate * 100).toFixed(1)}%`,
-                    `${(g.avgTimeInRangePct * 100).toFixed(1)}%`,
-                    `${(g.avgCrossingRate * 100).toFixed(1)}%`,
+                    String(g.gridKnown),
+                    `${((g.gridExited / g.gridKnown) * 100).toFixed(1)}%`,
+                    `${((g.gridExitedBelow / g.gridKnown) * 100).toFixed(1)}%`,
+                    g.avgTimeInRangePct == null ? "-" : `${(g.avgTimeInRangePct * 100).toFixed(1)}%`,
+                    g.avgCrossingRate == null ? "-" : `${(g.avgCrossingRate * 100).toFixed(1)}%`,
                   ];
             }),
           );
@@ -606,10 +646,12 @@ export function registerPipelineDecisionBacktestTools(server: McpServer): void {
             "DIREKONSTRUKSI dari lower/upper, bukan nilai yang dipersist. " +
             `"Net" = sesudah dikurangi fee_bps+slippage_bps di entry & exit (flat ${(execCostRoundTrip * 100).toFixed(3)}% round-trip), ` +
             "BUKAN replay order-book historis -- market impact per ukuran order tidak dimodelkan. Sample <20 = confidence rendah. " +
-            "Tabel 'Metrik grid per bucket skor' dihitung atas SAMPEL DETAIL saja, dan sampel itu diambil sebagai N baris " +
-            "TERBARU -- satu tick entry-alert menulis puluhan baris sekaligus, jadi limit<=80 biasanya cuma 1-2 tick. " +
-            "Baris satu tick berbagi kondisi pasar yang sama sehingga BUKAN observasi independen: perlakukan N di tabel itu " +
-            "sebagai jauh lebih kecil dari angkanya, dan bandingkan beberapa rentang waktu terpisah sebelum menyimpulkan. " +
+            "Tabel 'Metrik grid per bucket skor' dihitung DI SQL atas SELURUH rentang dari kolom migration 0017 " +
+            "(grid_exited_range dsb) yang di-backfill cron -- bukan lagi dari sampel detail. Penyebutnya 'N terukur' " +
+            "(COUNT kolom grid), BUKAN jumlah baris: keputusan tanpa bound grid dan semua baris sebelum 0017 bernilai " +
+            "NULL alias TIDAK DIUKUR, dan memasukkannya ke penyebut akan membuat tingkat 'keluar range' terlihat jauh " +
+            "lebih rendah dari kenyataan. Blok 'Metrik grid-native (sampel detail)' di atasnya TETAP dari <=80 baris " +
+            "terbaru -- itu biasanya cuma 1-2 tick entry-alert, dan baris satu tick bukan observasi independen. " +
             "Hasil ini TIDAK menulis ulang bobot ranking atau threshold 55.",
         );
 
