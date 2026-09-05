@@ -227,3 +227,41 @@ deploy WAJIB `&&`, dan buktinya checksum, bukan `systemctl is-active`.**
    depth-watch besok.**
 3. `svm-jkt` (108.136.219.101) SSH timeout port 22, belum terjelaskan. Bukan
    bukti host mati — :443 bisa tetap melayani.
+
+### PENUTUP — kedua target TUNTAS (2026-09-05)
+
+**Konstanta gateway TERBUKTI** (`sudo grep` di `/opt/whale-stream-gateway/depthWatch.mjs`):
+
+    export const EVENT_BUFFER_PER_SYMBOL = 2000;
+    export const WALL_EXIT_HYSTERESIS = 0.15;
+
+Target 1 sekarang tuntas beneran, bukan atas dasar `systemctl is-active`.
+
+**Gateway kedua di `jaringan-dev`: `active` — TAPI bukan risiko.**
+
+Ralat atas kekhawatiran yang ditulis di bagian "Masih terbuka" di atas. Bukti
+dari kode, bukan dugaan:
+
+- `src/streamGatewayClient.ts:7` — *"Unlike the REST relay there is NO failover
+  tier: one gateway."*
+- `grep -c PROXY_URL_2 src/streamGatewayClient.ts` = **0**. Tidak ada fallback.
+- Gateway dijangkau lewat `PROXY_URL` (host yang sama dengan relay #1, di
+  belakang Caddy yang sama di `/stream/*`) = `svm-vps`, host yang baru
+  di-update.
+
+Jadi Worker **tidak pernah** menghubungi gateway di `jaringan-dev`. Ia tidak
+bisa mencemari data depth-watch maupun likuidasi.
+
+**Kenapa ini BEDA dengan duplikasi cron whalescope-mcp:** di kasus itu kedua
+worker menulis ke D1 yang SAMA dan sama-sama membayar weight REST Binance. Di
+sini tiap gateway punya SQLite lokal sendiri, koneksinya WebSocket (tidak
+memakai weight REST), dan hanya satu yang dibaca. Tidak ada target tulis
+bersama. Pola permukaannya mirip, mekanismenya tidak.
+
+**Statusnya: bukan bug, tapi utang kebersihan.** Gateway di `jaringan-dev`
+memegang koneksi WS `!forceOrder@arr` ke Binance untuk tidak ada pembaca, dan
+menjalankan kode LAMA (`depthWatch.mjs` pra-2026-09-04). Kalau suatu saat
+`PROXY_URL` dipindah ke host itu, kode lamanya akan aktif tanpa peringatan.
+Pilihan: `systemctl disable --now whale-stream-gateway` di `jaringan-dev`,
+atau kirim `depthWatch.mjs` ke sana juga supaya kedua host konsisten. Tidak
+mendesak, dan TIDAK memengaruhi jendela verifikasi 2026-09-05 11:52Z.
