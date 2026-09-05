@@ -15,6 +15,7 @@ import * as binanceProxy from "../binanceProxyClient.js";
 import type { KlineTuple } from "../binanceProxyClient.js";
 import {
   evaluateDecisionForward,
+  evaluateGridOutcome,
   FORWARD_INTERVAL,
   FORWARD_WINDOW_CANDLES,
   FORWARD_FULL_WINDOW_CANDLES,
@@ -123,11 +124,31 @@ export async function backfillPipelineDecisionOutcomes(now: number = Date.now())
       continue;
     }
 
+    // F2 (2026-09-05, migration 0017): metrik grid-native dari candle YANG
+    // SAMA -- nol fetch tambahan. Jendela 24 jam penuh, sengaja identik
+    // dengan slTouched24h supaya keduanya bisa dibandingkan langsung.
+    //
+    // evaluateGridOutcome() DI-REUSE dari pipelineDecisionBacktest.ts, bukan
+    // diimplementasi ulang: kolom yang dipersist di sini WAJIB bernilai sama
+    // dengan yang dihitung tool on-demand untuk baris yang sama. Dua
+    // implementasi berarti dua definisi "keluar range" yang bisa menyimpang
+    // diam-diam -- persis kesalahan yang pernah terjadi pada window 1h
+    // (lihat B1/B2 di komentar atas).
+    //
+    // null saat bound tidak ada / degenerate. Diteruskan APA ADANYA ke D1:
+    // NULL = tidak diukur, bukan nol.
+    const grid = evaluateGridOutcome(candles, row.lowerPrice, row.upperPrice);
+
     await updatePipelineDecisionOutcome(row.id, {
       forwardReturn1h: fwd1h?.forwardReturn ?? null,
       forwardReturn4h: fwd4h?.forwardReturn ?? null,
       forwardReturn24h: fwd24h.forwardReturn,
       slTouched24h: fwd24h.slTouch,
+      gridExitedRange: grid?.exitedRange ?? null,
+      gridExitedAbove: grid?.exitedAbove ?? null,
+      gridExitedBelow: grid?.exitedBelow ?? null,
+      gridTimeInRangePct: grid?.timeInRangePct ?? null,
+      gridCrossingRate: grid?.crossingRate ?? null,
     });
     updated += 1;
   }

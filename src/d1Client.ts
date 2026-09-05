@@ -1026,6 +1026,14 @@ export interface PendingPipelineDecisionOutcomeRow {
   runAt: number;
   symbol: string;
   stopLoss: number | null;
+  /**
+   * Bound grid saat keputusan dibuat (migration 0011). Dibutuhkan
+   * evaluateGridOutcome() untuk metrik grid-native (F2, migration 0017).
+   * NULL kalau keputusan gagal hard-screen sebelum bound sempat dihitung --
+   * baris begitu tetap dapat forward_return_*, cuma tanpa metrik grid.
+   */
+  lowerPrice: number | null;
+  upperPrice: number | null;
   /** Berapa kali baris ini sudah dicoba DAN gagal (migration 0016). */
   attempts: number;
 }
@@ -1035,6 +1043,8 @@ interface RawPendingPipelineDecisionOutcomeRow {
   run_at: number;
   symbol: string;
   stop_loss: number | null;
+  lower_price: number | null;
+  upper_price: number | null;
   outcome_attempts: number | null;
 }
 
@@ -1046,7 +1056,7 @@ export async function queryPendingPipelineDecisionOutcomes(
 ): Promise<PendingPipelineDecisionOutcomeRow[]> {
   const result = await requireDb()
     .prepare(
-      "SELECT id, run_at, symbol, stop_loss, outcome_attempts FROM pipeline_decision_log " +
+      "SELECT id, run_at, symbol, stop_loss, lower_price, upper_price, outcome_attempts FROM pipeline_decision_log " +
         "WHERE forward_return_24h IS NULL AND run_at < ? AND run_at > ? AND outcome_attempts < ? " +
         // 4.3: outcome_attempts LEBIH DULU dari run_at. Dengan `run_at ASC`
         // sendirian, >= LIMIT baris yang gagal permanen (symbol delisted,
@@ -1065,6 +1075,8 @@ export async function queryPendingPipelineDecisionOutcomes(
     runAt: r.run_at,
     symbol: r.symbol,
     stopLoss: r.stop_loss,
+    lowerPrice: r.lower_price,
+    upperPrice: r.upper_price,
     attempts: r.outcome_attempts ?? 0,
   }));
 }
@@ -1092,18 +1104,39 @@ export interface PipelineDecisionOutcomeUpdate {
   forwardReturn4h: number | null;
   forwardReturn24h: number | null;
   slTouched24h: boolean | null;
+  /**
+   * F2 (migration 0017): metrik grid-native jendela 24 jam. `null` = TIDAK
+   * DIUKUR (bound grid tidak ada / degenerate), BUKAN "nol". Caller wajib
+   * meneruskan null apa adanya, jangan di-default ke 0 -- membedakan
+   * "grid bertahan penuh" dari "tidak pernah diukur" adalah seluruh alasan
+   * kolom ini nullable.
+   */
+  gridExitedRange: boolean | null;
+  gridExitedAbove: boolean | null;
+  gridExitedBelow: boolean | null;
+  gridTimeInRangePct: number | null;
+  gridCrossingRate: number | null;
 }
+
+const boolToDb = (v: boolean | null): number | null => (v === null ? null : v ? 1 : 0);
 
 export async function updatePipelineDecisionOutcome(id: number, outcome: PipelineDecisionOutcomeUpdate): Promise<void> {
   await requireDb()
     .prepare(
-      "UPDATE pipeline_decision_log SET forward_return_1h = ?, forward_return_4h = ?, forward_return_24h = ?, sl_touched_24h = ? WHERE id = ?",
+      "UPDATE pipeline_decision_log SET forward_return_1h = ?, forward_return_4h = ?, forward_return_24h = ?, sl_touched_24h = ?, " +
+        "grid_exited_range = ?, grid_exited_above = ?, grid_exited_below = ?, grid_time_in_range_pct = ?, grid_crossing_rate = ? " +
+        "WHERE id = ?",
     )
     .bind(
       outcome.forwardReturn1h,
       outcome.forwardReturn4h,
       outcome.forwardReturn24h,
-      outcome.slTouched24h === null ? null : outcome.slTouched24h ? 1 : 0,
+      boolToDb(outcome.slTouched24h),
+      boolToDb(outcome.gridExitedRange),
+      boolToDb(outcome.gridExitedAbove),
+      boolToDb(outcome.gridExitedBelow),
+      outcome.gridTimeInRangePct,
+      outcome.gridCrossingRate,
       id,
     )
     .run();
