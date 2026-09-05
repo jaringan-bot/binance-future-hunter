@@ -17,6 +17,19 @@ interface FakeRow {
   forward_return_24h: number | null;
   /** migration 0016 -- default 0 kalau fixture tidak menyebutkannya. */
   outcome_attempts?: number;
+  /** migration 0011 -- dibutuhkan metrik grid (F2). */
+  lower_price?: number | null;
+  upper_price?: number | null;
+  // Kolom hasil UPDATE. Optional supaya fixture tidak perlu menyebut
+  // semuanya; `undefined` berarti kolomnya belum pernah ditulis.
+  forward_return_1h?: number | null;
+  forward_return_4h?: number | null;
+  sl_touched_24h?: number | null;
+  grid_exited_range?: number | null;
+  grid_exited_above?: number | null;
+  grid_exited_below?: number | null;
+  grid_time_in_range_pct?: number | null;
+  grid_crossing_rate?: number | null;
 }
 
 class FakeStatement {
@@ -34,20 +47,23 @@ class FakeStatement {
 
   async run(): Promise<{ success: true }> {
     if (this.sql.startsWith("UPDATE pipeline_decision_log SET forward_return_1h")) {
-      const [forwardReturn1h, forwardReturn4h, forwardReturn24h, slTouched24h, id] = this.args as [
-        number | null,
-        number | null,
-        number | null,
-        number | null,
-        number,
-      ];
+      // Kolom DIBACA dari klausa SET, tidak di-hardcode posisinya. Sama
+      // disiplin dengan cabang SELECT di bawah: kalau produksi menambah,
+      // menghapus, atau menukar urutan kolom, fake ini ikut berubah dan
+      // test tetap menguji hal yang benar. Daftar posisi yang di-hardcode
+      // akan diam-diam menulis nilai ke kolom yang salah begitu urutannya
+      // bergeser -- hijau, tapi bohong.
+      const setClause = /SET (.+) WHERE id = \?/s.exec(this.sql)?.[1] ?? "";
+      const columns = setClause.split(",").map((part) => part.trim().split(/\s*=\s*/)[0]);
+      const values = this.args.slice(0, columns.length);
+      const id = this.args[this.args.length - 1] as number;
+      if (columns.length !== this.args.length - 1) {
+        throw new Error(`FakeStatement.run: ${columns.length} kolom SET tapi ${this.args.length - 1} nilai`);
+      }
       const row = this.db.rows.find((r) => r.id === id);
       if (row) {
-        Object.assign(row, {
-          forward_return_1h: forwardReturn1h,
-          forward_return_4h: forwardReturn4h,
-          forward_return_24h: forwardReturn24h,
-          sl_touched_24h: slTouched24h,
+        columns.forEach((col, i) => {
+          (row as unknown as Record<string, unknown>)[col] = values[i];
         });
       }
       return { success: true };
@@ -92,6 +108,12 @@ class FakeStatement {
           symbol: r.symbol,
           stop_loss: r.stop_loss,
           outcome_attempts: r.outcome_attempts ?? 0,
+          // Sama disiplin: hanya diproyeksikan kalau SQL produksi benar-benar
+          // memintanya. Kalau `lower_price` dihapus dari SELECT, fake berhenti
+          // mengembalikannya dan metrik grid di cron ikut mati -- terlihat,
+          // bukan tersembunyi.
+          ...(this.sql.includes("lower_price") ? { lower_price: r.lower_price ?? null } : {}),
+          ...(this.sql.includes("upper_price") ? { upper_price: r.upper_price ?? null } : {}),
         }));
       return { results: results as T[] };
     }
@@ -100,7 +122,7 @@ class FakeStatement {
 }
 
 class FakeD1 {
-  rows: (FakeRow & { forward_return_1h?: number | null; forward_return_4h?: number | null; sl_touched_24h?: number | null })[] = [];
+  rows: FakeRow[] = [];
 
   prepare(sql: string): FakeStatement {
     return new FakeStatement(this, sql);
@@ -129,6 +151,28 @@ describe("pipeline_decision_log outcome backfill D1 path", () => {
 
     const pending = await queryPendingPipelineDecisionOutcomes(/* readyBefore */ 1500, /* notOlderThan */ 200, /* limit */ 10, /* maxAttempts */ 5);
     expect(pending.map((r) => r.id)).toEqual([2, 1]); // oldest run_at first, excludes id 3 (already backfilled) and id 4 (too old)
+  });
+
+  it("queryPendingPipelineDecisionOutcomes ikut mengambil bound grid (F2) -- tanpa ini metrik grid mati DIAM-DIAM", async () => {
+    // Kalau `lower_price`/`upper_price` dicabut dari SELECT, `row.lowerPrice`
+    // jadi undefined; evaluateGridOutcome() memakai `== null` sehingga
+    // undefined LOLOS sebagai "tidak ada bound" dan mengembalikan null.
+    // Hasilnya: kolom grid NULL untuk SETIAP baris, selamanya, tanpa satu
+    // pun error yang terlihat -- cron tetap melaporkan updated > 0.
+    // Test ini yang menahan regresi itu.
+    fake.rows = [
+      { id: 1, run_at: 1000, symbol: "BTCUSDT", stop_loss: 59000, lower_price: 60000, upper_price: 65000, forward_return_24h: null },
+      { id: 2, run_at: 1100, symbol: "ETHUSDT", stop_loss: null, forward_return_24h: null }, // tanpa bound
+    ];
+
+    const pending = await queryPendingPipelineDecisionOutcomes(2000, 0, 10, 5);
+
+    expect(pending[0].lowerPrice).toBe(60000);
+    expect(pending[0].upperPrice).toBe(65000);
+    // Baris tanpa bound -> null, dan itu HARUS null (bukan undefined), supaya
+    // evaluateGridOutcome menerima tipe yang dijanjikan kontraknya.
+    expect(pending[1].lowerPrice).toBeNull();
+    expect(pending[1].upperPrice).toBeNull();
   });
 
   it("queryPendingPipelineDecisionOutcomes respects the limit", async () => {
@@ -194,6 +238,11 @@ describe("pipeline_decision_log outcome backfill D1 path", () => {
       forwardReturn4h: 0.005,
       forwardReturn24h: 0.02,
       slTouched24h: true,
+      gridExitedRange: true,
+      gridExitedAbove: false,
+      gridExitedBelow: true,
+      gridTimeInRangePct: 0.42,
+      gridCrossingRate: 0.31,
     });
 
     expect(fake.rows[0]).toMatchObject({
@@ -201,6 +250,12 @@ describe("pipeline_decision_log outcome backfill D1 path", () => {
       forward_return_4h: 0.005,
       forward_return_24h: 0.02,
       sl_touched_24h: 1,
+      // F2 (migration 0017): boolean grid ikut dikonversi ke 0/1, angka apa adanya.
+      grid_exited_range: 1,
+      grid_exited_above: 0,
+      grid_exited_below: 1,
+      grid_time_in_range_pct: 0.42,
+      grid_crossing_rate: 0.31,
     });
   });
 
@@ -212,8 +267,63 @@ describe("pipeline_decision_log outcome backfill D1 path", () => {
       forwardReturn4h: 0.005,
       forwardReturn24h: 0.02,
       slTouched24h: null,
+      gridExitedRange: null,
+      gridExitedAbove: null,
+      gridExitedBelow: null,
+      gridTimeInRangePct: null,
+      gridCrossingRate: null,
     });
 
     expect(fake.rows[0].sl_touched_24h).toBeNull();
+  });
+
+  it("updatePipelineDecisionOutcome menulis NULL (bukan 0) untuk metrik grid yang tidak terukur", async () => {
+    // Baris tanpa bound grid: forward return TETAP terisi, metrik grid NULL.
+    // Membedakan "tidak diukur" dari "grid bertahan penuh di dalam range"
+    // adalah seluruh alasan kolom 0017 nullable -- kalau ini jadi 0, agregat
+    // SQL akan membaca ribuan baris NO_TRADE sebagai grid yang sukses.
+    fake.rows = [{ id: 1, run_at: 1000, symbol: "BTCUSDT", stop_loss: null, forward_return_24h: null }];
+
+    await updatePipelineDecisionOutcome(1, {
+      forwardReturn1h: 0.001,
+      forwardReturn4h: 0.005,
+      forwardReturn24h: 0.02,
+      slTouched24h: null,
+      gridExitedRange: null,
+      gridExitedAbove: null,
+      gridExitedBelow: null,
+      gridTimeInRangePct: null,
+      gridCrossingRate: null,
+    });
+
+    expect(fake.rows[0].forward_return_24h).toBe(0.02);
+    expect(fake.rows[0].grid_exited_range).toBeNull();
+    expect(fake.rows[0].grid_exited_above).toBeNull();
+    expect(fake.rows[0].grid_exited_below).toBeNull();
+    expect(fake.rows[0].grid_time_in_range_pct).toBeNull();
+    expect(fake.rows[0].grid_crossing_rate).toBeNull();
+  });
+
+  it("updatePipelineDecisionOutcome membedakan grid_exited_range false dari NULL", async () => {
+    // false -> 0 (diukur, grid BERTAHAN). null -> NULL (tidak diukur).
+    // Kalau boolToDb() memakai `v ? 1 : 0` tanpa cek null lebih dulu,
+    // keduanya sama-sama jadi 0 dan perbedaannya hilang selamanya.
+    fake.rows = [{ id: 1, run_at: 1000, symbol: "BTCUSDT", stop_loss: 100, forward_return_24h: null }];
+
+    await updatePipelineDecisionOutcome(1, {
+      forwardReturn1h: null,
+      forwardReturn4h: null,
+      forwardReturn24h: 0.01,
+      slTouched24h: false,
+      gridExitedRange: false,
+      gridExitedAbove: false,
+      gridExitedBelow: false,
+      gridTimeInRangePct: 1,
+      gridCrossingRate: 0,
+    });
+
+    expect(fake.rows[0].grid_exited_range).toBe(0);
+    expect(fake.rows[0].grid_time_in_range_pct).toBe(1);
+    expect(fake.rows[0].grid_crossing_rate).toBe(0);
   });
 });

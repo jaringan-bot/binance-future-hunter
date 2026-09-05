@@ -202,7 +202,20 @@ export async function checkRelayHealth(env: NotifyEnv, now: number = Date.now())
 // sendiri 5xx/unreachable, yang checkRelayHealth tidak lihat.
 
 const WORKER_PUBLIC_KV_KEY = "bromo_worker_public_last_notified_at";
+// State TERPISAH dari cooldown: cooldown menjawab "kapan terakhir mengeluh",
+// state ini menjawab "sedang berapa kali gagal berturut-turut, dan apakah
+// kita sudah pernah bilang DOWN". Menggabungkannya ke satu key berarti satu
+// dari dua pertanyaan itu hilang.
+const WORKER_PUBLIC_STATE_KV_KEY = "bromo_worker_public_state";
+/** Probe gagal berturut-turut sebelum alert. 2 tick lima-menitan = ~10 menit. */
+export const WORKER_PUBLIC_FAIL_STREAK = 2;
 export const WORKER_PUBLIC_TIMEOUT_MS = 5_000;
+
+interface WorkerPublicState {
+  failStreak: number;
+  /** Sudah pernah kirim DOWN dan belum kirim PULIH. */
+  alerted: boolean;
+}
 export const DEFAULT_WORKER_PUBLIC_URL = "https://binance-future-hunter.jaringan.workers.dev/";
 
 export async function checkWorkerPublicHealth(
@@ -231,12 +244,73 @@ export async function checkWorkerPublicHealth(
     clearTimeout(timer);
   }
 
-  if (problem == null) return;
+  const prev = (await kvConfig.getJson<WorkerPublicState>(WORKER_PUBLIC_STATE_KV_KEY)) ?? {
+    failStreak: 0,
+    alerted: false,
+  };
+
+  // ── SEHAT ──
+  if (problem == null) {
+    // PEMULIHAN. Tanpa ini, diam sesudah alert punya DUA arti yang tidak bisa
+    // dibedakan: "sudah pulih" atau "masih mati tapi sedang cooldown". Persis
+    // ambiguitas yang bikin alert 2026-09-05 ditindaklanjuti sebagai insiden
+    // padahal worker-nya sudah 200 sejak lama.
+    //
+    // Pesan pemulihan TIDAK di-cooldown: cooldown menahan keluhan berulang,
+    // bukan kabar bahwa masalahnya selesai.
+    if (prev.alerted) {
+      await dispatchNotification(
+        env,
+        `✅ *Bromo*: Worker public \`${url}\` PULIH (HTTP 200, body valid). Tidak ada tindakan yang diperlukan.`,
+      );
+    }
+    if (prev.failStreak !== 0 || prev.alerted) {
+      await kvConfig.putJson(
+        WORKER_PUBLIC_STATE_KV_KEY,
+        { failStreak: 0, alerted: false },
+        { expirationTtl: NOTIFY_KV_TTL_SECONDS },
+      );
+    }
+    return;
+  }
+
+  // ── GAGAL ──
+  const failStreak = prev.failStreak + 1;
+
+  // Satu probe gagal BUKAN outage. Probe ini jalan tiap tick */5 dengan timeout
+  // 5 detik; satu blip jaringan, satu cold start yang lambat, atau jendela
+  // propagasi `wrangler deploy` sudah cukup membuatnya gagal sekali. Alert
+  // yang menyala dari satu kegagalan melatih orang untuk mengabaikannya --
+  // dan alert yang diabaikan sama tidak bergunanya dengan alert yang tidak ada.
+  //
+  // Dua kegagalan BERURUTAN = ~10 menit, cukup untuk membedakan blip dari
+  // outage, masih jauh lebih cepat dari dampak nyata ke user.
+  if (failStreak < WORKER_PUBLIC_FAIL_STREAK) {
+    console.warn(
+      `[cron] Bromo: probe worker public gagal (${problem}), streak ${failStreak}/${WORKER_PUBLIC_FAIL_STREAK} -- belum alert.`,
+    );
+    await kvConfig.putJson(
+      WORKER_PUBLIC_STATE_KV_KEY,
+      { failStreak, alerted: prev.alerted },
+      { expirationTtl: NOTIFY_KV_TTL_SECONDS },
+    );
+    return;
+  }
+
+  // Streak tercapai. State ditulis DULUAN supaya kalau notifikasi gagal
+  // terkirim, cek berikutnya tetap tahu ia sedang dalam keadaan alerted --
+  // dan pesan pemulihannya tidak hilang.
+  await kvConfig.putJson(
+    WORKER_PUBLIC_STATE_KV_KEY,
+    { failStreak, alerted: true },
+    { expirationTtl: NOTIFY_KV_TTL_SECONDS },
+  );
   if (await withinCooldown(WORKER_PUBLIC_KV_KEY, now, INFRA_NOTIFY_COOLDOWN_MS)) return;
 
   await dispatchNotification(
     env,
-    `🚨 *Bromo*: Worker public \`${url}\` DOWN (${problem}). Cek Cloudflare Workers status + deploy terbaru. Relay/stream check terpisah.`,
+    `🚨 *Bromo*: Worker public \`${url}\` DOWN (${problem}, ${failStreak} probe berturut-turut). ` +
+      "Cek Cloudflare Workers status + deploy terbaru. Relay/stream check terpisah.",
   );
   await recordNotified(WORKER_PUBLIC_KV_KEY, now, NOTIFY_KV_TTL_SECONDS);
 }

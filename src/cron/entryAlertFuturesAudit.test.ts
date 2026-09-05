@@ -84,6 +84,19 @@ vi.mock("../d1Client.js", () => ({
   getEntryAlertState: vi.fn().mockResolvedValue(null),
   upsertEntryAlertState: vi.fn().mockResolvedValue(undefined),
 }));
+// Sejak 2026-09-05 head DCA + Traditional DIBISUKAN by default (keputusan
+// user, sakelar KV `entry_alert:heads`). AUDIT di file ini menguji
+// REACHABILITY logika tiap head -- "bisakah DCA_TRADE saja mencapai
+// dispatcher" -- bukan sakelarnya, jadi ketiganya dinyalakan eksplisit di
+// sini. Tanpa mock ini `resolveEnabledHeads()` jatuh ke default dan audit
+// akan hijau-palsu: ia melaporkan head tak terjangkau padahal yang terjadi
+// cuma dibisukan.
+vi.mock("../kvConfig.js", () => ({
+  getJson: vi.fn(async (key: string) =>
+    key === "entry_alert:heads" ? { grid: true, dca: true, trad: true } : null,
+  ),
+  putJson: vi.fn().mockResolvedValue(undefined),
+}));
 
 import { checkEntryAlertForSymbol } from "./entryAlertCron.js";
 import { runTriplePipelineForSymbol } from "../tools/fullPipeline.js";

@@ -10,11 +10,12 @@ import {
   sumAggregateGroups,
   evaluateGridOutcome,
   summarizeGridOutcomes,
+  gridRatesByScoreBucket,
   emptyBucket,
   evaluateDecisionForward,
   registerPipelineDecisionBacktestTools,
 } from "./pipelineDecisionBacktest.js";
-import type { PipelineDecisionLogRow } from "../pipelineDecisionLog.js";
+import { SCORE_BUCKETS, type PipelineDecisionLogRow } from "../pipelineDecisionLog.js";
 import type { PipelineDecisionAggregateGroup, PipelineDecisionAggregates } from "../d1Client.js";
 
 vi.mock("../binanceProxyClient.js", () => ({
@@ -34,6 +35,11 @@ function group(partial: Partial<PipelineDecisionAggregateGroup> & { key: string 
     maxGrossReturn: 0,
     slHits: 0,
     slKnown: 0,
+    gridExited: 0,
+    gridExitedBelow: 0,
+    gridKnown: 0,
+    avgTimeInRangePct: null,
+    avgCrossingRate: null,
     ...partial,
   };
 }
@@ -140,6 +146,41 @@ describe("aggregate group adapters (B3 / Stage 4.1)", () => {
     expect(total.maxGrossReturn).toBeCloseTo(0.2, 10);
   });
 
+  // ── F3 (2026-09-05): metrik grid ikut diagregasi ───────────────────────
+  it("menjumlah metrik grid dengan penyebutnya SENDIRI, bukan sampleSize", () => {
+    // Grup A: 100 baris, tapi cuma 10 yang punya bound grid (90 NO_TRADE
+    // tanpa bound -> kolom grid NULL). 5 dari 10 itu jebol.
+    // Grup B: 10 baris, 10 terukur, 1 jebol.
+    //
+    // Jawaban BENAR: (5+1) / (10+10) = 30%.
+    // Kalau penyebutnya sampleSize: 6 / 110 = 5,5% -- terlihat empat kali
+    // lebih aman dari kenyataan, semata karena baris yang tidak punya grid
+    // ikut dihitung sebagai "grid yang tidak jebol".
+    const total = sumAggregateGroups([
+      group({ key: "A", sampleSize: 100, gridExited: 5, gridExitedBelow: 4, gridKnown: 10, avgTimeInRangePct: 0.5, avgCrossingRate: 0.2 }),
+      group({ key: "B", sampleSize: 10, gridExited: 1, gridExitedBelow: 1, gridKnown: 10, avgTimeInRangePct: 0.9, avgCrossingRate: 0.4 }),
+    ]);
+    expect(total.gridKnown).toBe(20);
+    expect(total.gridExited).toBe(6);
+    expect(total.gridExited / total.gridKnown).toBeCloseTo(0.3, 10);
+    // Rata-rata dibobot gridKnown (10 vs 10 -> tepat di tengah), BUKAN
+    // sampleSize (100 vs 10 -> akan condong ke 0,54).
+    expect(total.avgTimeInRangePct).toBeCloseTo(0.7, 10);
+    expect(total.avgCrossingRate).toBeCloseTo(0.3, 10);
+  });
+
+  it("melaporkan rata-rata grid null (bukan 0) saat tidak ada baris terukur", () => {
+    const total = sumAggregateGroups([
+      group({ key: "A", sampleSize: 50, gridKnown: 0, avgTimeInRangePct: null }),
+      group({ key: "B", sampleSize: 20, gridKnown: 0, avgTimeInRangePct: null }),
+    ]);
+    expect(total.gridKnown).toBe(0);
+    // null = tidak ada yang diukur. 0 akan terbaca "grid tidak pernah di
+    // dalam range", klaim yang sama sekali berbeda.
+    expect(total.avgTimeInRangePct).toBeNull();
+    expect(total.avgCrossingRate).toBeNull();
+  });
+
   it("returns zeros (not NaN) for an entirely empty set", () => {
     const total = sumAggregateGroups([]);
     expect(total).toMatchObject({ sampleSize: 0, avgGrossReturn: 0, minGrossReturn: 0, maxGrossReturn: 0 });
@@ -234,6 +275,48 @@ describe("evaluateGridOutcome", () => {
     expect(s.exitedRangeRate).toBeCloseTo(0.5, 10);
     expect(s.exitedAboveRate).toBeCloseTo(0.5, 10);
     expect(s.avgTimeInRangePct).toBeCloseTo(0.5, 10);
+  });
+});
+
+describe("gridRatesByScoreBucket (F3 -- metrik grid dari SQL)", () => {
+  it("memakai gridKnown sebagai penyebut, BUKAN sampleSize", () => {
+    // Bucket dengan 1000 baris tapi hanya 100 yang punya bound grid, 50 jebol.
+    // Jawaban benar 50%. Kalau penyebutnya sampleSize -> 5%, yaitu sepuluh
+    // kali lebih aman dari kenyataan semata karena baris tanpa grid ikut
+    // dihitung sebagai "grid yang tidak jebol".
+    const r = gridRatesByScoreBucket([
+      group({ key: "lt_40", sampleSize: 1000, gridKnown: 100, gridExited: 50, gridExitedBelow: 40, avgTimeInRangePct: 0.8, avgCrossingRate: 0.3 }),
+    ]);
+    expect(r.lt_40).toEqual({
+      known: 100,
+      exitedRate: 0.5,
+      exitedBelowRate: 0.4,
+      avgTimeInRangePct: 0.8,
+      avgCrossingRate: 0.3,
+    });
+  });
+
+  it("null (bukan nol) untuk bucket tanpa baris terukur maupun yang absen", () => {
+    // Membedakan "tidak diukur" dari "diukur, hasilnya 0%" adalah seluruh
+    // alasan kolom 0017 nullable. Nol di sini akan terbaca sebagai "grid
+    // tidak pernah jebol" untuk bucket yang sebenarnya kosong.
+    const r = gridRatesByScoreBucket([
+      group({ key: "lt_40", sampleSize: 500, gridKnown: 0, gridExited: 0 }),
+    ]);
+    expect(r.lt_40).toBeNull();
+    expect(r["40_50"]).toBeNull();
+    expect(r["50_55"]).toBeNull();
+    expect(r.gte_55).toBeNull();
+  });
+
+  it("mengembalikan SEMUA bucket, termasuk yang tidak ada di agregat", () => {
+    // Bucket yang hilang dari hasil GROUP BY harus tetap muncul sebagai null,
+    // supaya konsumen tidak perlu menebak apakah bucket-nya kosong atau
+    // querynya yang berubah.
+    const r = gridRatesByScoreBucket([group({ key: "50_55", sampleSize: 60, gridKnown: 60, gridExited: 30 })]);
+    expect(Object.keys(r).sort()).toEqual([...SCORE_BUCKETS].sort());
+    expect(r["50_55"]?.exitedRate).toBeCloseTo(0.5, 10);
+    expect(r.lt_40).toBeNull();
   });
 });
 

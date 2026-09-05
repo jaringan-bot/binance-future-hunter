@@ -52,6 +52,58 @@ const ENTRY_DCA_MODAL_KV_KEY = "entry_alert:dca_modal_usd";
 // KV key buat rasio kuota extremity Phase 1 (G6). Unset -> default.
 const ENTRY_EXTREMITY_FRAC_KV_KEY = "entry_alert:extremity_frac";
 
+// ─────────────────────────────────────────────────────────────
+// HEAD YANG BOLEH MENGIRIM ALERT -- keputusan user 2026-09-05:
+// "hentikan dulu alert DCA dan Traditional, saya mau fokus di grid dulu".
+//
+// DEFAULT-nya grid saja, jadi kode ini MENGATAKAN apa yang sedang berlaku.
+// Menghidupkan lagi = satu tulis KV, TANPA redeploy:
+//   wrangler kv key put --binding CONFIG_KV "entry_alert:heads" '{"grid":true,"dca":true,"trad":true}'
+//
+// YANG DIMATIKAN HANYA NOTIFIKASI. Ketiga head TETAP dihitung (biayanya
+// ~0 subrequest tambahan -- mereka memakai data Wave 1/2 yang sama), dan
+// keputusannya TETAP masuk entry_alert_run_log. Itu disengaja: kalau
+// perhitungannya ikut dimatikan, T9 (logging outcome DCA/Traditional) akan
+// kehilangan jam nol lagi saat head-nya dihidupkan kembali.
+//
+// CATATAN KOPLING yang SENGAJA tidak diubah: string dedup `composite` tetap
+// memuat ketiga head. Mengubahnya jadi grid-saja akan membuat SETIAP symbol
+// terlihat "berubah" pada tick pertama setelah deploy -- satu ledakan alert
+// sekali jalan. Efek sampingnya: flip DCA/Traditional yang tidak terlihat
+// masih bisa me-reset dedup sehingga alert GRID yang sama terkirim ulang
+// lebih cepat. Itu noise, bukan alert head terlarang. Kalau terbukti
+// mengganggu, perbaikannya butuh migrasi state dedup, bukan tambalan di sini.
+// ─────────────────────────────────────────────────────────────
+const ENTRY_HEADS_KV_KEY = "entry_alert:heads";
+
+export interface EnabledHeads {
+  grid: boolean;
+  dca: boolean;
+  trad: boolean;
+}
+
+export const DEFAULT_ENABLED_HEADS: EnabledHeads = { grid: true, dca: false, trad: false };
+
+/**
+ * Fail-safe ke DEFAULT saat KV kosong/rusak/error -- sama seperti
+ * resolveEntryTopN(). Bentuk yang tidak dikenal TIDAK dianggap "semua nyala":
+ * lebih baik diam daripada mengirim head yang sudah diminta berhenti.
+ */
+export function parseEnabledHeads(raw: unknown): EnabledHeads {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) return DEFAULT_ENABLED_HEADS;
+  const o = raw as Record<string, unknown>;
+  const pick = (k: keyof EnabledHeads) => (typeof o[k] === "boolean" ? (o[k] as boolean) : DEFAULT_ENABLED_HEADS[k]);
+  return { grid: pick("grid"), dca: pick("dca"), trad: pick("trad") };
+}
+
+export async function resolveEnabledHeads(): Promise<EnabledHeads> {
+  try {
+    return parseEnabledHeads(await kvConfig.getJson<unknown>(ENTRY_HEADS_KV_KEY));
+  } catch {
+    return DEFAULT_ENABLED_HEADS;
+  }
+}
+
 async function resolveEntryTopN(): Promise<number> {
   try {
     const raw = await kvConfig.getJson<number>(ENTRY_TOP_N_KV_KEY);
@@ -254,23 +306,37 @@ function dcaDisplayDecision(r: TriplePipelineResult): EffectiveDcaDecision {
   return effectiveDcaDecision(r.dca, r.dcaSm).decision;
 }
 
-function countTradeHeads(r: TriplePipelineResult): number {
+/**
+ * `enabled` ikut di sini, bukan cuma di classifyAlertHeads(): head yang
+ * dibisukan tidak boleh menyumbang ke notifikasi circuit harian. Kalau tidak,
+ * DCA_TRADE yang tidak pernah dikirim tetap memicu pesan "circuit terbuka",
+ * dan user diberi tahu soal head yang sudah ia minta berhenti.
+ */
+function countTradeHeads(r: TriplePipelineResult, enabled: EnabledHeads): number {
   let n = 0;
-  if (r.grid.decision === "TRADE" && isGridAlertWorthy(r.grid)) n += 1;
-  if (dcaDisplayDecision(r) === "DCA_TRADE" && isDcaAlertWorthy(r.dca, r.dcaSm)) n += 1;
-  if (isTradAlertWorthy(r.trad)) n += 1;
+  if (enabled.grid && r.grid.decision === "TRADE" && isGridAlertWorthy(r.grid)) n += 1;
+  if (enabled.dca && dcaDisplayDecision(r) === "DCA_TRADE" && isDcaAlertWorthy(r.dca, r.dcaSm)) n += 1;
+  if (enabled.trad && isTradAlertWorthy(r.trad)) n += 1;
   return n;
 }
 
-function classifyAlertHeads(r: TriplePipelineResult, muteTrade: boolean): {
+export function classifyAlertHeads(
+  r: TriplePipelineResult,
+  muteTrade: boolean,
+  enabled: EnabledHeads,
+): {
   gridOn: boolean;
   dcaOn: boolean;
   tradOn: boolean;
   alertable: boolean;
 } {
-  const gridOn = isGridAlertWorthy(r.grid) && !(muteTrade && r.grid.decision === "TRADE");
-  const dcaOn = isDcaAlertWorthy(r.dca, r.dcaSm) && !(muteTrade && dcaDisplayDecision(r) === "DCA_TRADE");
-  const tradOn = isTradAlertWorthy(r.trad) && !muteTrade;
+  // `enabled` dicek DULUAN dan berupa AND: apa pun hasil head-nya, kalau ia
+  // dimatikan ia tidak pernah on. Menaruhnya di belakang akan membuat satu
+  // cabang baru di masa depan bisa melewatinya.
+  const gridOn = enabled.grid && isGridAlertWorthy(r.grid) && !(muteTrade && r.grid.decision === "TRADE");
+  const dcaOn =
+    enabled.dca && isDcaAlertWorthy(r.dca, r.dcaSm) && !(muteTrade && dcaDisplayDecision(r) === "DCA_TRADE");
+  const tradOn = enabled.trad && isTradAlertWorthy(r.trad) && !muteTrade;
   return { gridOn, dcaOn, tradOn, alertable: gridOn || dcaOn || tradOn };
 }
 
@@ -323,9 +389,15 @@ const DCA_LABEL: Record<string, string> = {
   DCA_STOP: "DCA PLAN INVALIDATED",
 };
 
-function formatEntryAlert(r: TriplePipelineResult, muteTrade = false): string {
+function formatEntryAlert(
+  r: TriplePipelineResult,
+  muteTrade = false,
+  enabled: EnabledHeads = DEFAULT_ENABLED_HEADS,
+): string {
   const { grid, dca, trad, dcaSm } = r;
-  const { gridOn, dcaOn, tradOn } = classifyAlertHeads(r, muteTrade);
+  // Badan alert memakai flag YANG SAMA dengan gerbang kirim -- kalau tidak,
+  // pesan bisa memuat blok DCA/Traditional untuk head yang sudah dibisukan.
+  const { gridOn, dcaOn, tradOn } = classifyAlertHeads(r, muteTrade, enabled);
   const sm = grid.tier1?.smartMoney;
   const dcaDir = dca.direction ? ` (${dca.direction})` : "";
   // K1: yang ditampilkan adalah keputusan EFEKTIF (hasil pre-gate legacy x
@@ -457,11 +529,12 @@ export async function checkEntryAlertForSymbol(
   const dcaSlot = dcaHeadDecision(r);
   const composite = `${r.grid.decision}/${dcaSlot}/${r.trad.decision}`;
   const muteTrade = await riskCircuit.isDailyLossCircuitOpen();
-  const tradeHeads = countTradeHeads(r);
+  const enabled = await resolveEnabledHeads();
+  const tradeHeads = countTradeHeads(r, enabled);
   if (muteTrade && tradeHeads > 0) {
     await maybeNotifyDailyCircuit(env, now);
   }
-  const heads = classifyAlertHeads(r, muteTrade);
+  const heads = classifyAlertHeads(r, muteTrade, enabled);
   // K2 jaring kedua: apa pun jalur kodenya, head yang mengaku actionable
   // WAJIB membawa stop-loss. Kalau tidak, alert DIBATALKAN (bukan dikirim
   // sebagian) -- state tetap di-upsert supaya dedup/cooldown konsisten.
@@ -483,7 +556,7 @@ export async function checkEntryAlertForSymbol(
   };
 
   if (alertable && (isTransition || cooldownExpired)) {
-    await dispatchNotification(env, formatEntryAlert(r, muteTrade));
+    await dispatchNotification(env, formatEntryAlert(r, muteTrade, enabled));
     await d1Client.upsertEntryAlertState({ symbol, lastDecision: composite, lastAlertAt: now });
     if (!muteTrade && tradeHeads > 0) {
       await riskCircuit.recordTradeAlert(DEFAULT_PIPELINE_OPTS.riskUsd, tradeHeads, now);

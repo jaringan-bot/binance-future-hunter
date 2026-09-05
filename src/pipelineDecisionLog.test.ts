@@ -4,7 +4,9 @@ import {
   scoreBucket,
   scoreBucketSqlCase,
   SCORE_BUCKET_MID_MIN,
+  SCORE_BUCKET_DISPATCH_MIN,
   SCORE_BUCKET_HIGH_MIN,
+  SCORE_BUCKETS,
   toPipelineDecisionLogRow,
 } from "./pipelineDecisionLog.js";
 import type { SymbolPipelineResult } from "./tools/fullPipeline.js";
@@ -26,12 +28,56 @@ function result(partial: Partial<SymbolPipelineResult> & Pick<SymbolPipelineResu
 }
 
 describe("scoreBucket", () => {
-  it("splits at the installed 40 / 55 thresholds", () => {
+  it("memisah di ambang terpasang 40 / 50 / 55", () => {
     expect(scoreBucket(39.9)).toBe("lt_40");
-    expect(scoreBucket(40)).toBe("40_55");
-    expect(scoreBucket(54.9)).toBe("40_55");
+    expect(scoreBucket(40)).toBe("40_50");
+    expect(scoreBucket(49.9)).toBe("40_50");
+    expect(scoreBucket(50)).toBe("50_55");
+    expect(scoreBucket(54.9)).toBe("50_55");
     expect(scoreBucket(55)).toBe("gte_55");
     expect(scoreBucket(80)).toBe("gte_55");
+  });
+
+  // ── T8 (2026-09-05) ───────────────────────────────────────────────────
+  it("INVARIAN: batas bucket dispatch == gate alert yang sebenarnya", async () => {
+    // Ini test paling penting di file ini, dan alasannya bukan soal angka.
+    //
+    // Sebelum T8, bucket-nya lt_40 / 40_55 / gte_55 sementara alert WATCH
+    // benar-benar dikirim pada skor >= 50 (isGridAlertWorthy). Batas 50 itu
+    // duduk di TENGAH bucket "40_55", jadi setiap analisis backtest selama
+    // berminggu-minggu melaporkan angka untuk pita yang tidak dipakai siapa
+    // pun mengambil keputusan -- dan tidak ada satu pun test yang bisa
+    // menyadarinya, karena kedua angka itu hidup di file berbeda tanpa
+    // hubungan apa pun.
+    //
+    // pipelineDecisionLog.ts SENGAJA tidak meng-import layer cron (mapper
+    // murni tidak boleh bergantung ke cron), jadi invariannya tidak bisa
+    // ditegakkan tipe. Import dinamis di TEST adalah tempat yang benar:
+    // produksi tetap bebas dependensi, tapi keduanya tidak bisa lagi
+    // bergeser sendiri-sendiri tanpa suite merah.
+    const { WATCH_MIN_ALERT_SCORE } = await import("./cron/entryAlertCron.js");
+    expect(SCORE_BUCKET_DISPATCH_MIN).toBe(WATCH_MIN_ALERT_SCORE);
+
+    // Dan konsekuensinya yang sebenarnya dipakai: skor tepat di gate harus
+    // jatuh di AWAL bucket-nya sendiri, bukan tenggelam di tengah bucket lain.
+    expect(scoreBucket(WATCH_MIN_ALERT_SCORE)).toBe("50_55");
+    expect(scoreBucket(WATCH_MIN_ALERT_SCORE - 0.01)).toBe("40_50");
+  });
+
+  it("label bucket DITURUNKAN dari ambangnya, tidak ditulis tangan", () => {
+    // Komentar lama di pipelineDecisionLog.ts memperingatkan "kalau threshold
+    // diubah, label wajib ikut diubah -- kalau tidak output akan berbohong
+    // tentang isi bucket-nya". Sekarang label dihasilkan dari konstanta yang
+    // sama, jadi ia TIDAK BISA berbohong. Test ini mengunci sifat itu.
+    expect(SCORE_BUCKETS).toEqual([
+      `lt_${SCORE_BUCKET_MID_MIN}`,
+      `${SCORE_BUCKET_MID_MIN}_${SCORE_BUCKET_DISPATCH_MIN}`,
+      `${SCORE_BUCKET_DISPATCH_MIN}_${SCORE_BUCKET_HIGH_MIN}`,
+      `gte_${SCORE_BUCKET_HIGH_MIN}`,
+    ]);
+    // Urutan menaik, tanpa celah maupun tumpang tindih.
+    expect(SCORE_BUCKET_MID_MIN).toBeLessThan(SCORE_BUCKET_DISPATCH_MIN);
+    expect(SCORE_BUCKET_DISPATCH_MIN).toBeLessThan(SCORE_BUCKET_HIGH_MIN);
   });
 });
 
@@ -180,16 +226,16 @@ describe("scoreBucketSqlCase", () => {
     expect(SCORE_BUCKET_MID_MIN).toBe(40);
     expect(SCORE_BUCKET_HIGH_MIN).toBe(55);
     expect(scoreBucket(SCORE_BUCKET_HIGH_MIN)).toBe("gte_55");
-    expect(scoreBucket(SCORE_BUCKET_MID_MIN)).toBe("40_55");
+    expect(scoreBucket(SCORE_BUCKET_MID_MIN)).toBe("40_50");
     expect(scoreBucket(SCORE_BUCKET_MID_MIN - 0.01)).toBe("lt_40");
   });
 
   it("emits every bucket label exactly once, in descending threshold order", () => {
     const sql = scoreBucketSqlCase();
-    for (const label of ["gte_55", "40_55", "lt_40"]) {
+    for (const label of SCORE_BUCKETS) {
       expect(sql.split(label)).toHaveLength(2);
     }
-    expect(sql.indexOf("gte_55")).toBeLessThan(sql.indexOf("40_55"));
+    expect(sql.indexOf("gte_55")).toBeLessThan(sql.indexOf("50_55"));
   });
 
   it("rejects a column name that is not a plain identifier", () => {
