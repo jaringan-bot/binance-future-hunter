@@ -4,7 +4,8 @@ import * as binanceProxy from "../binanceProxyClient.js";
 import * as d1Client from "../d1Client.js";
 import * as telegram from "../telegram.js";
 import * as kvConfig from "../kvConfig.js";
-import { checkEntryAlertForSymbol, runEntryAlertCheck, ENTRY_ALERT_PACING_DELAY_MS } from "./entryAlertCron.js";
+import { checkEntryAlertForSymbol, runEntryAlertCheck, ENTRY_ALERT_PACING_DELAY_MS, hasCrossedTrigger } from "./entryAlertCron.js";
+import type { DcaActivePlanRow } from "../d1Client.js";
 import type { SymbolPipelineResult, TriplePipelineResult } from "../tools/fullPipeline.js";
 import type { DcaHeadResult } from "../dcaPipelineEngine.js";
 import type { TraditionalFuturesResult } from "./traditionalPipelineEngine.js";
@@ -1204,5 +1205,177 @@ describe("K2: alert actionable wajib membawa parameter risiko", () => {
 
     expect(telegram.sendTelegramAlert).toHaveBeenCalledTimes(1);
     expect(vi.mocked(telegram.sendTelegramAlert).mock.calls[0][1]).toContain("BUKAN sinyal entry");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// hasCrossedTrigger + baca-balik plan D1 (non-null).
+//
+// LUBANG YANG DITUTUP: sampai blok ini ditulis, getDcaActivePlan di-mock
+// mockResolvedValue(null) di KETIGA test file yang memakainya dan TIDAK
+// PERNAH di-override. Akibatnya `existing` selalu null, prevTrigger selalu
+// null, hasCrossedTrigger selalu false di guard pertamanya, dan SELURUH blok
+// inkremen di persistDcaActivePlan (avgEntryPrice, totalInvested,
+// entryCount += 1, lastEntryAt) tidak pernah dieksekusi satu kali pun.
+// hasCrossedTrigger sendiri -- meski di-export -- nol referensi di test.
+// Ini persis cacat yang dikeluhkan komentar entryAlertCron.ts:507: state
+// ditulis ke D1 tapi tidak pernah dibaca balik.
+// ─────────────────────────────────────────────────────────────
+describe("hasCrossedTrigger", () => {
+  it("LONG: terisi saat harga TURUN menembus trigger (batas inklusif)", () => {
+    expect(hasCrossedTrigger("LONG", 97, 98)).toBe(true);
+    expect(hasCrossedTrigger("LONG", 98, 98)).toBe(true); // == ikut terhitung
+    expect(hasCrossedTrigger("LONG", 99, 98)).toBe(false);
+  });
+
+  it("SHORT: arahnya DIBALIK -- terisi saat harga NAIK menembus trigger", () => {
+    expect(hasCrossedTrigger("SHORT", 103, 102)).toBe(true);
+    expect(hasCrossedTrigger("SHORT", 102, 102)).toBe(true);
+    expect(hasCrossedTrigger("SHORT", 101, 102)).toBe(false);
+  });
+
+  it("tanpa plan sebelumnya (prevTrigger null) TIDAK pernah dianggap terisi", () => {
+    // Inilah kenapa seluruh blok inkremen mati total selama getDcaActivePlan
+    // di-stub null: ronde pertama tidak punya trigger untuk dilewati.
+    expect(hasCrossedTrigger("LONG", 97, null)).toBe(false);
+    expect(hasCrossedTrigger("SHORT", 103, null)).toBe(false);
+  });
+
+  it("menolak trigger tidak masuk akal (NaN / Infinity / <= 0) -- fail-closed", () => {
+    expect(hasCrossedTrigger("LONG", 97, Number.NaN)).toBe(false);
+    expect(hasCrossedTrigger("LONG", 97, Number.POSITIVE_INFINITY)).toBe(false);
+    expect(hasCrossedTrigger("LONG", 97, 0)).toBe(false);
+    expect(hasCrossedTrigger("LONG", 97, -5)).toBe(false);
+  });
+
+  it("menolak harga tidak masuk akal (NaN / <= 0) -- fail-closed", () => {
+    expect(hasCrossedTrigger("LONG", Number.NaN, 98)).toBe(false);
+    expect(hasCrossedTrigger("LONG", 0, 98)).toBe(false);
+    expect(hasCrossedTrigger("SHORT", -1, 98)).toBe(false);
+  });
+});
+
+describe("persistDcaActivePlan: state plan D1 dibaca balik, bukan cuma ditulis", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(kvConfig.getJson).mockReset().mockResolvedValue(null);
+    vi.mocked(kvConfig.putJson).mockReset().mockResolvedValue(undefined);
+    vi.mocked(d1Client.getDcaActivePlan).mockReset().mockResolvedValue(null);
+    vi.mocked(d1Client.upsertDcaActivePlan).mockReset().mockResolvedValue(undefined);
+    vi.mocked(d1Client.deleteDcaActivePlan).mockReset().mockResolvedValue(undefined);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  const NOW = 1_700_000_000_000;
+
+  /** Plan D1 yang SUDAH ADA -- inti dari lubang yang ditutup blok ini. */
+  function existingPlan(over: Partial<DcaActivePlanRow> = {}): DcaActivePlanRow {
+    return {
+      id: 1,
+      symbol: "SOLUSDT",
+      side: "LONG",
+      productType: "futures",
+      entryCount: 2,
+      maxEntries: 6,
+      avgEntryPrice: 90,
+      totalInvested: 24,
+      nextTriggerPrice: 105,
+      intervalPct: 2,
+      pauseStatus: "NONE",
+      pauseReason: null,
+      createdAt: NOW - 86_400_000,
+      lastEntryAt: NOW - 3_600_000,
+      ...over,
+    };
+  }
+
+  /** dcaSm.currentPrice = 100, nextTriggerPrice = 98, maxEntries = 6. */
+  function dcaTradePipeline(symbol = "SOLUSDT") {
+    vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue({
+      grid: noTradeResult(symbol),
+      dca: stubDca(symbol, "DCA_TRADE"),
+      trad: stubTrad(),
+      dcaSm: stubDcaSm("DCA_TRADE"),
+    } as TriplePipelineResult);
+  }
+
+  it("membaca plan yang ada dengan (symbol, side) plan tsb", async () => {
+    dcaTradePipeline();
+    vi.mocked(d1Client.getDcaActivePlan).mockResolvedValue(existingPlan());
+
+    await checkEntryAlertForSymbol("SOLUSDT", ENV, NOW);
+
+    expect(d1Client.getDcaActivePlan).toHaveBeenCalledWith("SOLUSDT", "LONG");
+  });
+
+  it("trigger TERLAMPAUI -> ronde naik, avg harga dirata-rata, modal terakumulasi", async () => {
+    // trigger lama 105, harga sekarang 100 -> LONG turun menembus.
+    dcaTradePipeline();
+    vi.mocked(d1Client.getDcaActivePlan).mockResolvedValue(existingPlan());
+
+    await checkEntryAlertForSymbol("SOLUSDT", ENV, NOW);
+
+    const w = vi.mocked(d1Client.upsertDcaActivePlan).mock.calls[0][0];
+    expect(w.entryCount).toBe(3); // 2 -> 3, BUKAN 0
+    // Sizing flat -> rata-rata aritmetik: (90*2 + 100) / 3.
+    expect(w.avgEntryPrice).toBeCloseTo(280 / 3, 10);
+    expect(w.totalInvested).toBe(36); // 24 + dcaOrderMarginUsd 12
+    expect(w.lastEntryAt).toBe(NOW);
+  });
+
+  it("trigger BELUM terlampaui -> state lama dipertahankan apa adanya", async () => {
+    // trigger lama 95, harga sekarang 100 -> LONG belum turun menembus.
+    dcaTradePipeline();
+    vi.mocked(d1Client.getDcaActivePlan).mockResolvedValue(existingPlan({ nextTriggerPrice: 95 }));
+
+    await checkEntryAlertForSymbol("SOLUSDT", ENV, NOW);
+
+    const w = vi.mocked(d1Client.upsertDcaActivePlan).mock.calls[0][0];
+    expect(w.entryCount).toBe(2); // tidak naik
+    expect(w.avgEntryPrice).toBe(90); // tidak diubah
+    expect(w.totalInvested).toBe(24);
+    expect(w.lastEntryAt).toBe(NOW - 3_600_000); // stempel lama dipertahankan
+  });
+
+  it("ronde sudah mentok maxEntries -> TIDAK naik lagi walau trigger terlampaui", async () => {
+    dcaTradePipeline();
+    vi.mocked(d1Client.getDcaActivePlan).mockResolvedValue(existingPlan({ entryCount: 6 }));
+
+    await checkEntryAlertForSymbol("SOLUSDT", ENV, NOW);
+
+    const w = vi.mocked(d1Client.upsertDcaActivePlan).mock.calls[0][0];
+    expect(w.entryCount).toBe(6); // guard entryCount < maxEntries menahan
+    expect(w.avgEntryPrice).toBe(90); // tidak ikut ternoda
+    expect(w.totalInvested).toBe(24);
+  });
+
+  it("belum ada plan (null) -> mulai dari ronde 0, tanpa rata-rata harga", async () => {
+    dcaTradePipeline();
+    vi.mocked(d1Client.getDcaActivePlan).mockResolvedValue(null);
+
+    await checkEntryAlertForSymbol("SOLUSDT", ENV, NOW);
+
+    const w = vi.mocked(d1Client.upsertDcaActivePlan).mock.calls[0][0];
+    expect(w.entryCount).toBe(0);
+    expect(w.avgEntryPrice).toBeNull();
+    expect(w.totalInvested).toBeNull();
+    expect(w.lastEntryAt).toBeNull();
+  });
+
+  it("DCA_STOP menghapus plan dan TIDAK menulis ulang state", async () => {
+    vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue({
+      grid: noTradeResult("SOLUSDT"),
+      dca: stubDca("SOLUSDT", "DCA_TRADE"),
+      trad: stubTrad(),
+      dcaSm: stubDcaSm("DCA_STOP"),
+    } as TriplePipelineResult);
+    vi.mocked(d1Client.getDcaActivePlan).mockResolvedValue(existingPlan());
+
+    await checkEntryAlertForSymbol("SOLUSDT", ENV, NOW);
+
+    expect(d1Client.deleteDcaActivePlan).toHaveBeenCalledWith("SOLUSDT", "LONG");
+    expect(d1Client.upsertDcaActivePlan).not.toHaveBeenCalled();
   });
 });

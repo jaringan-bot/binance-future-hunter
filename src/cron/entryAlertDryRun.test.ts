@@ -75,6 +75,17 @@ vi.mock("../d1Client.js", () => ({
   insertEntryAlertRunLog: vi.fn().mockResolvedValue(undefined),
   insertEntryAlertSkipLog: vi.fn().mockResolvedValue(undefined),
   insertPipelineDecisionLogs: vi.fn().mockResolvedValue(undefined),
+  // dca_active_plans: dipanggil dari DUA tempat pada jalur yang dites di
+  // sini -- pre-gate DCA di fullPipeline.ts (1/survivor) dan
+  // persistDcaActivePlan() di entryAlertCron.ts (get + upsert, 1/survivor).
+  // Ketiganya WAJIB distub: keduanya ditelan try/catch, jadi export yang
+  // hilang TIDAK menggagalkan test -- harness cuma diam-diam mengukur
+  // jalur error. deleteDcaActivePlan belum terjangkau (DCA_STOP tidak
+  // pernah muncul di data sintetis harness) tapi tetap distub supaya
+  // tidak jadi lubang senyap kalau data harness bergeser.
+  getDcaActivePlan: vi.fn().mockResolvedValue(null),
+  upsertDcaActivePlan: vi.fn().mockResolvedValue(undefined),
+  deleteDcaActivePlan: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("../kvConfig.js", () => ({
   getJson: vi.fn().mockResolvedValue(null),
