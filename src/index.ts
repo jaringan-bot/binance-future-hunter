@@ -22,6 +22,7 @@ import {
   checkRelayHealth,
   checkWorkerPublicHealth,
 } from "./cron/infraHealthCron.js";
+import { checkOutcomeBackfillHealth, checkScoreDiscriminatingPower } from "./cron/signalIntegrityCron.js";
 
 interface Env {
   PROXY_URL?: string;
@@ -397,6 +398,25 @@ export default {
       ctx.waitUntil(
         checkD1Capacity(telegramEnv).catch((err) =>
           console.error("[cron] gagal checkD1Capacity:", (err as Error)?.message ?? String(err)),
+        ),
+      );
+      // Monitor integritas SINYAL (src/cron/signalIntegrityCron.ts) -- rumahnya
+      // di tick ini karena alasan yang sama dengan checkD1Capacity: agregat SQL
+      // atas rentang berhari-hari tidak murah, dan kondisinya bergerak dalam
+      // hitungan hari, bukan menit.
+      //
+      // Menjaga hal yang infraHealthCron TIDAK lihat: infra bisa sehat
+      // sempurna sementara sinyalnya sudah tidak berarti apa-apa. Keduanya
+      // LAPOR SAJA (keputusan user 2026-09-05) -- tidak menahan alert, tidak
+      // menyetel bobot.
+      ctx.waitUntil(
+        checkOutcomeBackfillHealth(telegramEnv).catch((err) =>
+          console.error("[cron] gagal checkOutcomeBackfillHealth:", (err as Error)?.message ?? String(err)),
+        ),
+      );
+      ctx.waitUntil(
+        checkScoreDiscriminatingPower(telegramEnv).catch((err) =>
+          console.error("[cron] gagal checkScoreDiscriminatingPower:", (err as Error)?.message ?? String(err)),
         ),
       );
       // Snapshot CFTC COT ke D1 di sini (3x/hari) -- data sumbernya cuma

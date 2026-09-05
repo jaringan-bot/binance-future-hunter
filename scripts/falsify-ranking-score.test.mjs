@@ -50,12 +50,25 @@ function block(n, touched, overrides) {
 }
 
 describe("statistik dasar", () => {
-  it("twoProportionZ menghitung z yang benar dan null saat kelompok kosong", () => {
-    // 50/100 vs 75/100 -> SE = sqrt(.25/100 + .1875/100) = 0.0661
+  it("twoProportionZ cocok dengan FIXTURE REFERENSI BERSAMA dan null saat kelompok kosong", () => {
+    // ── FIXTURE REFERENSI BERSAMA ──────────────────────────────────────
+    // Angka yang SAMA dipatok di src/signalIntegrity.test.ts.
+    //
+    // twoProportionZ ada dua kali: di sini (Node, skrip offline) dan di
+    // src/signalIntegrity.ts (TypeScript, Worker). Batas TS/mjs membuat
+    // berbagi kode butuh kontorsi build yang tidak sepadan untuk fungsi
+    // sependek ini -- jadi duplikasinya diterima, TAPI dikunci: kalau salah
+    // satu implementasi bergeser, salah satu suite merah.
+    //
+    // Nilai di bawah adalah literal yang dihitung, BUKAN ekspresi yang
+    // menghitung ulang rumusnya. Versi lama menulis
+    // `0.25 / Math.sqrt(0.25/100 + 0.1875/100)` -- itu menguji rumus dengan
+    // rumus yang sama, jadi ia akan tetap hijau meski KEDUA implementasi
+    // salah dengan cara yang identik.
     const r = twoProportionZ(50, 100, 75, 100);
-    expect(r.pA).toBeCloseTo(0.5, 10);
-    expect(r.pB).toBeCloseTo(0.75, 10);
-    expect(r.z).toBeCloseTo(0.25 / Math.sqrt(0.25 / 100 + 0.1875 / 100), 6);
+    expect(r.pA).toBeCloseTo(0.5, 12);
+    expect(r.pB).toBeCloseTo(0.75, 12);
+    expect(r.z).toBeCloseTo(3.7796447300922726, 10);
     expect(twoProportionZ(0, 0, 5, 10)).toBeNull();
     // SE nol (kedua proporsi 0) -> null, BUKAN Infinity/NaN yang diam-diam
     // lolos ke output sebagai "signifikan".
