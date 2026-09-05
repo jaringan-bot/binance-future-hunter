@@ -10,12 +10,12 @@ import {
   sumAggregateGroups,
   evaluateGridOutcome,
   summarizeGridOutcomes,
-  summarizeGridOutcomesByScoreBucket,
+  gridRatesByScoreBucket,
   emptyBucket,
   evaluateDecisionForward,
   registerPipelineDecisionBacktestTools,
 } from "./pipelineDecisionBacktest.js";
-import type { PipelineDecisionLogRow } from "../pipelineDecisionLog.js";
+import { SCORE_BUCKETS, type PipelineDecisionLogRow } from "../pipelineDecisionLog.js";
 import type { PipelineDecisionAggregateGroup, PipelineDecisionAggregates } from "../d1Client.js";
 
 vi.mock("../binanceProxyClient.js", () => ({
@@ -278,57 +278,45 @@ describe("evaluateGridOutcome", () => {
   });
 });
 
-describe("summarizeGridOutcomesByScoreBucket (F1 -- uji falsifikasi)", () => {
-  // Helper lokal -- `ohlc` di describe("evaluateGridOutcome") tidak terjangkau
-  // dari sini (function scope-nya di dalam blok itu).
-  function candle(open: number, high: number, low: number, close: number): KlineTuple {
-    return [0, String(open), String(high), String(low), String(close), "1", 0, "0", 0, "0", "0", "0"];
-  }
-  const inRange = () => evaluateGridOutcome([candle(105, 106, 104, 105)], 100, 110)!;
-  const blownBelow = () => evaluateGridOutcome([candle(105, 106, 95, 96)], 100, 110)!;
-
-  it("memisahkan metrik grid menurut bucket skor baris asalnya", () => {
-    // Sengaja TERBALIK dari yang diharapkan formula: bucket skor TINGGI diisi
-    // grid yang jebol, bucket RENDAH diisi yang bertahan. Kalau fungsi ini
-    // diam-diam menggabung semua baris (bug pengelompokan), kedua bucket akan
-    // menghasilkan exitedRangeRate 0.5 dan test ini gagal.
-    const result = summarizeGridOutcomesByScoreBucket([
-      { scoreBucket: "lt_40", gridOutcome: inRange() },
-      { scoreBucket: "lt_40", gridOutcome: inRange() },
-      { scoreBucket: "gte_55", gridOutcome: blownBelow() },
-      { scoreBucket: "gte_55", gridOutcome: blownBelow() },
+describe("gridRatesByScoreBucket (F3 -- metrik grid dari SQL)", () => {
+  it("memakai gridKnown sebagai penyebut, BUKAN sampleSize", () => {
+    // Bucket dengan 1000 baris tapi hanya 100 yang punya bound grid, 50 jebol.
+    // Jawaban benar 50%. Kalau penyebutnya sampleSize -> 5%, yaitu sepuluh
+    // kali lebih aman dari kenyataan semata karena baris tanpa grid ikut
+    // dihitung sebagai "grid yang tidak jebol".
+    const r = gridRatesByScoreBucket([
+      group({ key: "lt_40", sampleSize: 1000, gridKnown: 100, gridExited: 50, gridExitedBelow: 40, avgTimeInRangePct: 0.8, avgCrossingRate: 0.3 }),
     ]);
-
-    expect(result.lt_40?.sampleSize).toBe(2);
-    expect(result.lt_40?.exitedRangeRate).toBe(0);
-    expect(result.gte_55?.sampleSize).toBe(2);
-    expect(result.gte_55?.exitedRangeRate).toBe(1);
-    expect(result.gte_55?.exitedBelowRate).toBe(1);
-    // Bucket yang tidak punya satu pun baris -> null, BUKAN nol. Nol berarti
-    // "diukur, hasilnya 0%"; null berarti "tidak ada data" -- beda arti, dan
-    // tabel output menampilkannya sebagai "-".
-    expect(result["40_50"]).toBeNull();
+    expect(r.lt_40).toEqual({
+      known: 100,
+      exitedRate: 0.5,
+      exitedBelowRate: 0.4,
+      avgTimeInRangePct: 0.8,
+      avgCrossingRate: 0.3,
+    });
   });
 
-  it("membuang baris tanpa gridOutcome tanpa menggeser bucket lain", () => {
-    const result = summarizeGridOutcomesByScoreBucket([
-      { scoreBucket: "40_50", gridOutcome: null },
-      { scoreBucket: "40_50", gridOutcome: blownBelow() },
-      { scoreBucket: "lt_40", gridOutcome: null },
+  it("null (bukan nol) untuk bucket tanpa baris terukur maupun yang absen", () => {
+    // Membedakan "tidak diukur" dari "diukur, hasilnya 0%" adalah seluruh
+    // alasan kolom 0017 nullable. Nol di sini akan terbaca sebagai "grid
+    // tidak pernah jebol" untuk bucket yang sebenarnya kosong.
+    const r = gridRatesByScoreBucket([
+      group({ key: "lt_40", sampleSize: 500, gridKnown: 0, gridExited: 0 }),
     ]);
-
-    expect(result["40_50"]?.sampleSize).toBe(1);
-    expect(result["40_50"]?.exitedRangeRate).toBe(1);
-    // Semua baris lt_40 punya gridOutcome null -> tidak ada yang bisa
-    // diringkas, jadi null (bukan sampleSize 0 yang menyesatkan).
-    expect(result.lt_40).toBeNull();
+    expect(r.lt_40).toBeNull();
+    expect(r["40_50"]).toBeNull();
+    expect(r["50_55"]).toBeNull();
+    expect(r.gte_55).toBeNull();
   });
 
-  it("mengembalikan SEMUA bucket sebagai null saat input kosong", () => {
-    const result = summarizeGridOutcomesByScoreBucket([]);
-    expect(result.lt_40).toBeNull();
-    expect(result["40_50"]).toBeNull();
-    expect(result.gte_55).toBeNull();
+  it("mengembalikan SEMUA bucket, termasuk yang tidak ada di agregat", () => {
+    // Bucket yang hilang dari hasil GROUP BY harus tetap muncul sebagai null,
+    // supaya konsumen tidak perlu menebak apakah bucket-nya kosong atau
+    // querynya yang berubah.
+    const r = gridRatesByScoreBucket([group({ key: "50_55", sampleSize: 60, gridKnown: 60, gridExited: 30 })]);
+    expect(Object.keys(r).sort()).toEqual([...SCORE_BUCKETS].sort());
+    expect(r["50_55"]?.exitedRate).toBeCloseTo(0.5, 10);
+    expect(r.lt_40).toBeNull();
   });
 });
 

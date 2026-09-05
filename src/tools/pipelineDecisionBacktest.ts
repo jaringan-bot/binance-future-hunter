@@ -228,51 +228,50 @@ export function summarizeGridOutcomes(metrics: GridOutcomeMetrics[]): GridOutcom
 }
 
 // ─────────────────────────────────────────────────────────────
-// F1 (2026-09-05) -- UJI FALSIFIKASI: metrik grid DIPECAH per bucket skor.
+// F3 (2026-09-05) -- metrik grid per bucket skor DARI AGREGAT SQL.
 //
-// Sebelumnya output tool ini punya dua tabel yang tidak pernah bertemu:
-//   byScoreBucket  -> per bucket skor, tapi metrik ARAH (win rate / return)
-//   gridOutcome    -> metrik GRID, tapi TIDAK dipecah per bucket
-// Jadi pertanyaan yang paling penting -- "apakah rankingScore memisahkan
-// grid yang bertahan di range dari yang jebol?" -- tidak bisa dijawab dari
-// output tool, padahal KEDUA bahannya sudah dihitung di fungsi yang sama.
+// Menggantikan summarizeGridOutcomesByScoreBucket() (F1, dihapus): versi itu
+// menghitung dari "sampel detail" <= 80 baris terbaru, yang dalam praktiknya
+// 1-2 tick entry-alert. Baris dalam satu tick berbagi kondisi pasar yang
+// sama, jadi N=80 di sana jauh lebih lemah dari N=80 lintas waktu. Sejak
+// migration 0017 mempersist kolom grid, angka yang sama bisa dihitung di SQL
+// atas SELURUH rentang -- tidak ada lagi alasan memakai versi lemahnya.
 //
-// Fungsi ini menutup celah itu. Ia TIDAK menghitung metrik baru: cuma
-// mengelompokkan GridOutcomeMetrics yang sudah ada menurut scoreBucket
-// baris asalnya, lalu memanggil summarizeGridOutcomes() per kelompok.
+// SATU fungsi ini melayani tabel tampilan DAN struct output, supaya
+// aritmetika rate-nya tidak ditulis dua kali dan tidak bisa menyimpang.
 //
-// KETERBATASAN YANG WAJIB DIBACA BARENG ANGKANYA -- sampel detail diambil
-// sebagai "N baris TERBARU dalam rentang" (queryPipelineDecisionLog ORDER BY
-// run_at DESC). Satu tick entry-alert menulis puluhan baris sekaligus, jadi
-// limit<=80 dalam praktiknya = SATU sampai DUA tick. Baris di dalam satu
-// tick berbagi kondisi pasar yang sama, jadi mereka BUKAN observasi
-// independen: N=80 di sini jauh lebih lemah dari N=80 lintas waktu.
-// Untuk kesimpulan yang serius, jalankan beberapa rentang waktu terpisah
-// dan bandingkan, atau persist metrik grid ke D1 supaya agregat SQL bisa
-// menghitungnya atas seluruh rentang seperti byScoreBucket.
+// `known` (COUNT kolom grid) adalah penyebutnya, BUKAN sampleSize: kolom
+// grid NULL berarti TIDAK DIUKUR (keputusan tanpa bound + baris pra-0017).
+// `null` untuk bucket tanpa satu pun baris terukur -- bukan nol.
 // ─────────────────────────────────────────────────────────────
-export function summarizeGridOutcomesByScoreBucket(
-  entries: { scoreBucket: ScoreBucket; gridOutcome: GridOutcomeMetrics | null }[],
-): Record<ScoreBucket, GridOutcomeSummary | null> {
-  // Kunci DITURUNKAN dari SCORE_BUCKETS, tidak ditulis tangan -- T8
-  // menambahkan batas 50 dan versi hardcoded lama harus diedit di tiga
-  // tempat sekaligus. Sekarang menggeser batas cukup di pipelineDecisionLog.ts.
-  const groups = Object.fromEntries(SCORE_BUCKETS.map((b) => [b, [] as GridOutcomeMetrics[]])) as Record<
-    ScoreBucket,
-    GridOutcomeMetrics[]
-  >;
-  for (const entry of entries) {
-    if (entry.gridOutcome === null) continue;
-    const bucket = groups[entry.scoreBucket];
-    // scoreBucket datang dari scoreBucket(), jadi selalu salah satu kunci --
-    // guard ini murni jaring pengaman kalau tipe dilonggarkan.
-    if (bucket === undefined) continue;
-    bucket.push(entry.gridOutcome);
-  }
-  return Object.fromEntries(SCORE_BUCKETS.map((b) => [b, summarizeGridOutcomes(groups[b])])) as Record<
-    ScoreBucket,
-    GridOutcomeSummary | null
-  >;
+export interface GridBucketRates {
+  known: number;
+  exitedRate: number;
+  exitedBelowRate: number;
+  avgTimeInRangePct: number | null;
+  avgCrossingRate: number | null;
+}
+
+export function gridRatesByScoreBucket(
+  groups: PipelineDecisionAggregateGroup[],
+): Record<ScoreBucket, GridBucketRates | null> {
+  const byKey = new Map(groups.map((g) => [g.key, g]));
+  return Object.fromEntries(
+    SCORE_BUCKETS.map((b) => {
+      const g = byKey.get(b);
+      if (!g || g.gridKnown === 0) return [b, null];
+      return [
+        b,
+        {
+          known: g.gridKnown,
+          exitedRate: g.gridExited / g.gridKnown,
+          exitedBelowRate: g.gridExitedBelow / g.gridKnown,
+          avgTimeInRangePct: g.avgTimeInRangePct,
+          avgCrossingRate: g.avgCrossingRate,
+        },
+      ];
+    }),
+  ) as Record<ScoreBucket, GridBucketRates | null>;
 }
 
 export function emptyBucket(): BucketStats {
@@ -537,14 +536,9 @@ export function registerPipelineDecisionBacktestTools(server: McpServer): void {
         const gridSummary = summarizeGridOutcomes(
           evaluated.map((r) => r.gridOutcome).filter((g): g is GridOutcomeMetrics => g !== null),
         );
-        // F1: tabulasi silang metrik grid x bucket skor atas sampel detail.
-        // Masih dipakai untuk struct output (per-baris), TAPI tabel yang
-        // ditampilkan sekarang memakai `byScoreGrid` dari SQL -- lihat F3.
-        const gridByScoreBucket = summarizeGridOutcomesByScoreBucket(evaluated);
         // F3: metrik grid per bucket dari agregat SQL (seluruh rentang).
-        const byScoreGrid = Object.fromEntries(
-          aggregates.byScoreBucket.map((g) => [g.key, g]),
-        ) as Partial<Record<ScoreBucket, PipelineDecisionAggregateGroup>>;
+        // Satu sumber untuk tabel tampilan DAN struct output.
+        const byScoreGrid = gridRatesByScoreBucket(aggregates.byScoreBucket);
         const coveragePct = aggregates.rowsInRange
           ? (aggregates.rowsWithOutcome / aggregates.rowsInRange) * 100
           : 0;
@@ -605,13 +599,13 @@ export function registerPipelineDecisionBacktestTools(server: McpServer): void {
             ["Bucket", "N terukur", "Keluar range", "  ke bawah", "Time-in-range", "Crossing rate"],
             SCORE_BUCKETS.map((key) => {
               const g = byScoreGrid[key];
-              return g === undefined || g.gridKnown === 0
+              return g === null
                 ? [key, "0", "-", "-", "-", "-"]
                 : [
                     key,
-                    String(g.gridKnown),
-                    `${((g.gridExited / g.gridKnown) * 100).toFixed(1)}%`,
-                    `${((g.gridExitedBelow / g.gridKnown) * 100).toFixed(1)}%`,
+                    String(g.known),
+                    `${(g.exitedRate * 100).toFixed(1)}%`,
+                    `${(g.exitedBelowRate * 100).toFixed(1)}%`,
                     g.avgTimeInRangePct == null ? "-" : `${(g.avgTimeInRangePct * 100).toFixed(1)}%`,
                     g.avgCrossingRate == null ? "-" : `${(g.avgCrossingRate * 100).toFixed(1)}%`,
                   ];
@@ -668,7 +662,7 @@ export function registerPipelineDecisionBacktestTools(server: McpServer): void {
           .struct("byDecision", byDecision)
           .struct("byScoreBucket", byScore)
           .struct("gridOutcomeSummary", gridSummary)
-          .struct("gridOutcomeByScoreBucket", gridByScoreBucket)
+          .struct("gridOutcomeByScoreBucket", byScoreGrid)
           .struct(
             "rows",
             evaluated.slice(0, 15).map((r) => ({
