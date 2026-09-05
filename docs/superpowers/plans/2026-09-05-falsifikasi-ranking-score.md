@@ -711,3 +711,120 @@ grid, jadi tabel grid-native di tool masih memakai sampel detail 1–2 tick.
 Ditunda karena agregat atas kolom yang 100% NULL tidak bisa diuji terhadap
 data nyata — dikerjakan setelah cron mengisi beberapa hari. Keduanya toh
 butuh deploy yang sama.
+
+---
+
+## Bagian G — Remediasi + monitor otomatis (2026-09-05, di working tree)
+
+Keputusan user yang mengikat pekerjaan ini: monitor **lapor saja**, formula
+**dibekukan** sampai replikasi out-of-sample, pass pertama dua cek.
+
+Konsekuensinya dijaga: **nol angka** di `scoreTier1Signals()`,
+`REGIME_FAVORABILITY`, `TRADE_RANKING_SCORE_THRESHOLD`, atau
+`smartMoneyAnalysis.ts` yang berubah.
+
+### G1 — Bucket disejajarkan ke gate sesungguhnya (menutup T8)
+
+`lt_40 / 40_55 / gte_55` → **`lt_40 / 40_50 / 50_55 / gte_55`**.
+
+Batas 50 adalah gate alert yang sebenarnya (`isGridAlertWorthy`), dan selama
+ini duduk di TENGAH bucket `40_55` — jadi setiap analisis backtest melaporkan
+angka untuk pita yang tidak dipakai siapa pun mengambil keputusan.
+
+Dua pengaman struktural, bukan sekadar penggantian angka:
+
+**Label diturunkan dari ambangnya** lewat template literal, tidak ditulis
+tangan. Komentar lama memperingatkan "kalau threshold diubah, label wajib
+ikut diubah — kalau tidak output akan berbohong". Sekarang label itu tidak
+bisa lagi berbohong.
+
+**Test invarian** meng-import `WATCH_MIN_ALERT_SCORE` dari `entryAlertCron.ts`
+dan menegaskan ia sama dengan `SCORE_BUCKET_DISPATCH_MIN`. Produksi tetap
+bebas dependensi (mapper murni tidak boleh bergantung ke layer cron), tapi
+keduanya tidak bisa lagi bergeser sendiri-sendiri tanpa suite merah.
+
+### G2 — Metrik grid diagregasi di SQL (menutup sisa Fase 1)
+
+`queryPipelineDecisionAggregates()` kini juga mengagregasi kolom migration
+0017. Tabel grid per bucket di tool berhenti memakai sampel detail 1–2 tick
+dan memakai seluruh rentang — peringatan korelasi intra-tick dicabut karena
+sebabnya hilang.
+
+**`gridKnown` adalah penyebutnya, BUKAN `sampleSize`.** Kolom grid NULL
+berarti tidak diukur (keputusan tanpa bound + semua baris pra-0017);
+memasukkannya ke penyebut membuat tingkat "keluar range" terlihat jauh lebih
+aman dari kenyataan. Diuji-mutasi: mengganti penyebut ke `sampleSize`
+membuat dua test merah.
+
+### G3 — Monitor integritas sinyal
+
+`src/signalIntegrity.ts` (engine murni) + `src/cron/signalIntegrityCron.ts`
+(wrapper tipis), menumpang tick heartbeat `0 0,8,16 * * *` — rumah yang sama
+dengan `checkD1Capacity`, untuk alasan yang sama: agregat berat, kondisi
+bergerak lambat.
+
+Pola `infraHealthCron.ts` dipakai apa adanya: cooldown KV,
+`dispatchNotification`, `now` injectable. Bedanya cooldown 24 jam, bukan 1
+jam — kondisi ini bergerak dalam hitungan hari.
+
+**Cek 1 — backfill mati diam-diam.** `STALLED` saat backlog baris matang
+melewati 500; `GRID_COLUMNS_DEAD` saat ≥95% baris yang baru di-backfill punya
+kolom grid NULL. Yang kedua adalah kegagalan yang hampir menggigit hari ini,
+dan pesan alert-nya menyebut penyebab konkretnya (`lower_price` tidak ikut
+di-SELECT), bukan cuma "ada yang salah".
+
+**Cek 2 — daya pisah skor.** Membandingkan tingkat keluar-range di atas vs di
+bawah gate dispatch atas jendela 7 hari. `INVERTED` / `NO_SEPARATION` / `OK` /
+`INSUFFICIENT_SAMPLE`. Pemisahnya sengaja gate 50, bukan ambang TRADE 55 —
+yang ingin dijawab adalah "apakah yang benar-benar kita kirim ke manusia
+berperilaku lebih baik", dan 55 praktis tak pernah tercapai (T1).
+
+Tiga sifat yang sengaja dipasang:
+
+- **`INSUFFICIENT_SAMPLE` dilaporkan, bukan didiamkan** — dan tidak memicu
+  alert. Diam akan terbaca sebagai sehat, dan itu justru cara kegagalan yang
+  sedang diberantas.
+- **Verdict SELALU masuk log**, termasuk OK. Notifikasi bisa tertahan
+  cooldown; log tidak. "Monitor jalan tapi tidak menemukan apa-apa" harus
+  bisa dibedakan dari "monitor tidak jalan".
+- **Catatan lapor-saja ditulis di kode**, lengkap dengan alasannya. Godaan
+  berikutnya ("kalau sudah tahu terbalik, kenapa tidak dibalik otomatis?")
+  terdengar masuk akal dan salah — ukuran dasarnya belum tervalidasi
+  out-of-sample.
+
+### Duplikasi `twoProportionZ`, dikunci
+
+Ada di `scripts/falsify-ranking-score.mjs` (Node) dan `src/signalIntegrity.ts`
+(Worker). Batas TS/mjs membuat berbagi kode tidak sepadan untuk fungsi
+sependek itu.
+
+Keduanya dipatok ke **fixture referensi yang sama** (50/100 vs 75/100 →
+z = 3.7796447300922726). Diuji: menggeser HANYA implementasi TS membuat
+suite merah.
+
+Test lama di sisi mjs juga diperbaiki — ia menulis
+`0.25 / Math.sqrt(0.25/100 + 0.1875/100)`, yaitu menguji rumus dengan rumus
+yang sama, jadi akan tetap hijau meski KEDUA implementasi salah secara
+identik. Sekarang literal.
+
+### Uji mutasi
+
+| Mutasi | Tertangkap |
+|---|---|
+| gate dispatch digeser 50→45 sendirian | ya |
+| label bucket ditulis tangan lagi | ya |
+| penyebut metrik grid → `sampleSize` | ya |
+| rata-rata grid default 0, bukan null | ya |
+| `INSUFFICIENT_SAMPLE` dianggap layak alert | ya |
+| arah inversi dibalik (INVERTED ↔ OK) | ya |
+| backlog diperiksa sesudah fraksi NULL | ya |
+| `twoProportionZ` TS digeser sendirian | ya |
+
+Verifikasi: `npm run typecheck` bersih; `npm test` **101 file / 1045 test**.
+
+### Yang harus terlihat setelah deploy
+
+Run pertama monitor mestinya melaporkan `INSUFFICIENT_SAMPLE` di kedua cek —
+kolom grid baru terisi sejak 0017 di-deploy hari ini. Itu **bukti ia
+menghitung**, bukan diam. Kalau yang muncul justru `OK` di hari pertama,
+justru itu yang mencurigakan.
