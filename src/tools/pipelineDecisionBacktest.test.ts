@@ -10,6 +10,7 @@ import {
   sumAggregateGroups,
   evaluateGridOutcome,
   summarizeGridOutcomes,
+  summarizeGridOutcomesByScoreBucket,
   emptyBucket,
   evaluateDecisionForward,
   registerPipelineDecisionBacktestTools,
@@ -234,6 +235,60 @@ describe("evaluateGridOutcome", () => {
     expect(s.exitedRangeRate).toBeCloseTo(0.5, 10);
     expect(s.exitedAboveRate).toBeCloseTo(0.5, 10);
     expect(s.avgTimeInRangePct).toBeCloseTo(0.5, 10);
+  });
+});
+
+describe("summarizeGridOutcomesByScoreBucket (F1 -- uji falsifikasi)", () => {
+  // Helper lokal -- `ohlc` di describe("evaluateGridOutcome") tidak terjangkau
+  // dari sini (function scope-nya di dalam blok itu).
+  function candle(open: number, high: number, low: number, close: number): KlineTuple {
+    return [0, String(open), String(high), String(low), String(close), "1", 0, "0", 0, "0", "0", "0"];
+  }
+  const inRange = () => evaluateGridOutcome([candle(105, 106, 104, 105)], 100, 110)!;
+  const blownBelow = () => evaluateGridOutcome([candle(105, 106, 95, 96)], 100, 110)!;
+
+  it("memisahkan metrik grid menurut bucket skor baris asalnya", () => {
+    // Sengaja TERBALIK dari yang diharapkan formula: bucket skor TINGGI diisi
+    // grid yang jebol, bucket RENDAH diisi yang bertahan. Kalau fungsi ini
+    // diam-diam menggabung semua baris (bug pengelompokan), kedua bucket akan
+    // menghasilkan exitedRangeRate 0.5 dan test ini gagal.
+    const result = summarizeGridOutcomesByScoreBucket([
+      { scoreBucket: "lt_40", gridOutcome: inRange() },
+      { scoreBucket: "lt_40", gridOutcome: inRange() },
+      { scoreBucket: "gte_55", gridOutcome: blownBelow() },
+      { scoreBucket: "gte_55", gridOutcome: blownBelow() },
+    ]);
+
+    expect(result.lt_40?.sampleSize).toBe(2);
+    expect(result.lt_40?.exitedRangeRate).toBe(0);
+    expect(result.gte_55?.sampleSize).toBe(2);
+    expect(result.gte_55?.exitedRangeRate).toBe(1);
+    expect(result.gte_55?.exitedBelowRate).toBe(1);
+    // Bucket yang tidak punya satu pun baris -> null, BUKAN nol. Nol berarti
+    // "diukur, hasilnya 0%"; null berarti "tidak ada data" -- beda arti, dan
+    // tabel output menampilkannya sebagai "-".
+    expect(result["40_55"]).toBeNull();
+  });
+
+  it("membuang baris tanpa gridOutcome tanpa menggeser bucket lain", () => {
+    const result = summarizeGridOutcomesByScoreBucket([
+      { scoreBucket: "40_55", gridOutcome: null },
+      { scoreBucket: "40_55", gridOutcome: blownBelow() },
+      { scoreBucket: "lt_40", gridOutcome: null },
+    ]);
+
+    expect(result["40_55"]?.sampleSize).toBe(1);
+    expect(result["40_55"]?.exitedRangeRate).toBe(1);
+    // Semua baris lt_40 punya gridOutcome null -> tidak ada yang bisa
+    // diringkas, jadi null (bukan sampleSize 0 yang menyesatkan).
+    expect(result.lt_40).toBeNull();
+  });
+
+  it("mengembalikan ketiga bucket sebagai null saat input kosong", () => {
+    const result = summarizeGridOutcomesByScoreBucket([]);
+    expect(result.lt_40).toBeNull();
+    expect(result["40_55"]).toBeNull();
+    expect(result.gte_55).toBeNull();
   });
 });
 

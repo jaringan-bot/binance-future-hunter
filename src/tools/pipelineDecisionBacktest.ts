@@ -203,15 +203,17 @@ export function evaluateGridOutcome(
   };
 }
 
-/** Ringkasan metrik grid atas sampel detail -- rata-rata sederhana. */
-export function summarizeGridOutcomes(metrics: GridOutcomeMetrics[]): {
+export interface GridOutcomeSummary {
   sampleSize: number;
   exitedRangeRate: number;
   exitedAboveRate: number;
   exitedBelowRate: number;
   avgTimeInRangePct: number;
   avgCrossingRate: number;
-} | null {
+}
+
+/** Ringkasan metrik grid atas sampel detail -- rata-rata sederhana. */
+export function summarizeGridOutcomes(metrics: GridOutcomeMetrics[]): GridOutcomeSummary | null {
   if (metrics.length === 0) return null;
   const n = metrics.length;
   const mean = (pick: (m: GridOutcomeMetrics) => number) => metrics.reduce((a, m) => a + pick(m), 0) / n;
@@ -222,6 +224,49 @@ export function summarizeGridOutcomes(metrics: GridOutcomeMetrics[]): {
     exitedBelowRate: mean((m) => (m.exitedBelow ? 1 : 0)),
     avgTimeInRangePct: mean((m) => m.timeInRangePct),
     avgCrossingRate: mean((m) => m.crossingRate),
+  };
+}
+
+// ─────────────────────────────────────────────────────────────
+// F1 (2026-09-05) -- UJI FALSIFIKASI: metrik grid DIPECAH per bucket skor.
+//
+// Sebelumnya output tool ini punya dua tabel yang tidak pernah bertemu:
+//   byScoreBucket  -> per bucket skor, tapi metrik ARAH (win rate / return)
+//   gridOutcome    -> metrik GRID, tapi TIDAK dipecah per bucket
+// Jadi pertanyaan yang paling penting -- "apakah rankingScore memisahkan
+// grid yang bertahan di range dari yang jebol?" -- tidak bisa dijawab dari
+// output tool, padahal KEDUA bahannya sudah dihitung di fungsi yang sama.
+//
+// Fungsi ini menutup celah itu. Ia TIDAK menghitung metrik baru: cuma
+// mengelompokkan GridOutcomeMetrics yang sudah ada menurut scoreBucket
+// baris asalnya, lalu memanggil summarizeGridOutcomes() per kelompok.
+//
+// KETERBATASAN YANG WAJIB DIBACA BARENG ANGKANYA -- sampel detail diambil
+// sebagai "N baris TERBARU dalam rentang" (queryPipelineDecisionLog ORDER BY
+// run_at DESC). Satu tick entry-alert menulis puluhan baris sekaligus, jadi
+// limit<=80 dalam praktiknya = SATU sampai DUA tick. Baris di dalam satu
+// tick berbagi kondisi pasar yang sama, jadi mereka BUKAN observasi
+// independen: N=80 di sini jauh lebih lemah dari N=80 lintas waktu.
+// Untuk kesimpulan yang serius, jalankan beberapa rentang waktu terpisah
+// dan bandingkan, atau persist metrik grid ke D1 supaya agregat SQL bisa
+// menghitungnya atas seluruh rentang seperti byScoreBucket.
+// ─────────────────────────────────────────────────────────────
+export function summarizeGridOutcomesByScoreBucket(
+  entries: { scoreBucket: ScoreBucket; gridOutcome: GridOutcomeMetrics | null }[],
+): Record<ScoreBucket, GridOutcomeSummary | null> {
+  const groups: Record<ScoreBucket, GridOutcomeMetrics[]> = { lt_40: [], "40_55": [], gte_55: [] };
+  for (const entry of entries) {
+    if (entry.gridOutcome === null) continue;
+    const bucket = groups[entry.scoreBucket];
+    // scoreBucket datang dari scoreBucket(), jadi selalu salah satu dari
+    // tiga kunci -- guard ini murni jaring pengaman kalau tipe dilonggarkan.
+    if (bucket === undefined) continue;
+    bucket.push(entry.gridOutcome);
+  }
+  return {
+    lt_40: summarizeGridOutcomes(groups.lt_40),
+    "40_55": summarizeGridOutcomes(groups["40_55"]),
+    gte_55: summarizeGridOutcomes(groups.gte_55),
   };
 }
 
@@ -465,6 +510,9 @@ export function registerPipelineDecisionBacktestTools(server: McpServer): void {
         const gridSummary = summarizeGridOutcomes(
           evaluated.map((r) => r.gridOutcome).filter((g): g is GridOutcomeMetrics => g !== null),
         );
+        // F1: tabulasi silang metrik grid x bucket skor -- lihat komentar
+        // panjang di summarizeGridOutcomesByScoreBucket().
+        const gridByScoreBucket = summarizeGridOutcomesByScoreBucket(evaluated);
         const coveragePct = aggregates.rowsInRange
           ? (aggregates.rowsWithOutcome / aggregates.rowsInRange) * 100
           : 0;
@@ -509,6 +557,26 @@ export function registerPipelineDecisionBacktestTools(server: McpServer): void {
             )
             .row("Time-in-range (close)", `${(gridSummary.avgTimeInRangePct * 100).toFixed(1)}%`)
             .row("Crossing rate (proxy)", `${(gridSummary.avgCrossingRate * 100).toFixed(1)}% candle 5m`);
+
+          // F1: inilah tabel yang menjawab "apakah skor memisahkan grid yang
+          // bertahan dari yang jebol". Baca bareng peringatan korelasi
+          // intra-tick di note bawah -- N di sini bukan N independen.
+          builder.subheader("Metrik grid per bucket skor (sampel detail)").table(
+            ["Bucket", "N", "Keluar range", "  ke bawah", "Time-in-range", "Crossing rate"],
+            (["lt_40", "40_55", "gte_55"] as const).map((key) => {
+              const g = gridByScoreBucket[key];
+              return g === null
+                ? [key, "0", "-", "-", "-", "-"]
+                : [
+                    key,
+                    String(g.sampleSize),
+                    `${(g.exitedRangeRate * 100).toFixed(1)}%`,
+                    `${(g.exitedBelowRate * 100).toFixed(1)}%`,
+                    `${(g.avgTimeInRangePct * 100).toFixed(1)}%`,
+                    `${(g.avgCrossingRate * 100).toFixed(1)}%`,
+                  ];
+            }),
+          );
         }
 
         if (evaluated.length > 0) {
@@ -538,6 +606,10 @@ export function registerPipelineDecisionBacktestTools(server: McpServer): void {
             "DIREKONSTRUKSI dari lower/upper, bukan nilai yang dipersist. " +
             `"Net" = sesudah dikurangi fee_bps+slippage_bps di entry & exit (flat ${(execCostRoundTrip * 100).toFixed(3)}% round-trip), ` +
             "BUKAN replay order-book historis -- market impact per ukuran order tidak dimodelkan. Sample <20 = confidence rendah. " +
+            "Tabel 'Metrik grid per bucket skor' dihitung atas SAMPEL DETAIL saja, dan sampel itu diambil sebagai N baris " +
+            "TERBARU -- satu tick entry-alert menulis puluhan baris sekaligus, jadi limit<=80 biasanya cuma 1-2 tick. " +
+            "Baris satu tick berbagi kondisi pasar yang sama sehingga BUKAN observasi independen: perlakukan N di tabel itu " +
+            "sebagai jauh lebih kecil dari angkanya, dan bandingkan beberapa rentang waktu terpisah sebelum menyimpulkan. " +
             "Hasil ini TIDAK menulis ulang bobot ranking atau threshold 55.",
         );
 
@@ -554,6 +626,7 @@ export function registerPipelineDecisionBacktestTools(server: McpServer): void {
           .struct("byDecision", byDecision)
           .struct("byScoreBucket", byScore)
           .struct("gridOutcomeSummary", gridSummary)
+          .struct("gridOutcomeByScoreBucket", gridByScoreBucket)
           .struct(
             "rows",
             evaluated.slice(0, 15).map((r) => ({
