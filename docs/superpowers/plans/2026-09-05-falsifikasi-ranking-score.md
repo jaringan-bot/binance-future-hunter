@@ -828,3 +828,85 @@ Run pertama monitor mestinya melaporkan `INSUFFICIENT_SAMPLE` di kedua cek —
 kolom grid baru terisi sejak 0017 di-deploy hari ini. Itu **bukti ia
 menghitung**, bukan diam. Kalau yang muncul justru `OK` di hari pertama,
 justru itu yang mencurigakan.
+
+---
+
+## Bagian H — Deploy + verifikasi pasca-deploy (2026-09-05)
+
+Worker live `b3b9d110` (setelah `40cb33e9`; yang kedua membawa perbaikan
+struct output). Commit mendahului deploy kali ini.
+
+### H1 — Instrumentasi grid TERBUKTI BEKERJA
+
+498 baris punya kolom grid terisi, dari 23.991 baris ber-outcome. Angka itu
+konsisten: hanya baris yang di-backfill SESUDAH 0017 mendarat yang dapat
+kolom grid, dan backfill baru berjalan beberapa jam.
+
+Ini menjawab cek nomor satu dari rencana Fase 1 — `n_grid` tumbuh, bukan
+diam di nol. Kalau ia diam, `checkOutcomeBackfillHealth` mestinya berteriak
+`GRID_COLUMNS_DEAD`.
+
+### H2 — T8 langsung berbuah: pita gate 50 akhirnya terlihat
+
+Dengan bucket dipecah di 50, gradien SL-touch jadi jelas:
+
+| bucket | N | SL-touch 24h |
+|---|---|---|
+| lt_40 | 18.966 | 1,88% |
+| 40_50 | 4.964 | 4,25% |
+| **50_55** | **54** | **7,41%** |
+| gte_55 | 7 | 0% |
+
+Pita `50_55` — satu-satunya yang benar-benar memicu alert WATCH — punya
+tingkat SL-touch TERTINGGI, 4x lipat `lt_40`. Selama ini ia tersembunyi di
+dalam bucket `40_55` dan tidak pernah terukur terpisah. N=54 masih tipis,
+tapi arahnya konsisten dengan T3/T4.
+
+### H3 — Sinyal awal metrik grid: adverse di DUA sisi
+
+| bucket | N terukur | keluar ke BAWAH | crossing rate |
+|---|---|---|---|
+| lt_40 | 376 | 8,2% | 17,6% |
+| 40_50 | 114 | 14,9% | 12,1% |
+
+Dua hal sekaligus, dan keduanya melawan skor:
+
+- **keluar ke bawah 1,8x lebih sering** di bucket lebih tinggi — konsisten
+  dengan temuan SL-touch (SL berada di bawah batas grid)
+- **crossing rate LEBIH RENDAH** (12,1% vs 17,6%) — setup berskor lebih
+  tinggi juga lebih sedikit berosilasi, artinya lebih sedikit panen grid
+
+Kalau bertahan, ini memperluas temuan Bagian D: skor bukan cuma lebih sering
+menjebol, tapi juga lebih sedikit menghasilkan. Sisi rugi DAN sisi untung
+sama-sama memburuk seiring skor naik.
+
+**JANGAN diperlakukan sebagai temuan.** N=114 di satu bucket, dan seluruh
+baris berasal dari rentang ~1 hari, jadi ia satu rezim pasar. Dicatat sebagai
+sinyal awal yang HARUS diuji ulang setelah beberapa hari.
+
+### H4 — Uji out-of-sample masih terkunci
+
+Jendela pasca-deploy Stage 3: 4.520 baris, **80** punya outcome (1,8%).
+Bucket tinggi cuma n=7. Backlog ~4.440 baris terkuras pada laju bersih
+~4.900/hari, jadi sampel yang layak baru ada besok.
+
+Arah 80 baris itu kebetulan konsisten dengan temuan (lt_40 5,9% vs 40_50
+28,6% SL-touch), TAPI n=7 di satu sisi -- itu bukan replikasi dan tidak
+dilaporkan sebagai replikasi.
+
+### H5 — Cacat yang ketahuan SAAT verifikasi
+
+Metrik grid dari SQL semula cuma masuk tabel teks; `structuredContent` masih
+mengembalikan versi sampel-detail. Jadi konsumen programatik — termasuk
+verifikasi ini sendiri — tidak bisa melihat angka yang jadi tujuan seluruh
+migration 0017.
+
+Diperbaiki (`df35f2e`): `gridRatesByScoreBucket()` jadi satu sumber untuk
+tabel dan struct, dan `summarizeGridOutcomesByScoreBucket()` DIHAPUS —
+mempertahankan dua fungsi yang menjawab pertanyaan sama dengan kekuatan
+statistik berbeda adalah undangan salah baca, apalagi yang lemah memakai nama
+yang lebih menonjol.
+
+Pelajarannya: verifikasi pasca-deploy menemukan cacat yang seluruh suite test
+lokal tidak bisa melihat, karena yang salah bukan logikanya melainkan apa
+yang DIEKSPOS.
