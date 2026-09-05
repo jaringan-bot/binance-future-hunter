@@ -23,6 +23,7 @@ import {
   INFRA_NOTIFY_COOLDOWN_MS,
   D1_ROW_COUNT_ALERT_THRESHOLD,
   D1_CAPACITY_COOLDOWN_MS,
+  WORKER_PUBLIC_FAIL_STREAK,
 } from "./infraHealthCron.js";
 
 vi.mock("../d1Client.js", () => ({
@@ -326,29 +327,111 @@ describe("checkWorkerPublicHealth (Bromo)", () => {
     vi.clearAllMocks();
   });
 
-  it("alerts when the worker public URL returns non-ok", async () => {
-    vi.clearAllMocks();
-    const fetchMock = vi.fn().mockResolvedValue(new Response("x", { status: 503 }));
-    vi.mocked(kvConfig.getJson).mockResolvedValue(null);
+  const okResponse = () =>
+    new Response(JSON.stringify({ name: "binance-future-hunter" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
 
-    await checkWorkerPublicHealth(ENV, NOW, fetchMock as unknown as typeof fetch);
-
-    expect(telegram.sendTelegramAlert).toHaveBeenCalled();
-    expect(String(vi.mocked(telegram.sendTelegramAlert).mock.calls.at(-1)?.[1])).toContain("Bromo");
-  });
-
-  it("skips alert when body name matches", async () => {
-    vi.clearAllMocks();
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ name: "binance-future-hunter" }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }),
+  /** getJson dipanggil dua kali per run: state streak, lalu cooldown. */
+  function mockKv(state: unknown, lastNotifiedAt: number | null = null) {
+    vi.mocked(kvConfig.getJson).mockImplementation(async (key: string) =>
+      key === "bromo_worker_public_state" ? state : lastNotifiedAt === null ? null : { at: lastNotifiedAt },
     );
-    vi.mocked(kvConfig.getJson).mockResolvedValue(null);
+  }
+
+  it("TIDAK alert dari satu probe gagal -- itu blip, bukan outage", async () => {
+    // Probe jalan tiap tick lima-menitan dengan timeout 5 detik. Satu blip
+    // jaringan, cold start lambat, atau jendela propagasi deploy cukup untuk
+    // membuatnya gagal sekali. Alert dari satu kegagalan melatih orang
+    // mengabaikannya -- dan alert yang diabaikan sama tidak bergunanya dengan
+    // alert yang tidak ada.
+    vi.clearAllMocks();
+    const fetchMock = vi.fn().mockResolvedValue(new Response("x", { status: 404 }));
+    mockKv(null);
 
     await checkWorkerPublicHealth(ENV, NOW, fetchMock as unknown as typeof fetch);
 
     expect(telegram.sendTelegramAlert).not.toHaveBeenCalled();
+    // Streak-nya DICATAT, supaya probe berikutnya tahu ini kegagalan kedua.
+    expect(kvConfig.putJson).toHaveBeenCalledWith(
+      "bromo_worker_public_state",
+      { failStreak: 1, alerted: false },
+      expect.anything(),
+    );
+  });
+
+  it("alert pada kegagalan BERURUTAN yang ke-N", async () => {
+    vi.clearAllMocks();
+    const fetchMock = vi.fn().mockResolvedValue(new Response("x", { status: 503 }));
+    mockKv({ failStreak: WORKER_PUBLIC_FAIL_STREAK - 1, alerted: false });
+
+    await checkWorkerPublicHealth(ENV, NOW, fetchMock as unknown as typeof fetch);
+
+    const msg = String(vi.mocked(telegram.sendTelegramAlert).mock.calls.at(-1)?.[1]);
+    expect(msg).toContain("Bromo");
+    expect(msg).toContain("DOWN");
+    // Pesannya menyebut jumlah probe -- pembaca harus tahu ini bukan sekali gagal.
+    expect(msg).toContain("berturut-turut");
+    expect(kvConfig.putJson).toHaveBeenCalledWith(
+      "bromo_worker_public_state",
+      { failStreak: WORKER_PUBLIC_FAIL_STREAK, alerted: true },
+      expect.anything(),
+    );
+  });
+
+  it("mengirim PULIH saat sehat kembali sesudah pernah alert", async () => {
+    // Tanpa ini, diam sesudah alert punya dua arti yang tidak bisa dibedakan:
+    // sudah pulih, atau masih mati tapi sedang cooldown.
+    vi.clearAllMocks();
+    const fetchMock = vi.fn().mockResolvedValue(okResponse());
+    mockKv({ failStreak: 3, alerted: true });
+
+    await checkWorkerPublicHealth(ENV, NOW, fetchMock as unknown as typeof fetch);
+
+    expect(String(vi.mocked(telegram.sendTelegramAlert).mock.calls.at(-1)?.[1])).toContain("PULIH");
+    expect(kvConfig.putJson).toHaveBeenCalledWith(
+      "bromo_worker_public_state",
+      { failStreak: 0, alerted: false },
+      expect.anything(),
+    );
+  });
+
+  it("PULIH terkirim MESKI masih cooldown -- cooldown menahan keluhan, bukan kabar baik", async () => {
+    vi.clearAllMocks();
+    const fetchMock = vi.fn().mockResolvedValue(okResponse());
+    mockKv({ failStreak: 3, alerted: true }, NOW - 1000);
+
+    await checkWorkerPublicHealth(ENV, NOW, fetchMock as unknown as typeof fetch);
+
+    expect(String(vi.mocked(telegram.sendTelegramAlert).mock.calls.at(-1)?.[1])).toContain("PULIH");
+  });
+
+  it("DIAM saat sehat dan memang tidak pernah alert", async () => {
+    vi.clearAllMocks();
+    const fetchMock = vi.fn().mockResolvedValue(okResponse());
+    mockKv(null);
+
+    await checkWorkerPublicHealth(ENV, NOW, fetchMock as unknown as typeof fetch);
+
+    expect(telegram.sendTelegramAlert).not.toHaveBeenCalled();
+    // Tidak ada state yang perlu ditulis -- jangan boros write KV tiap 5 menit.
+    expect(kvConfig.putJson).not.toHaveBeenCalled();
+  });
+
+  it("body yang bukan worker ini dihitung gagal, bukan sehat", async () => {
+    // Route yang di-hijack proxy/parkir bisa balas 200 dengan body lain.
+    vi.clearAllMocks();
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ name: "sesuatu-yang-lain" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    mockKv({ failStreak: WORKER_PUBLIC_FAIL_STREAK - 1, alerted: false });
+
+    await checkWorkerPublicHealth(ENV, NOW, fetchMock as unknown as typeof fetch);
+
+    expect(String(vi.mocked(telegram.sendTelegramAlert).mock.calls.at(-1)?.[1])).toContain("body tidak mengandung");
   });
 });
