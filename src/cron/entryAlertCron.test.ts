@@ -4,7 +4,15 @@ import * as binanceProxy from "../binanceProxyClient.js";
 import * as d1Client from "../d1Client.js";
 import * as telegram from "../telegram.js";
 import * as kvConfig from "../kvConfig.js";
-import { checkEntryAlertForSymbol, runEntryAlertCheck, ENTRY_ALERT_PACING_DELAY_MS, hasCrossedTrigger } from "./entryAlertCron.js";
+import {
+  checkEntryAlertForSymbol,
+  runEntryAlertCheck,
+  ENTRY_ALERT_PACING_DELAY_MS,
+  hasCrossedTrigger,
+  classifyAlertHeads,
+  DEFAULT_ENABLED_HEADS,
+  parseEnabledHeads,
+} from "./entryAlertCron.js";
 import type { DcaActivePlanRow } from "../d1Client.js";
 import type { SymbolPipelineResult, TriplePipelineResult } from "../tools/fullPipeline.js";
 import type { DcaHeadResult } from "../dcaPipelineEngine.js";
@@ -221,7 +229,14 @@ const ENV = { TELEGRAM_BOT_TOKEN: "abc", TELEGRAM_CHAT_ID: "999" };
 describe("checkEntryAlertForSymbol", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(kvConfig.getJson).mockReset().mockResolvedValue(null);
+    // Head DCA/Traditional dimatikan by default sejak 2026-09-05. Test di
+    // blok ini menguji LOGIKA head-nya, bukan sakelarnya, jadi head
+    // dinyalakan eksplisit. Gerbang sakelarnya diuji terpisah.
+    vi.mocked(kvConfig.getJson)
+      .mockReset()
+      .mockImplementation(async (key: string) =>
+        key === "entry_alert:heads" ? { grid: true, dca: true, trad: true } : null,
+      );
     vi.mocked(kvConfig.putJson).mockReset().mockResolvedValue(undefined);
     vi.spyOn(console, "error").mockImplementation(() => {});
   });
@@ -599,6 +614,7 @@ describe("checkEntryAlertForSymbol", () => {
     });
   });
 
+
   it("fires again when the DCA head flips NO_TRADE->WATCH even though grid stayed TRADE inside its cooldown", async () => {
     vi.mocked(fullPipeline.runTriplePipelineForSymbol).mockResolvedValue(dual(tradeResult("BTCUSDT"), "DCA_WATCH"));
     vi.mocked(d1Client.getEntryAlertState).mockResolvedValue({
@@ -821,7 +837,14 @@ describe("checkEntryAlertForSymbol", () => {
 describe("runEntryAlertCheck", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(kvConfig.getJson).mockReset().mockResolvedValue(null);
+    // Head DCA/Traditional dimatikan by default sejak 2026-09-05. Test di
+    // blok ini menguji LOGIKA head-nya, bukan sakelarnya, jadi head
+    // dinyalakan eksplisit. Gerbang sakelarnya diuji terpisah.
+    vi.mocked(kvConfig.getJson)
+      .mockReset()
+      .mockImplementation(async (key: string) =>
+        key === "entry_alert:heads" ? { grid: true, dca: true, trad: true } : null,
+      );
     vi.mocked(kvConfig.putJson).mockReset().mockResolvedValue(undefined);
     vi.spyOn(console, "error").mockImplementation(() => {});
     // Default: premiumIndex sukses tapi kosong. exchangeInfo + ticker24hr
@@ -1080,7 +1103,14 @@ describe("runEntryAlertCheck", () => {
 describe("K1: legacy DCA engine adalah pre-gate wajib", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(kvConfig.getJson).mockReset().mockResolvedValue(null);
+    // Head DCA/Traditional dimatikan by default sejak 2026-09-05. Test di
+    // blok ini menguji LOGIKA head-nya, bukan sakelarnya, jadi head
+    // dinyalakan eksplisit. Gerbang sakelarnya diuji terpisah.
+    vi.mocked(kvConfig.getJson)
+      .mockReset()
+      .mockImplementation(async (key: string) =>
+        key === "entry_alert:heads" ? { grid: true, dca: true, trad: true } : null,
+      );
     vi.mocked(kvConfig.putJson).mockReset().mockResolvedValue(undefined);
     vi.spyOn(console, "error").mockImplementation(() => {});
     vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
@@ -1150,7 +1180,14 @@ describe("K1: legacy DCA engine adalah pre-gate wajib", () => {
 describe("K2: alert actionable wajib membawa parameter risiko", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(kvConfig.getJson).mockReset().mockResolvedValue(null);
+    // Head DCA/Traditional dimatikan by default sejak 2026-09-05. Test di
+    // blok ini menguji LOGIKA head-nya, bukan sakelarnya, jadi head
+    // dinyalakan eksplisit. Gerbang sakelarnya diuji terpisah.
+    vi.mocked(kvConfig.getJson)
+      .mockReset()
+      .mockImplementation(async (key: string) =>
+        key === "entry_alert:heads" ? { grid: true, dca: true, trad: true } : null,
+      );
     vi.mocked(kvConfig.putJson).mockReset().mockResolvedValue(undefined);
     vi.spyOn(console, "error").mockImplementation(() => {});
     vi.mocked(d1Client.getEntryAlertState).mockResolvedValue(null);
@@ -1258,7 +1295,14 @@ describe("hasCrossedTrigger", () => {
 describe("persistDcaActivePlan: state plan D1 dibaca balik, bukan cuma ditulis", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(kvConfig.getJson).mockReset().mockResolvedValue(null);
+    // Head DCA/Traditional dimatikan by default sejak 2026-09-05. Test di
+    // blok ini menguji LOGIKA head-nya, bukan sakelarnya, jadi head
+    // dinyalakan eksplisit. Gerbang sakelarnya diuji terpisah.
+    vi.mocked(kvConfig.getJson)
+      .mockReset()
+      .mockImplementation(async (key: string) =>
+        key === "entry_alert:heads" ? { grid: true, dca: true, trad: true } : null,
+      );
     vi.mocked(kvConfig.putJson).mockReset().mockResolvedValue(undefined);
     vi.mocked(d1Client.getDcaActivePlan).mockReset().mockResolvedValue(null);
     vi.mocked(d1Client.upsertDcaActivePlan).mockReset().mockResolvedValue(undefined);
@@ -1377,5 +1421,71 @@ describe("persistDcaActivePlan: state plan D1 dibaca balik, bukan cuma ditulis",
 
     expect(d1Client.deleteDcaActivePlan).toHaveBeenCalledWith("SOLUSDT", "LONG");
     expect(d1Client.upsertDcaActivePlan).not.toHaveBeenCalled();
+  });
+});
+
+describe("sakelar head alert (keputusan user 2026-09-05: DCA + Traditional dibisukan)", () => {
+  // Diuji LANGSUNG di chokepoint-nya. Versi pertama saya coba lewat
+  // checkEntryAlertForSymbol() dan test-nya lulus SECARA VAKUM -- uji mutasi
+  // membuktikannya: cek `enabled.dca` dihapus, test tetap hijau. Menguji
+  // fungsi keputusannya sendiri jauh lebih tajam daripada menembak seluruh
+  // pipa lewat mock yang tidak saya kuasai.
+  const dcaWorthy = {
+    grid: { decision: "NO_TRADE" },
+    dca: { decision: "DCA_TRADE", dcaBotConfig: { stopLossPrice: 1 } },
+    dcaSm: null,
+    trad: { decision: "TRAD_TRADE", bracket: { stopLoss: 1, recommendedLeverage: 5 } },
+  } as unknown as Parameters<typeof classifyAlertHeads>[0];
+
+  it("DEFAULT hanya grid -- DCA dan Traditional mati", () => {
+    expect(DEFAULT_ENABLED_HEADS).toEqual({ grid: true, dca: false, trad: false });
+  });
+
+  it("head yang dimatikan TIDAK on, meski hasilnya layak alert", () => {
+    const off = classifyAlertHeads(dcaWorthy, false, DEFAULT_ENABLED_HEADS);
+    expect(off.dcaOn).toBe(false);
+    expect(off.tradOn).toBe(false);
+    // grid NO_TRADE -> tidak layak, jadi seluruh symbol ini tidak alertable.
+    expect(off.alertable).toBe(false);
+  });
+
+  it("head yang SAMA menyala saat sakelarnya dinyalakan -- membuktikan fixture-nya memang layak alert", () => {
+    // Tanpa test pasangan ini, test di atas bisa hijau cuma karena
+    // fixture-nya kebetulan tidak layak alert sejak awal.
+    const on = classifyAlertHeads(dcaWorthy, false, { grid: true, dca: true, trad: true });
+    expect(on.dcaOn).toBe(true);
+    expect(on.tradOn).toBe(true);
+    expect(on.alertable).toBe(true);
+  });
+
+  it("gerbang GRID juga menggigit -- bukan cuma dua head yang sedang dimatikan", () => {
+    // Fixture di atas grid-nya NO_TRADE, jadi ia TIDAK bisa menguji jalur
+    // grid: `enabled.grid && isGridAlertWorthy(...)` bernilai false lewat
+    // kedua sisi. Uji mutasi membuktikannya -- menghapus `enabled.grid`
+    // tidak membuat satu test pun merah sampai kasus ini ditambahkan.
+    const gridWorthy = {
+      grid: { decision: "TRADE", rankingScore: 80, gridBotConfig: { stopLoss: 1 } },
+      dca: { decision: "DCA_NO_TRADE" },
+      dcaSm: null,
+      trad: { decision: "TRAD_NO_TRADE" },
+    } as unknown as Parameters<typeof classifyAlertHeads>[0];
+
+    expect(classifyAlertHeads(gridWorthy, false, { grid: true, dca: false, trad: false }).gridOn).toBe(true);
+    expect(classifyAlertHeads(gridWorthy, false, { grid: false, dca: false, trad: false }).gridOn).toBe(false);
+  });
+
+  it("KV kosong/rusak/bentuk asing -> DEFAULT, bukan 'semua nyala'", () => {
+    // Fail-safe-nya ke arah DIAM. Kalau bentuk tak dikenal diperlakukan
+    // sebagai semua-nyala, satu nilai KV salah ketik menghidupkan lagi head
+    // yang sudah diminta berhenti.
+    for (const raw of [null, undefined, 42, "grid", [], { grid: "yes" }]) {
+      expect(parseEnabledHeads(raw)).toEqual(DEFAULT_ENABLED_HEADS);
+    }
+  });
+
+  it("field per-head dibaca sendiri-sendiri, sisanya pakai default", () => {
+    expect(parseEnabledHeads({ dca: true })).toEqual({ grid: true, dca: true, trad: false });
+    expect(parseEnabledHeads({ grid: false })).toEqual({ grid: false, dca: false, trad: false });
+    expect(parseEnabledHeads({ grid: true, dca: true, trad: true })).toEqual({ grid: true, dca: true, trad: true });
   });
 });
